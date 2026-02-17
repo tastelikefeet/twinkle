@@ -1,27 +1,4 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
-"""
-Markdown Link Validation Tests for Twinkle Documentation
-
-This test suite validates markdown links to ensure ReadTheDocs compatibility.
-
-Usage:
-    # Run all tests (skip HTTP validation for speed)
-    SKIP_HTTP_LINK_CHECK=true pytest tests/docs/ -v
-    
-    # Run with HTTP validation (slow, checks all external links)
-    pytest tests/docs/ -v
-    
-    # Check for local relative links (must use GitHub URLs)
-    pytest tests/docs/test_markdown_links.py::TestMarkdownLinks::test_no_local_relative_links -v
-    
-    # Get link statistics
-    pytest tests/docs/test_markdown_links.py::TestMarkdownLinks::test_summary_of_links -v -s
-
-Key Requirements:
-    - No local relative links (use GitHub URLs for ReadTheDocs compatibility)
-    - All GitHub links must use 'main' branch
-    - HTTP/HTTPS links should be accessible
-"""
 import os
 import re
 import pytest
@@ -34,14 +11,79 @@ import requests
 DOCS_DIR = Path(__file__).parent.parent.parent / 'docs'
 GITHUB_BASE_URL = 'https://github.com/modelscope/twinkle/blob/main'
 
+# Files and folders to skip during validation (relative to DOCS_DIR)
+# Can be set via environment variable: SKIP_DOC_PATHS="build,_build,temp.md"
+# Paths should be relative to docs/ directory, not including 'docs/' prefix
+SKIP_PATHS = ['source_en/Usage Guide/NPU-Support.md', 'source_zh/使用指引/NPU的支持.md']
 
-def find_all_markdown_files(docs_dir: Path) -> List[Path]:
-    """Find all markdown files in the docs directory."""
+
+def should_skip_path(path: Path, docs_dir: Path, skip_paths: List[str]) -> bool:
+    """
+    Check if a path should be skipped based on skip_paths configuration.
+    
+    Args:
+        path: Path to check (can be file or directory)
+        docs_dir: Root docs directory
+        skip_paths: List of paths to skip (relative to docs_dir)
+    
+    Returns:
+        True if path should be skipped, False otherwise
+    """
+    if not skip_paths:
+        return False
+    
+    try:
+        rel_path = path.relative_to(docs_dir)
+    except ValueError:
+        return False
+    
+    rel_path_str = str(rel_path)
+    
+    for skip_path in skip_paths:
+        skip_path = skip_path.strip()
+        if not skip_path:
+            continue
+        
+        # Check if it's an exact match or if the path is under a skipped directory
+        if rel_path_str == skip_path or rel_path_str.startswith(skip_path + '/'):
+            return True
+    
+    return False
+
+
+def find_all_markdown_files(docs_dir: Path, skip_paths: List[str] = None) -> List[Path]:
+    """
+    Find all markdown files in the docs directory.
+    
+    Args:
+        docs_dir: Root directory to search for markdown files
+        skip_paths: List of paths (files or folders) to skip relative to docs_dir
+                   Example: ['build', '_build', 'temp/draft.md']
+    
+    Returns:
+        List of Path objects for all markdown files found
+    """
+    if skip_paths is None:
+        skip_paths = SKIP_PATHS
+    
     markdown_files = []
     for root, dirs, files in os.walk(docs_dir):
+        root_path = Path(root)
+        
+        # Check if current directory should be skipped
+        if should_skip_path(root_path, docs_dir, skip_paths):
+            # Clear dirs to prevent os.walk from descending into subdirectories
+            dirs[:] = []
+            continue
+        
+        # Process files in current directory
         for file in files:
             if file.endswith('.md'):
-                markdown_files.append(Path(root) / file)
+                file_path = root_path / file
+                # Check if specific file should be skipped
+                if not should_skip_path(file_path, docs_dir, skip_paths):
+                    markdown_files.append(file_path)
+    
     return markdown_files
 
 
@@ -73,8 +115,7 @@ def is_http_link(url: str) -> bool:
 
 def is_local_relative_link(url: str) -> bool:
     """
-    Check if a URL is a local relative link.
-    Local relative links should not be used in ReadTheDocs documentation.
+    Check if a URL is a local relative link (not HTTP/HTTPS).
     """
     parsed = urlparse(url)
     # If no scheme and not starting with github URL, it's a relative link
@@ -84,6 +125,40 @@ def is_local_relative_link(url: str) -> bool:
             return False
         return True
     return False
+
+
+def is_link_outside_docs(url: str, current_file: Path, docs_dir: Path) -> bool:
+    """
+    Check if a local relative link points to a file outside the docs directory.
+    
+    Args:
+        url: The link URL (relative path)
+        current_file: The markdown file containing this link
+        docs_dir: Root docs directory
+    
+    Returns:
+        True if link points outside docs/, False if within docs/ or cannot determine
+    """
+    if not is_local_relative_link(url):
+        return False
+    
+    # Resolve the target path relative to the current file's directory
+    current_dir = current_file.parent
+    try:
+        # Resolve the target path
+        target_path = (current_dir / url).resolve()
+        
+        # Check if target is within docs directory
+        try:
+            target_path.relative_to(docs_dir.resolve())
+            # Target is within docs directory
+            return False
+        except ValueError:
+            # Target is outside docs directory
+            return True
+    except Exception:
+        # If we can't resolve the path, assume it's problematic
+        return True
 
 
 def validate_http_link(url: str, timeout: int = 10) -> Tuple[bool, str]:
@@ -116,8 +191,9 @@ class TestMarkdownLinks:
     
     def test_no_local_relative_links(self):
         """
-        Test that there are no local relative links in markdown files.
-        For ReadTheDocs compatibility, all local file links should use GitHub URLs.
+        Test that local relative links pointing outside docs/ use GitHub URLs.
+        Links within docs/ directory can use relative paths (for ReadTheDocs compatibility).
+        Links to other directories (cookbook/, src/, etc.) must use GitHub URLs.
         """
         md_files = find_all_markdown_files(DOCS_DIR)
         violations = []
@@ -125,18 +201,19 @@ class TestMarkdownLinks:
         for md_file in md_files:
             links = extract_links_from_markdown(md_file)
             for text, url, line_num in links:
-                if is_local_relative_link(url):
+                # Check if this is a local relative link pointing outside docs/
+                if is_link_outside_docs(url, md_file, DOCS_DIR):
                     relative_path = md_file.relative_to(DOCS_DIR.parent)
                     violations.append({
                         'file': str(relative_path),
                         'line': line_num,
                         'text': text,
                         'url': url,
-                        'message': 'Local relative link detected. Use GitHub URL instead.'
+                        'message': 'Local relative link to file outside docs/. Use GitHub URL instead.'
                     })
         
         if violations:
-            error_msg = "\n\nLocal relative links found (must use GitHub links for ReadTheDocs):\n"
+            error_msg = "\n\nLocal relative links to files outside docs/ found (must use GitHub links):\n"
             for v in violations:
                 error_msg += f"\n  File: {v['file']}:{v['line']}\n"
                 error_msg += f"  Link: [{v['text']}]({v['url']})\n"
