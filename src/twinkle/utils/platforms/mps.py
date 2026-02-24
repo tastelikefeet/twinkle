@@ -2,6 +2,7 @@
 import platform
 import subprocess
 from functools import lru_cache
+
 from .base import Platform
 
 

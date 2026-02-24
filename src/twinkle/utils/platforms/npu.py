@@ -5,8 +5,8 @@ import re
 import socket
 import subprocess
 from typing import Optional
-from .base import Platform
 
+from .base import Platform
 
 # ref: https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/maintenref/envvar/envref_07_0144.html
 # HCCL base port anchor. HCCL derives internal listen/connect ports from this base.

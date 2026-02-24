@@ -24,7 +24,7 @@ class Platform(ABC):
         if platform is None:
             from .mps import is_mps_available
             if shutil.which('npu-smi'):
-                from .npu import ensure_npu_backend, NPU
+                from .npu import NPU, ensure_npu_backend
                 ensure_npu_backend()
                 return NPU
             elif shutil.which('nvidia-smi'):
@@ -40,7 +40,7 @@ class Platform(ABC):
             from .gpu import GPU
             return GPU
         elif platform.upper() == 'NPU':
-            from .npu import ensure_npu_backend, NPU
+            from .npu import NPU, ensure_npu_backend
             ensure_npu_backend()
             return NPU
         elif platform.upper() == 'MPS':
