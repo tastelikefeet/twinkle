@@ -1213,7 +1213,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         torch.save(cpu_state_dict, checkpoint_path)
 
     def _save_tokenizer(self, output_dir: str, **kwargs):
-        from twinkle.utils.platform import is_last_rank
+        from twinkle.utils import is_last_rank
         if not is_last_rank():
             return
 

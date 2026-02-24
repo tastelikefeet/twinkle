@@ -114,7 +114,7 @@ def stateless_init_process_group(
     master_port: int,
     rank: int,
     world_size: int,
-    device: int | 'torch.device' = None,
+    device: Union[int, 'torch.device'] = None,
     backend: str = 'nccl',
     listen_socket: socket.socket = None,
     listen_fd: int = None,

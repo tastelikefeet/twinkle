@@ -19,7 +19,7 @@ from twinkle.hub import HubOperation
 from twinkle.model.megatron.args import get_args  # Use twinkle's get_args
 from twinkle.utils import (MxFp4Dequantizer, SafetensorLazyLoader, StreamingSafetensorSaver, deep_getattr, get_logger,
                            get_modules_to_not_convert, get_multimodal_target_regex, requires)
-from twinkle.utils.platform import is_last_rank
+from twinkle.utils import is_last_rank
 
 logger = get_logger()
 
