@@ -36,3 +36,7 @@ class MPS(Platform):
     @staticmethod
     def device_backend(platform: str = None):
         return 'gloo'
+
+    @staticmethod
+    def get_vllm_device_uuid(device_id: int = 0) -> str:
+        raise NotImplementedError

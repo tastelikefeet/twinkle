@@ -133,6 +133,6 @@ class Platform(ABC):
         return platform.device_backend()
 
     @staticmethod
-    def get_vllm_device_uuid(device_id: int = 0) -> str:
-        from vllm.platforms import current_platform
-        return current_platform.get_device_uuid(device_id)
+    def get_vllm_device_uuid(device_id: int = 0, platform=None) -> str:
+        platform = Platform.get_platform(platform)
+        return platform.get_vllm_device_uuid(device_id)
