@@ -1344,7 +1344,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
 
     @remote_function()
     def apply_patch(self, patch_cls: Union[Patch, Type[Patch], str], **kwargs):
-        apply_patch(self, patch_cls, **kwargs)
+        apply_patch(self.model, patch_cls, **kwargs)
 
     @remote_function(dispatch='all')
     def set_template(self, template_cls: Union[Template, Type[Template], str], **kwargs):
