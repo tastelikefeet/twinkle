@@ -122,7 +122,7 @@ class InputProcessor:
                 # Calculate required divisor based on parallelism settings
                 if cp_size > 1:
                     divisor = 2 * cp_size
-                elif self.device_mesh.sequence_parallel and tp_size > 1:
+                elif self.device_mesh is not None and self.device_mesh.sequence_parallel and tp_size > 1:
                     divisor = tp_size
                 else:
                     divisor = 1
@@ -150,7 +150,7 @@ class InputProcessor:
                         result.append(pad_cp_inputs(_value_slice, padding_value=self.padding_map[key]))
                     value = torch.cat(result, dim=1)
                     _input[key] = value
-            elif self.device_mesh.sequence_parallel and tp_size > 1:
+            elif self.device_mesh is not None and self.device_mesh.sequence_parallel and tp_size > 1:
                 # Sequence parallel without CP still requires seq_len % TP == 0
                 for key in ['input_ids', 'position_ids', 'attention_mask', 'labels']:
                     value = _input.get(key)
