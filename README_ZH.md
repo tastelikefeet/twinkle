@@ -67,9 +67,11 @@ pip install -e .
 | twinkle 客户端微调           | megatron        | [脚本](cookbook/client/twinkle/megatron)           |
 | twinkle 客户端微调           | transformer     | [脚本](cookbook/client/twinkle/transformer)        |
 
+Twinkle✨支持相同的算法接口运行在单GPU、torchrun多机、Ray、Client等各场景下。其算法过程是外露的，非常便于修改和调试。完整的框架介绍请查看[快速开始](docs/source_zh/使用指引/快速开始.md)
+
 ## 更新日志
 
-- 🎉2026-02-13 Twinkle✨ 初始版本发布，包括对文本模型的 SFT/PT/RL 支持以及在 [ModelScope](https://modelscope.cn) 上的无服务器训练能力。
+🎉2026-02-13 Twinkle✨ 初始版本发布，支持文本模型的SFT/PT/RL训练。我们还通过兼容Tinker的API，在魔搭社区上提供了无服务器训练功能。
 
 ## ModelScope 的训练服务
 
@@ -88,8 +90,8 @@ pip install -e .
 
 随着新模型的发布，我们将添加对更多模型的支持。下表列出了 Twinkle✨ 框架当前支持的模型。
 
->[!注意]
-> 对于通过 `base_url=https://www.modelscope.cn/twinkle` 访问的无服务器训练服务，目前一次只支持一个训练基座，当前是 [Qwen3-30B-A3B-Instruct-2507](https://modelscope.cn/models/Qwen/Qwen3-30B-A3B-Instruct-2507)。
+>[!Note]
+> 通过 `base_url=https://www.modelscope.cn/twinkle` 访问的无服务器训练服务，目前是通过兼容Tinker的API提供的。我们将陆续推出同时支持Tinker API和完整Twinkle✨原生 API的服务。无服务器端点每次由一个训练基座支持，目前使用的是[Qwen3-30B-A3B-Instruct-2507](https://modelscope.cn/models/Qwen/Qwen3-30B-A3B-Instruct-2507)。
 
 
 | 模型类型          | [ModelScope](https://modelscope.cn) 上的模型 ID                                                                          | 要求             | Megatron 支持 | HF 模型 ID                                                                                                |
@@ -180,7 +182,7 @@ if __name__ == '__main__':
     train()
 ```
 
-### 使用类 Tinker API
+### 使用类 Tinker API实现无服务器式训练
 
 ```python
 import os
