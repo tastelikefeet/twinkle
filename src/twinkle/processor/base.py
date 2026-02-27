@@ -109,8 +109,8 @@ class InputProcessor:
             # Pad sequence for parallel compatibility
             # 1. For CP > 1: Megatron's RoPE requires seq_len % (2 * cp_size) == 0
             # 2. For sequence_parallel with TP > 1: seq_len must be divisible by TP size
-            cp_size = self.device_mesh.cp_world_size
-            tp_size = self.device_mesh.tp_world_size
+            cp_size = self.device_mesh.cp_world_size if self.device_mesh is not None else 1
+            tp_size = self.device_mesh.tp_world_size if self.device_mesh is not None else 1
             position_ids = _input.get('position_ids')
 
             def pad_cp_inputs(input_tensor: torch.Tensor, padding_value: int) -> torch.Tensor:
