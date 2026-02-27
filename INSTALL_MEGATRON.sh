@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Installation script - Install deep learning dependencies
-# Usage: chmod +x install.sh && ./install.sh
+# Installation script - We offer a script to install the megatron and vllm related dependencies,
+# which always occur error
 
 set -e  # Exit immediately on error
 
