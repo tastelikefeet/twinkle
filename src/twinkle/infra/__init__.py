@@ -5,7 +5,7 @@ import numpy as np
 import os
 from typing import Any, Callable, List, Literal, Optional, TypeVar, Union
 
-from twinkle.utils import DeviceGroup, DeviceMesh, Platform, check_unsafe, framework_util, requires, get_logger
+from twinkle.utils import DeviceGroup, DeviceMesh, Platform, check_unsafe, framework_util, get_logger, requires
 
 logger = get_logger()
 
@@ -440,7 +440,8 @@ def remote_class(execute: Literal['first', 'peer', 'all'] = 'all'):
                 instance_id = kwargs.pop('instance_id', '') + f'{caller_file}_{caller_line}'
                 remote_group = kwargs.get('remote_group')
                 if remote_group is None:
-                    logger.info(f'⚠️ Using local initialization of class: {cls}, please make sure the class does not need remote execution.')
+                    logger.info(f'⚠️ Using local initialization of class: {cls}, please make sure the class '
+                                'does not need remote execution.')
                 # If cannot trust_remote_code, no callable and type can be used.
                 check_unsafe(*args, **kwargs)
 
