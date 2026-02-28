@@ -369,6 +369,11 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
         optimizer_config.inputs = inputs
         optimizer_config.outputs = outputs
         optimizer_config.loss_value = outputs.get('aux_loss', 0)
+        if labels is not None:
+            loss_mask = (labels != -100).bool()
+            masked_labels = labels.clone()
+            masked_labels[~loss_mask] = 0
+            outputs['logps'] = selective_log_softmax(outputs['logits'], masked_labels)
         return outputs
 
     @remote_function(dispatch='slice_dp', collect='flatten')
@@ -412,7 +417,10 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
         optimizer_config.outputs = outputs
         optimizer_config.loss_value = outputs.get('aux_loss', 0)
         if labels is not None:
-            outputs['logps'] = selective_log_softmax(outputs['logits'], labels)
+            loss_mask = (labels != -100).bool()
+            masked_labels = labels.clone()
+            masked_labels[~loss_mask] = 0
+            outputs['logps'] = selective_log_softmax(outputs['logits'], masked_labels)
         return outputs
 
     @remote_function(collect='mean')
@@ -434,10 +442,9 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
         outputs = optimizer_config.outputs
         assert inputs is not None and outputs is not None, 'Cannot calculate loss of empty inputs and outputs'
         result = loss_instance(inputs, outputs, **kwargs)
-        if isinstance(result, tuple):
-            loss_value, counts = result
-        else:
-            loss_value = result
+        loss_value = result['loss']
+        counts = result['num_tokens']
+        if not counts:
             counts = torch.tensor(0, device=loss_value.device)
         optimizer_config = self.optimizer_group[adapter_name]
         optimizer_config.num_tokens += counts.item()

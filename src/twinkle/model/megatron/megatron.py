@@ -195,7 +195,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         self._seed = kwargs.pop('seed', None) or int(os.environ.get('TWINKLE_SEED', 42))
         self._default_tokenizer = None
         self.use_distributed_optimizer = kwargs.get('use_distributed_optimizer', True)
-        self.variable_seq_lengths = kwargs.get('variable_seq_lengths', True)
+        self.variable_seq_lengths = kwargs.get('variable_seq_lengths', False)
         torch_util.set_device()
 
         self.strategy = MegatronStrategy(self.device_mesh, mixed_precision=mixed_precision, **kwargs)
@@ -422,10 +422,9 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
             current_kwargs = loss_extra_kwargs_per_mb[mb_idx % len(loss_extra_kwargs_per_mb)]
             outputs = ModelOutput(logits=output_tensor)
             result = loss_instance(inputs, outputs, **current_kwargs)
-            if isinstance(result, tuple):
-                losses, counts = result
-            else:
-                losses = result
+            losses = result['loss']
+            counts = result['num_tokens']
+            if not counts:
                 counts = torch.tensor(1, device=losses.device)
             return self.strategy.gather_loss_for_cp(losses, counts, output_tensor, logps)
 
@@ -437,7 +436,10 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
             output_tensor = model(**batch)
             batch['labels'] = labels
             if labels is not None:
-                logps = selective_log_softmax(output_tensor, labels)
+                loss_mask = (labels != -100).bool()
+                masked_labels = labels.clone()
+                masked_labels[~loss_mask] = 0
+                logps = selective_log_softmax(output_tensor, masked_labels)
             return output_tensor, partial(post_loss_function, inputs=batch, logps=logps)
 
         # Get Megatron's forward-backward function
@@ -512,12 +514,14 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
             torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG, group=dp_cp_group)
 
         optimizer_config.inputs = inputs
-        if len({logit.shape[0] for logit in logits}) == 1:
+        if len({logit.shape[1] for logit in logits}) == 1:
             logits = torch.cat(logits, dim=0)
-        if len({_logps.shape[0] for _logps in logps}) == 1:
+        if len({_logps.shape[1] for _logps in logps}) == 1:
             logps = torch.cat(logps, dim=0)
         if isinstance(loss, torch.Tensor):
             loss = loss.detach().cpu().float().numpy()
+        if not forward_only:
+            optimizer_config.outputs = ModelOutput(logits=None, loss=loss, logps=logps)
         return ModelOutput(logits=None, loss=loss, logps=logps)
 
     @remote_function(dispatch='all')
