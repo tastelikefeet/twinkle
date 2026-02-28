@@ -742,6 +742,14 @@ if __name__ == '__main__':
 Concurrent with the open-source release of the Twinkle framework, we also provide a hosted Training as a Service (TaaS) powered by ModelScope's backend services. Developers can experience Twinkle's training API for free through this service.
 This service shares the same code as the Tinker API section described above. The only difference is that the Endpoint and Token need to use the official ModelScope information. For details on how to use the official service, please refer to the detailed description in [Training Service](./Train-as-a-Service.md).
 
+## Using Hugging Face models
+
+Switch the prefix.
+
+```text
+ms://Qwen/Qwen3-4B -> hf://Qwen/Qwen3-4B
+```
+
 ## 🛠️ Twinkle✨ Modular Ecosystem
 
 <div align="center">
