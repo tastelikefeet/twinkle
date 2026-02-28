@@ -1,6 +1,6 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
-from .base import Loss
 from twinkle.data_format import LossOutput
+from .base import Loss
 
 
 class MSELoss(Loss):

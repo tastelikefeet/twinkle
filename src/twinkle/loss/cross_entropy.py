@@ -1,7 +1,7 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
-from .base import Loss
 from twinkle.data_format import LossOutput
 from twinkle.utils import selective_log_softmax
+from .base import Loss
 
 
 class CrossEntropyLoss(Loss):

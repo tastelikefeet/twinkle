@@ -2,8 +2,8 @@
 import math
 from typing import Any
 
-from .base import Loss
 from ..data_format import LossOutput
+from .base import Loss
 
 
 class ChunkedCrossEntropyLoss(Loss):

@@ -1,5 +1,5 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
-from twinkle.data_format import InputFeature, ModelOutput, LossOutput
+from twinkle.data_format import InputFeature, LossOutput, ModelOutput
 
 
 class Loss:
