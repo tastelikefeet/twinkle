@@ -123,8 +123,7 @@ class TwinkleCompatModelBase:
             logits = [None] * len(inputs)
         for idx, (feature, logit) in enumerate(zip(inputs, logits)):
             # Ensure 1D shape and correct device to avoid dimension mismatch and device errors
-            labels = feature.loss_fn_inputs['target_tokens'].to_torch().long().view(-1).to(
-                device)  # shape (seq_len,)
+            labels = feature.loss_fn_inputs['target_tokens'].to_torch().long().view(-1).to(device)  # shape (seq_len,)
             weights = feature.loss_fn_inputs['weights'].to_torch().view(-1).to(device)  # shape (seq_len,)
 
             # Slice logits to match the sequence length of labels
