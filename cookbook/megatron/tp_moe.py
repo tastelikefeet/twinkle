@@ -75,7 +75,7 @@ def train():
             if loss_metric > float(metrics['loss']):
                 model.save(f'checkpoint-{step}')
                 loss_metric = float(metrics['loss'])
-    model.save(f'last-checkpoint')
+    model.save('last-checkpoint', merge_lora=True)
 
 
 if __name__ == '__main__':
