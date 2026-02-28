@@ -119,6 +119,8 @@ Twinkle✨支持相同的算法接口运行在单GPU、torchrun多机、Ray、Cl
 
 ## 示例代码
 
+下面列出了示例代码的一部分能力。完整的训练能力介绍请参考[快速开始](docs/source_zh/使用指引/快速开始.md)以及[cookbook](cookbook)。
+
 ### 使用 Ray 训练
 
 ```python
@@ -195,13 +197,13 @@ from twinkle.preprocessor import SelfCognitionProcessor
 from twinkle.server.tinker.common import input_feature_to_datum
 
 base_model = 'ms://Qwen/Qwen3-30B-A3B-Instruct-2507'
-base_url='http://www.modelscope.cn/twinkle'
-api_key=os.environ.get('MODELSCOPE_TOKEN')
+base_url='your-base-url'
+api_key='your-api-key'
 
 # Use twinkle dataset to load the data
 dataset = Dataset(dataset_meta=DatasetMeta('ms://swift/self-cognition', data_slice=range(500)))
 dataset.set_template('Template', model_id=base_model, max_length=256)
-dataset.map(SelfCognitionProcessor('twinkle Model', 'twinkle Team'), load_from_cache_file=False)
+dataset.map(SelfCognitionProcessor('twinkle Model', 'ModelScope Team'), load_from_cache_file=False)
 dataset.encode(batched=True, load_from_cache_file=False)
 dataloader = DataLoader(dataset=dataset, batch_size=8)
 
