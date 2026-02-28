@@ -46,7 +46,7 @@ def train():
 
     dataset = PackingDataset(dataset_meta)
     dataset.map(SelfCognitionProcessor(model_name='Twinkle Model', model_author='ModelScope Community'))
-    dataset.set_template('Template', model_id='ms://Qwen/Qwen3-8B', max_length=512)
+    dataset.set_template('Template', model_id='ms://Qwen/Qwen3-4B', max_length=512)
     dataset.encode()
     dataset.pack_dataset()
 
@@ -128,7 +128,6 @@ def train():
 
 if __name__ == '__main__':
     train()
-
 ```
 
 In this training code, we constructed a dataset and loaded the Qwen/Qwen3-4B model, used LoRA with the all-linear approach, and completed one training run. In the logs, you can observe the process of loss gradually converging.
@@ -159,7 +158,7 @@ def train():
     # 1000 samples
     dataset = Dataset(dataset_meta=DatasetMeta('ms://swift/self-cognition', data_slice=range(1000)))
     # Set template to prepare encoding
-    dataset.set_template('Template', model_id='ms://Qwen/Qwen2.5-7B-Instruct')
+    dataset.set_template('Template', model_id='ms://Qwen/Qwen3-4B')
     # Preprocess the dataset to standard format
     dataset.map(SelfCognitionProcessor('twinkle LLM', 'ModelScope Community'))
     # Encode dataset
@@ -167,7 +166,7 @@ def train():
     # Global batch size = 8, for GPUs, so 1 sample per GPU
     dataloader = DataLoader(dataset=dataset, batch_size=8)
     # Use a TransformersModel
-    model = TransformersModel(model_id='ms://Qwen/Qwen2.5-7B-Instruct')
+    model = TransformersModel(model_id='Qwen/Qwen3-4B')
 
     lora_config = LoraConfig(r=8, lora_alpha=32, target_modules='all-linear')
 
@@ -232,7 +231,7 @@ from twinkle.reward import GSM8KAccuracyReward, GSM8KFormatReward
 from twinkle.sampler import vLLMSampler
 from twinkle.template import Template
 
-MODEL_ID = os.environ.get('MODEL_ID', 'ms://Qwen/Qwen3.5-35B-A3B')
+MODEL_ID = os.environ.get('MODEL_ID', 'ms://Qwen/Qwen3-4B')
 MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 4))
 SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS',4))
 NUM_GPUS = MODEL_GPUS + SAMPLER_GPUS
@@ -438,7 +437,7 @@ from twinkle_client.sampler import vLLMSampler
 logger = get_logger()
 
 # ========== Configuration ==========
-MODEL_ID = 'ms://Qwen/Qwen2.5-3B-Instruct'
+MODEL_ID = 'ms://Qwen/Qwen3-4B'
 NUM_GENERATIONS = 4
 MAX_NEW_TOKENS = 1024
 LEARNING_RATE = 1e-5
@@ -683,7 +682,7 @@ from twinkle.preprocessor import SelfCognitionProcessor
 from twinkle.server.tinker.common import input_feature_to_datum
 
 # The base model to fine-tune / evaluate
-base_model = 'Qwen/Qwen3.5-35B-A3B'
+base_model = 'ms://Qwen/Qwen3-4B'
 
 
 def train():
@@ -706,7 +705,7 @@ def train():
 
     # Step 2: Initialize the training client
     # Connect to the Twinkle server running locally
-    service_client = ServiceClient(base_url='https://www.modelscope.cn/twinkle', api_key='your-modelscope-api-key')
+    service_client = ServiceClient(base_url='http://localhost:8000', api_key='your-api-key')
     # Create a LoRA training client for the base model (rank=16 for the LoRA adapter)
     training_client = service_client.create_lora_training_client(base_model=base_model, rank=16)
 
@@ -867,10 +866,10 @@ DeviceGroup: Define how many resource groups are needed for this training sessio
 
 ```python
 from twinkle.model import TransformersModel
-model = TransformersModel(model_id='ms://Qwen/Qwen2.5-7B-Instruct', remote_group='default', device_mesh=device_mesh)
+model = TransformersModel(model_id='Qwen/Qwen3-4B', remote_group='default', device_mesh=device_mesh)
 # Or
 from twinkle.model import MegatronModel
-model = MegatronModel(model_id='ms://Qwen/Qwen2.5-7B-Instruct', remote_group='default', device_mesh=device_mesh)
+model = MegatronModel(model_id='Qwen/Qwen3-4B', remote_group='default', device_mesh=device_mesh)
 ```
 
 DeviceMesh specifies the topology of components like models within the resource group. It can be understood as how to perform parallelization. This affects a series of framework decisions, such as data acquisition, data consumption, data return, etc.
@@ -896,7 +895,7 @@ def train():
     # 1000 samples
     dataset = Dataset(dataset_meta=DatasetMeta('ms://swift/self-cognition', data_slice=range(1000)))
     # Set template to prepare encoding
-    dataset.set_template('Template', model_id='ms://Qwen/Qwen2.5-7B-Instruct')
+    dataset.set_template('Template', model_id='Qwen/Qwen3-4B')
     # Preprocess the dataset to standard format
     dataset.map(SelfCognitionProcessor('twinkle LLM', 'ModelScope Community'))
     # Encode dataset
@@ -904,7 +903,7 @@ def train():
     # Global batch size = 8, for GPUs, so 1 sample per GPU
     dataloader = DataLoader(dataset=dataset, batch_size=8, min_batch_size=8)
     # Use a TransformersModel
-    model = TransformersModel(model_id='ms://Qwen/Qwen2.5-7B-Instruct', remote_group='default')
+    model = TransformersModel(model_id='Qwen/Qwen3-4B', remote_group='default')
 
     lora_config = LoraConfig(
         r=8,
@@ -944,54 +943,54 @@ python3 train.py
 
 ## Supported Large Language Models List
 
-| Model Type          | Model ID Example                                                                                           | Requires             | Support Megatron | HF Model ID                                                                                                |
-| ------------------- | ---------------------------------------------------------------------------------------------------------- | -------------------- | ---------------- | ---------------------------------------------------------------------------------------------------------- |
-| qwen2 series        | [Qwen/Qwen2-0.5B-Instruct](https://modelscope.cn/models/Qwen/Qwen2-0.5B-Instruct)                             | transformers>=4.37   | ✔               | [Qwen/Qwen2-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2-0.5B-Instruct)                                   |
-|                     | [Qwen/Qwen2-72B-Instruct](https://modelscope.cn/models/Qwen/Qwen2-72B-Instruct)                               | transformers>=4.37   | ✔               | [Qwen/Qwen2-72B-Instruct](https://huggingface.co/Qwen/Qwen2-72B-Instruct)                                     |
-|                     | [Qwen/Qwen2-1.5B](https://modelscope.cn/models/Qwen/Qwen2-1.5B)                                               | transformers>=4.37   | ✔               | [Qwen/Qwen2-1.5B](https://huggingface.co/Qwen/Qwen2-1.5B)                                                     |
-|                     | [Qwen/Qwen2-7B](https://modelscope.cn/models/Qwen/Qwen2-7B)                                                   | transformers>=4.37   | ✔               | [Qwen/Qwen2-7B](https://huggingface.co/Qwen/Qwen2-7B)                                                         |
-|                     | [Qwen/Qwen2-72B](https://modelscope.cn/models/Qwen/Qwen2-72B)                                                 | transformers>=4.37   | ✔               | [Qwen/Qwen2-72B](https://huggingface.co/Qwen/Qwen2-72B)                                                       |
-|                     | [Qwen/Qwen2.5-0.5B-Instruct](https://modelscope.cn/models/Qwen/Qwen2.5-0.5B-Instruct)                         | transformers>=4.37   | ✔               | [Qwen/Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct)                               |
-|                     | [Qwen/Qwen2.5-1.5B-Instruct](https://modelscope.cn/models/Qwen/Qwen2.5-1.5B-Instruct)                         | transformers>=4.37   | ✔               | [Qwen/Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct)                               |
-|                     | [Qwen/Qwen2.5-72B-Instruct](https://modelscope.cn/models/Qwen/Qwen2.5-72B-Instruct)                           | transformers>=4.37   | ✔               | [Qwen/Qwen2.5-72B-Instruct](https://huggingface.co/Qwen/Qwen2.5-72B-Instruct)                                 |
-|                     | [Qwen/Qwen2.5-0.5B](https://modelscope.cn/models/Qwen/Qwen2.5-0.5B)                                           | transformers>=4.37   | ✔               | [Qwen/Qwen2.5-0.5B](https://huggingface.co/Qwen/Qwen2.5-0.5B)                                                 |
-|                     | [Qwen/Qwen2.5-32B](https://modelscope.cn/models/Qwen/Qwen2.5-32B)                                             | transformers>=4.37   | ✔               | [Qwen/Qwen2.5-32B](https://huggingface.co/Qwen/Qwen2.5-32B)                                                   |
-| qwen2_moe series    | [Qwen/Qwen1.5-MoE-A2.7B-Chat](https://modelscope.cn/models/Qwen/Qwen1.5-MoE-A2.7B-Chat)                       | transformers>=4.40   | ✔               | [Qwen/Qwen1.5-MoE-A2.7B-Chat](https://huggingface.co/Qwen/Qwen1.5-MoE-A2.7B-Chat)                             |
-|                     | [Qwen/Qwen1.5-MoE-A2.7B](https://modelscope.cn/models/Qwen/Qwen1.5-MoE-A2.7B)                                 | transformers>=4.40   | ✔               | [Qwen/Qwen1.5-MoE-A2.7B](https://huggingface.co/Qwen/Qwen1.5-MoE-A2.7B)                                       |
-| qwen3 series        | [Qwen/Qwen3-0.6B-Base](https://modelscope.cn/models/Qwen/Qwen3-0.6B-Base)                                     | transformers>=4.51   | ✔               | [Qwen/Qwen3-0.6B-Base](https://huggingface.co/Qwen/Qwen3-0.6B-Base)                                           |
-|                     | [Qwen/Qwen3-14B-Base](https://modelscope.cn/models/Qwen/Qwen3-14B-Base)                                       | transformers>=4.51   | ✔               | [Qwen/Qwen3-14B-Base](https://huggingface.co/Qwen/Qwen3-14B-Base)                                             |
-|                     | [Qwen/Qwen3-0.6B](https://modelscope.cn/models/Qwen/Qwen3-0.6B)                                               | transformers>=4.51   | ✔               | [Qwen/Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B)                                                     |
-|                     | [Qwen/Qwen3-1.7B](https://modelscope.cn/models/Qwen/Qwen3-1.7B)                                               | transformers>=4.51   | ✔               | [Qwen/Qwen3-1.7B](https://huggingface.co/Qwen/Qwen3-1.7B)                                                     |
-|                     | [Qwen/Qwen3-32B](https://modelscope.cn/models/Qwen/Qwen2.5-32B)                                               | transformers>=4.51   | ✔               | [Qwen/Qwen3-32B](https://huggingface.co/Qwen/Qwen3-32B)                                                       |
-| qwen3_moe series    | [Qwen/Qwen3-30B-A3B-Base](https://modelscope.cn/models/Qwen/Qwen3-30B-A3B-Base)                               | transformers>=4.51   | ✔               | [Qwen/Qwen3-30B-A3B-Base](https://huggingface.co/Qwen/Qwen3-30B-A3B-Base)                                     |
-|                     | [Qwen/Qwen3-30B-A3B](https://modelscope.cn/models/Qwen/Qwen3-30B-A3B)                                         | transformers>=4.51   | ✔               | [Qwen/Qwen3-30B-A3B](https://huggingface.co/Qwen/Qwen3-30B-A3B)                                               |
-|                     | [Qwen/Qwen3-235B-A22B](https://modelscope.cn/models/Qwen/Qwen3-235B-A22B)                                     | transformers>=4.51   | ✔               | [Qwen/Qwen3-235B-A22B](https://huggingface.co/Qwen/Qwen3-235B-A22B)                                           |
-| chatglm2 series     | [ZhipuAI/chatglm2-6b](https://modelscope.cn/models/ZhipuAI/chatglm2-6b)                                       | transformers<4.42    | ✘               | [zai-org/chatglm2-6b](https://huggingface.co/zai-org/chatglm2-6b)                                             |
-|                     | [ZhipuAI/chatglm2-6b-32k](https://modelscope.cn/models/ZhipuAI/chatglm2-6b-32k)                               | transformers<4.42    | ✘               | [zai-org/chatglm2-6b-32k](https://huggingface.co/zai-org/chatglm2-6b-32k)                                     |
-| chatglm3 series     | [ZhipuAI/chatglm3-6b](https://modelscope.cn/models/ZhipuAI/chatglm3-6b)                                       | transformers<4.42    | ✘               | [zai-org/chatglm3-6b](https://huggingface.co/zai-org/chatglm3-6b)                                             |
-|                     | [ZhipuAI/chatglm3-6b-base](https://modelscope.cn/models/ZhipuAI/chatglm3-6b-base)                             | transformers<4.42    | ✘               | [zai-org/chatglm3-6b-base](https://huggingface.co/zai-org/chatglm3-6b-base)                                   |
-|                     | [ZhipuAI/chatglm3-6b-32k](https://modelscope.cn/models/ZhipuAI/chatglm3-6b-32k)                               | transformers<4.42    | ✘               | [zai-org/chatglm3-6b-32k](https://huggingface.co/zai-org/chatglm3-6b-32k)                                     |
-|                     | [ZhipuAI/chatglm3-6b-128k](https://modelscope.cn/models/ZhipuAI/chatglm3-6b-128k)                             | transformers<4.42    | ✘               | [zai-org/chatglm3-6b-128k](https://huggingface.co/zai-org/chatglm3-6b-128k)                                   |
-| chatglm4 series     | [ZhipuAI/glm-4-9b-chat](https://modelscope.cn/models/ZhipuAI/glm-4-9b-chat)                                   | transformers>=4.42   | ✘               | [zai-org/glm-4-9b-chat](https://huggingface.co/zai-org/glm-4-9b-chat)                                         |
-|                     | [ZhipuAI/glm-4-9b](https://modelscope.cn/models/ZhipuAI/glm-4-9b)                                             | transformers>=4.42   | ✘               | [zai-org/glm-4-9b](https://huggingface.co/zai-org/glm-4-9b)                                                   |
-|                     | [ZhipuAI/glm-4-9b-chat-1m](https://modelscope.cn/models/ZhipuAI/glm-4-9b-chat-1m)                             | transformers>=4.42   | ✘               | [zai-org/glm-4-9b-chat-1m](https://huggingface.co/zai-org/glm-4-9b-chat-1m)                                   |
-|                     | [ZhipuAI/LongWriter-glm4-9b](https://modelscope.cn/models/ZhipuAI/LongWriter-glm4-9b)                         | transformers>=4.42   | ✘               | [zai-org/LongWriter-glm4-9b](https://huggingface.co/zai-org/LongWriter-glm4-9b)                               |
-| glm_edge series     | [ZhipuAI/glm-edge-1.5b-chat](https://modelscope.cn/models/ZhipuAI/glm-edge-1.5b-chat)                         | transformers>=4.46   | ✘               | [zai-org/glm-edge-1.5b-chat](https://huggingface.co/zai-org/glm-edge-1.5b-chat)                               |
-|                     | [ZhipuAI/glm-edge-4b-chat](https://modelscope.cn/models/ZhipuAI/glm-edge-4b-chat)                             | transformers>=4.46   | ✘               | [zai-org/glm-edge-4b-chat](https://huggingface.co/zai-org/glm-edge-4b-chat)                                   |
-| internlm2 series    | [Shanghai_AI_Laboratory/internlm2-1_8b](https://modelscope.cn/models/Shanghai_AI_Laboratory/internlm2-1_8b)                   | transformers>=4.38   | ✘               | [internlm/internlm2-1_8b](https://huggingface.co/internlm/internlm2-1_8b)                                     |
-|                     | [Shanghai_AI_Laboratory/internlm2-chat-1_8b-sft](https://modelscope.cn/models/Shanghai_AI_Laboratory/internlm2-chat-1_8b-sft) | transformers>=4.38   | ✘               | [internlm/internlm2-chat-1_8b-sft](https://huggingface.co/internlm/internlm2-chat-1_8b-sft)                   |
-|                     | [Shanghai_AI_Laboratory/internlm2-base-7b](https://modelscope.cn/models/Shanghai_AI_Laboratory/internlm2-base-7b)             | transformers>=4.38   | ✘               | [internlm/internlm2-base-7b](https://huggingface.co/internlm/internlm2-base-7b)                               |
-|                     | [Shanghai_AI_Laboratory/internlm2-7b](https://modelscope.cn/models/Shanghai_AI_Laboratory/internlm2-7b)                       | transformers>=4.38   | ✘               | [internlm/internlm2-7b](https://huggingface.co/internlm/internlm2-7b)                                         |
-|                     | [Shanghai_AI_Laboratory/internlm2-chat-7b](https://modelscope.cn/models/Shanghai_AI_Laboratory/internlm2-chat-7b)             | transformers>=4.38   | ✘               | [internlm/internlm2-chat-7b](https://huggingface.co/internlm/internlm2-chat-7b)                               |
-| deepseek_v1         | [deepseek-ai/deepseek-vl-7b-chat](https://modelscope.cn/models/deepseek-ai/deepseek-vl-7b-chat)                               | transformers>=4.39.4 | ✔               |                                                                                                            |
-|                     | [deepseek-ai/DeepSeek-V2-Lite](https://modelscope.cn/models/deepseek-ai/DeepSeek-V2-Lite)                                     | transformers>=4.39.3 | ✔               | [deepseek-ai/DeepSeek-V2-Lite](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite)                           |
-|                     | [deepseek-ai/DeepSeek-V2-Lite-Chat](https://modelscope.cn/models/deepseek-ai/DeepSeek-V2-Lite-Chat)                           | transformers>=4.39.3 | ✔               | [deepseek-ai/DeepSeek-V2-Lite-Chat](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite-Chat)                 |
-|                     | [deepseek-ai/DeepSeek-V2](https://modelscope.cn/models/deepseek-ai/DeepSeek-V2)                                               | transformers>=4.39.3 | ✔               | [deepseek-ai/DeepSeek-V2](https://huggingface.co/deepseek-ai/DeepSeek-V2)                                     |
-|                     | [deepseek-ai/DeepSeek-V2-Chat](https://modelscope.cn/models/deepseek-ai/DeepSeek-V2-Chat)                                     | transformers>=4.39.3 | ✔               | [deepseek-ai/DeepSeek-V2-Chat](https://huggingface.co/deepseek-ai/DeepSeek-V2-Chat)                           |
-|                     | [deepseek-ai/DeepSeek-V2.5](https://modelscope.cn/models/deepseek-ai/DeepSeek-V2.5)                                           | transformers>=4.39.3 | ✔               | [deepseek-ai/DeepSeek-V2.5](https://huggingface.co/deepseek-ai/DeepSeek-V2.5)                                 |
-|                     | [deepseek-ai/DeepSeek-Prover-V2-7B](https://modelscope.cn/models/deepseek-ai/DeepSeek-Prover-V2-7B)                           | transformers>=4.39.3 | ✔               | [deepseek-ai/DeepSeek-Prover-V2-7B](https://huggingface.co/deepseek-ai/DeepSeek-Prover-V2-7B)                 |
-|                     | [deepseek-ai/DeepSeek-R1](https://modelscope.cn/models/deepseek-ai/DeepSeek-R1)                                               | transformers>=4.39.3 | ✔               | [deepseek-ai/DeepSeek-R1](https://huggingface.co/deepseek-ai/DeepSeek-R1)                                     |
-| deepSeek-r1-distill | [deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B](https://modelscope.cn/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B)           | transformers>=4.37   | ✔               | [deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B) |
-|                     | [deepseek-ai/DeepSeek-R1-Distill-Qwen-7B](https://modelscope.cn/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B)               | transformers>=4.37   | ✔               | [deepseek-ai/DeepSeek-R1-Distill-Qwen-7B](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B)     |
-|                     | [deepseek-ai/DeepSeek-R1-Distill-Qwen-14B](https://modelscope.cn/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-14B)             | transformers>=4.37   | ✔               | [deepseek-ai/DeepSeek-R1-Distill-Qwen-14B](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-14B)   |
-|                     | [deepseek-ai/DeepSeek-R1-Distill-Qwen-32B](https://modelscope.cn/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B)             | transformers>=4.37   | ✔               | [deepseek-ai/DeepSeek-R1-Distill-Qwen-32B](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B)   |
+| Model Type          | Model ID Example                                                                                                              | Requires             | Support Megatron | HF Model ID                                                                                                   |
+|---------------------|-------------------------------------------------------------------------------------------------------------------------------|----------------------|------------------|---------------------------------------------------------------------------------------------------------------|
+| qwen2 series        | [Qwen/Qwen2-0.5B-Instruct](https://modelscope.cn/models/Qwen/Qwen2-0.5B-Instruct)                                             | transformers>=4.37   | ✔                | [Qwen/Qwen2-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2-0.5B-Instruct)                                   |
+|                     | [Qwen/Qwen2-72B-Instruct](https://modelscope.cn/models/Qwen/Qwen2-72B-Instruct)                                               | transformers>=4.37   | ✔                | [Qwen/Qwen2-72B-Instruct](https://huggingface.co/Qwen/Qwen2-72B-Instruct)                                     |
+|                     | [Qwen/Qwen2-1.5B](https://modelscope.cn/models/Qwen/Qwen2-1.5B)                                                               | transformers>=4.37   | ✔                | [Qwen/Qwen2-1.5B](https://huggingface.co/Qwen/Qwen2-1.5B)                                                     |
+|                     | [Qwen/Qwen2-7B](https://modelscope.cn/models/Qwen/Qwen2-7B)                                                                   | transformers>=4.37   | ✔                | [Qwen/Qwen2-7B](https://huggingface.co/Qwen/Qwen2-7B)                                                         |
+|                     | [Qwen/Qwen2-72B](https://modelscope.cn/models/Qwen/Qwen2-72B)                                                                 | transformers>=4.37   | ✔                | [Qwen/Qwen2-72B](https://huggingface.co/Qwen/Qwen2-72B)                                                       |
+|                     | [Qwen/Qwen2.5-0.5B-Instruct](https://modelscope.cn/models/Qwen/Qwen2.5-0.5B-Instruct)                                         | transformers>=4.37   | ✔                | [Qwen/Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct)                               |
+|                     | [Qwen/Qwen2.5-1.5B-Instruct](https://modelscope.cn/models/Qwen/Qwen2.5-1.5B-Instruct)                                         | transformers>=4.37   | ✔                | [Qwen/Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct)                               |
+|                     | [Qwen/Qwen2.5-72B-Instruct](https://modelscope.cn/models/Qwen/Qwen2.5-72B-Instruct)                                           | transformers>=4.37   | ✔                | [Qwen/Qwen2.5-72B-Instruct](https://huggingface.co/Qwen/Qwen2.5-72B-Instruct)                                 |
+|                     | [Qwen/Qwen2.5-0.5B](https://modelscope.cn/models/Qwen/Qwen2.5-0.5B)                                                           | transformers>=4.37   | ✔                | [Qwen/Qwen2.5-0.5B](https://huggingface.co/Qwen/Qwen2.5-0.5B)                                                 |
+|                     | [Qwen/Qwen2.5-32B](https://modelscope.cn/models/Qwen/Qwen2.5-32B)                                                             | transformers>=4.37   | ✔                | [Qwen/Qwen2.5-32B](https://huggingface.co/Qwen/Qwen2.5-32B)                                                   |
+| qwen2_moe series    | [Qwen/Qwen1.5-MoE-A2.7B-Chat](https://modelscope.cn/models/Qwen/Qwen1.5-MoE-A2.7B-Chat)                                       | transformers>=4.40   | ✔                | [Qwen/Qwen1.5-MoE-A2.7B-Chat](https://huggingface.co/Qwen/Qwen1.5-MoE-A2.7B-Chat)                             |
+|                     | [Qwen/Qwen1.5-MoE-A2.7B](https://modelscope.cn/models/Qwen/Qwen1.5-MoE-A2.7B)                                                 | transformers>=4.40   | ✔                | [Qwen/Qwen1.5-MoE-A2.7B](https://huggingface.co/Qwen/Qwen1.5-MoE-A2.7B)                                       |
+| qwen3 series        | [Qwen/Qwen3-0.6B-Base](https://modelscope.cn/models/Qwen/Qwen3-0.6B-Base)                                                     | transformers>=4.51   | ✔                | [Qwen/Qwen3-0.6B-Base](https://huggingface.co/Qwen/Qwen3-0.6B-Base)                                           |
+|                     | [Qwen/Qwen3-14B-Base](https://modelscope.cn/models/Qwen/Qwen3-14B-Base)                                                       | transformers>=4.51   | ✔                | [Qwen/Qwen3-14B-Base](https://huggingface.co/Qwen/Qwen3-14B-Base)                                             |
+|                     | [Qwen/Qwen3-0.6B](https://modelscope.cn/models/Qwen/Qwen3-0.6B)                                                               | transformers>=4.51   | ✔                | [Qwen/Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B)                                                     |
+|                     | [Qwen/Qwen3-1.7B](https://modelscope.cn/models/Qwen/Qwen3-1.7B)                                                               | transformers>=4.51   | ✔                | [Qwen/Qwen3-1.7B](https://huggingface.co/Qwen/Qwen3-1.7B)                                                     |
+|                     | [Qwen/Qwen3-32B](https://modelscope.cn/models/Qwen/Qwen2.5-32B)                                                               | transformers>=4.51   | ✔                | [Qwen/Qwen3-32B](https://huggingface.co/Qwen/Qwen3-32B)                                                       |
+| qwen3_moe series    | [Qwen/Qwen3-30B-A3B-Base](https://modelscope.cn/models/Qwen/Qwen3-30B-A3B-Base)                                               | transformers>=4.51   | ✔                | [Qwen/Qwen3-30B-A3B-Base](https://huggingface.co/Qwen/Qwen3-30B-A3B-Base)                                     |
+|                     | [Qwen/Qwen3-30B-A3B](https://modelscope.cn/models/Qwen/Qwen3-30B-A3B)                                                         | transformers>=4.51   | ✔                | [Qwen/Qwen3-30B-A3B](https://huggingface.co/Qwen/Qwen3-30B-A3B)                                               |
+|                     | [Qwen/Qwen3-235B-A22B](https://modelscope.cn/models/Qwen/Qwen3-235B-A22B)                                                     | transformers>=4.51   | ✔                | [Qwen/Qwen3-235B-A22B](https://huggingface.co/Qwen/Qwen3-235B-A22B)                                           |
+| chatglm2 series     | [ZhipuAI/chatglm2-6b](https://modelscope.cn/models/ZhipuAI/chatglm2-6b)                                                       | transformers<4.42    | ✘                | [zai-org/chatglm2-6b](https://huggingface.co/zai-org/chatglm2-6b)                                             |
+|                     | [ZhipuAI/chatglm2-6b-32k](https://modelscope.cn/models/ZhipuAI/chatglm2-6b-32k)                                               | transformers<4.42    | ✘                | [zai-org/chatglm2-6b-32k](https://huggingface.co/zai-org/chatglm2-6b-32k)                                     |
+| chatglm3 series     | [ZhipuAI/chatglm3-6b](https://modelscope.cn/models/ZhipuAI/chatglm3-6b)                                                       | transformers<4.42    | ✘                | [zai-org/chatglm3-6b](https://huggingface.co/zai-org/chatglm3-6b)                                             |
+|                     | [ZhipuAI/chatglm3-6b-base](https://modelscope.cn/models/ZhipuAI/chatglm3-6b-base)                                             | transformers<4.42    | ✘                | [zai-org/chatglm3-6b-base](https://huggingface.co/zai-org/chatglm3-6b-base)                                   |
+|                     | [ZhipuAI/chatglm3-6b-32k](https://modelscope.cn/models/ZhipuAI/chatglm3-6b-32k)                                               | transformers<4.42    | ✘                | [zai-org/chatglm3-6b-32k](https://huggingface.co/zai-org/chatglm3-6b-32k)                                     |
+|                     | [ZhipuAI/chatglm3-6b-128k](https://modelscope.cn/models/ZhipuAI/chatglm3-6b-128k)                                             | transformers<4.42    | ✘                | [zai-org/chatglm3-6b-128k](https://huggingface.co/zai-org/chatglm3-6b-128k)                                   |
+| chatglm4 series     | [ZhipuAI/glm-4-9b-chat](https://modelscope.cn/models/ZhipuAI/glm-4-9b-chat)                                                   | transformers>=4.42   | ✘                | [zai-org/glm-4-9b-chat](https://huggingface.co/zai-org/glm-4-9b-chat)                                         |
+|                     | [ZhipuAI/glm-4-9b](https://modelscope.cn/models/ZhipuAI/glm-4-9b)                                                             | transformers>=4.42   | ✘                | [zai-org/glm-4-9b](https://huggingface.co/zai-org/glm-4-9b)                                                   |
+|                     | [ZhipuAI/glm-4-9b-chat-1m](https://modelscope.cn/models/ZhipuAI/glm-4-9b-chat-1m)                                             | transformers>=4.42   | ✘                | [zai-org/glm-4-9b-chat-1m](https://huggingface.co/zai-org/glm-4-9b-chat-1m)                                   |
+|                     | [ZhipuAI/LongWriter-glm4-9b](https://modelscope.cn/models/ZhipuAI/LongWriter-glm4-9b)                                         | transformers>=4.42   | ✘                | [zai-org/LongWriter-glm4-9b](https://huggingface.co/zai-org/LongWriter-glm4-9b)                               |
+| glm_edge series     | [ZhipuAI/glm-edge-1.5b-chat](https://modelscope.cn/models/ZhipuAI/glm-edge-1.5b-chat)                                         | transformers>=4.46   | ✘                | [zai-org/glm-edge-1.5b-chat](https://huggingface.co/zai-org/glm-edge-1.5b-chat)                               |
+|                     | [ZhipuAI/glm-edge-4b-chat](https://modelscope.cn/models/ZhipuAI/glm-edge-4b-chat)                                             | transformers>=4.46   | ✘                | [zai-org/glm-edge-4b-chat](https://huggingface.co/zai-org/glm-edge-4b-chat)                                   |
+| internlm2 series    | [Shanghai_AI_Laboratory/internlm2-1_8b](https://modelscope.cn/models/Shanghai_AI_Laboratory/internlm2-1_8b)                   | transformers>=4.38   | ✘                | [internlm/internlm2-1_8b](https://huggingface.co/internlm/internlm2-1_8b)                                     |
+|                     | [Shanghai_AI_Laboratory/internlm2-chat-1_8b-sft](https://modelscope.cn/models/Shanghai_AI_Laboratory/internlm2-chat-1_8b-sft) | transformers>=4.38   | ✘                | [internlm/internlm2-chat-1_8b-sft](https://huggingface.co/internlm/internlm2-chat-1_8b-sft)                   |
+|                     | [Shanghai_AI_Laboratory/internlm2-base-7b](https://modelscope.cn/models/Shanghai_AI_Laboratory/internlm2-base-7b)             | transformers>=4.38   | ✘                | [internlm/internlm2-base-7b](https://huggingface.co/internlm/internlm2-base-7b)                               |
+|                     | [Shanghai_AI_Laboratory/internlm2-7b](https://modelscope.cn/models/Shanghai_AI_Laboratory/internlm2-7b)                       | transformers>=4.38   | ✘                | [internlm/internlm2-7b](https://huggingface.co/internlm/internlm2-7b)                                         |
+|                     | [Shanghai_AI_Laboratory/internlm2-chat-7b](https://modelscope.cn/models/Shanghai_AI_Laboratory/internlm2-chat-7b)             | transformers>=4.38   | ✘                | [internlm/internlm2-chat-7b](https://huggingface.co/internlm/internlm2-chat-7b)                               |
+| deepseek_v1         | [deepseek-ai/deepseek-vl-7b-chat](https://modelscope.cn/models/deepseek-ai/deepseek-vl-7b-chat)                               | transformers>=4.39.4 | ✔                |                                                                                                               |
+|                     | [deepseek-ai/DeepSeek-V2-Lite](https://modelscope.cn/models/deepseek-ai/DeepSeek-V2-Lite)                                     | transformers>=4.39.3 | ✔                | [deepseek-ai/DeepSeek-V2-Lite](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite)                           |
+|                     | [deepseek-ai/DeepSeek-V2-Lite-Chat](https://modelscope.cn/models/deepseek-ai/DeepSeek-V2-Lite-Chat)                           | transformers>=4.39.3 | ✔                | [deepseek-ai/DeepSeek-V2-Lite-Chat](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite-Chat)                 |
+|                     | [deepseek-ai/DeepSeek-V2](https://modelscope.cn/models/deepseek-ai/DeepSeek-V2)                                               | transformers>=4.39.3 | ✔                | [deepseek-ai/DeepSeek-V2](https://huggingface.co/deepseek-ai/DeepSeek-V2)                                     |
+|                     | [deepseek-ai/DeepSeek-V2-Chat](https://modelscope.cn/models/deepseek-ai/DeepSeek-V2-Chat)                                     | transformers>=4.39.3 | ✔                | [deepseek-ai/DeepSeek-V2-Chat](https://huggingface.co/deepseek-ai/DeepSeek-V2-Chat)                           |
+|                     | [deepseek-ai/DeepSeek-V2.5](https://modelscope.cn/models/deepseek-ai/DeepSeek-V2.5)                                           | transformers>=4.39.3 | ✔                | [deepseek-ai/DeepSeek-V2.5](https://huggingface.co/deepseek-ai/DeepSeek-V2.5)                                 |
+|                     | [deepseek-ai/DeepSeek-Prover-V2-7B](https://modelscope.cn/models/deepseek-ai/DeepSeek-Prover-V2-7B)                           | transformers>=4.39.3 | ✔                | [deepseek-ai/DeepSeek-Prover-V2-7B](https://huggingface.co/deepseek-ai/DeepSeek-Prover-V2-7B)                 |
+|                     | [deepseek-ai/DeepSeek-R1](https://modelscope.cn/models/deepseek-ai/DeepSeek-R1)                                               | transformers>=4.39.3 | ✔                | [deepseek-ai/DeepSeek-R1](https://huggingface.co/deepseek-ai/DeepSeek-R1)                                     |
+| deepSeek-r1-distill | [deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B](https://modelscope.cn/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B)           | transformers>=4.37   | ✔                | [deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B) |
+|                     | [deepseek-ai/DeepSeek-R1-Distill-Qwen-7B](https://modelscope.cn/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B)               | transformers>=4.37   | ✔                | [deepseek-ai/DeepSeek-R1-Distill-Qwen-7B](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B)     |
+|                     | [deepseek-ai/DeepSeek-R1-Distill-Qwen-14B](https://modelscope.cn/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-14B)             | transformers>=4.37   | ✔                | [deepseek-ai/DeepSeek-R1-Distill-Qwen-14B](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-14B)   |
+|                     | [deepseek-ai/DeepSeek-R1-Distill-Qwen-32B](https://modelscope.cn/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B)             | transformers>=4.37   | ✔                | [deepseek-ai/DeepSeek-R1-Distill-Qwen-32B](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B)   |
