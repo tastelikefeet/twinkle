@@ -166,7 +166,7 @@ def train():
     # Global batch size = 8, for GPUs, so 1 sample per GPU
     dataloader = DataLoader(dataset=dataset, batch_size=8)
     # Use a TransformersModel
-    model = TransformersModel(model_id='Qwen/Qwen3-4B')
+    model = TransformersModel(model_id='ms://Qwen/Qwen3-4B')
 
     lora_config = LoraConfig(r=8, lora_alpha=32, target_modules='all-linear')
 
