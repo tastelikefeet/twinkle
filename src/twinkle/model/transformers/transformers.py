@@ -34,7 +34,7 @@ from twinkle.model.transformers.strategy import AccelerateStrategy, NativeFSDPSt
 from twinkle.patch import Patch, apply_patch
 from twinkle.processor import InputProcessor
 from twinkle.template import Template
-from twinkle.utils import construct_class, torch_util
+from twinkle.utils import construct_class, torch_util, selective_log_softmax
 from twinkle.utils.framework import Torch
 from twinkle.utils.grad_clip import normalize_and_clip_grad_norm
 
@@ -411,6 +411,8 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
         optimizer_config.inputs = inputs
         optimizer_config.outputs = outputs
         optimizer_config.loss_value = outputs.get('aux_loss', 0)
+        if labels is not None:
+            outputs['logps'] = selective_log_softmax(outputs['logits'], labels)
         return outputs
 
     @remote_function(collect='mean')
@@ -487,10 +489,11 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
         Returns:
             The output of the model forward.
         """
-        self.forward(inputs=inputs, **kwargs)
+        outputs = self.forward(inputs=inputs, **kwargs)
         loss = self.calculate_loss(**kwargs)
+        outputs['loss'] = loss
         self.backward(**kwargs)
-        return loss
+        return outputs
 
     @remote_function()
     def clip_grad_norm(self, max_grad_norm: float = 1.0, norm_type=2, **kwargs):
@@ -542,7 +545,6 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
         self.step(**kwargs)
         self.zero_grad(**kwargs)
         self.lr_step(**kwargs)
-        return grad_norm
 
     def _create_param_group(self,
                             adapter_name: str,

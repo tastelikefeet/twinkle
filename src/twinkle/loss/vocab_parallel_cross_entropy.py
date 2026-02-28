@@ -1,5 +1,6 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 from .base import Loss
+from ..data_format import LossOutput
 
 
 class VocabParallelCrossEntropyLoss(Loss):
@@ -35,4 +36,7 @@ class VocabParallelCrossEntropyLoss(Loss):
 
         # Apply loss mask
         loss_mask = (labels != self.ignore_index).float()
-        return (per_token_loss * loss_mask).sum(), loss_mask.sum().clamp(min=1)
+        return LossOutput(
+            loss=(per_token_loss * loss_mask).sum(),
+            num_tokens=loss_mask.sum().clamp(min=1),
+        )
