@@ -1,16 +1,14 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
-import numpy as np
 import sys
-from typing import TYPE_CHECKING, Any, List, Union, Optional
+from typing import Any, List, Union, Optional
+
+import numpy as np
 
 if sys.version_info[:2] <= (3, 11):
     # Pydantic requirements.
     from typing_extensions import TypedDict
 else:
     from typing import TypedDict
-
-if TYPE_CHECKING:
-    import torch
 
 OutputType = Union[np.ndarray, 'torch.Tensor', List[Any], float]
 

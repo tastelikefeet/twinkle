@@ -514,8 +514,6 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
             torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG, group=dp_cp_group)
 
         optimizer_config.inputs = inputs
-        if len({logit.shape[1] for logit in logits}) == 1:
-            logits = torch.cat(logits, dim=0)
         if len({_logps.shape[1] for _logps in logps}) == 1:
             logps = torch.cat(logps, dim=0)
         if isinstance(loss, torch.Tensor):
