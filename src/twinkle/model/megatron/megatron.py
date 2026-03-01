@@ -535,7 +535,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
                         count += loss_dict['num_tokens']
                 elif isinstance(loss_dict, torch.Tensor):
                     raise ValueError('Expected loss dict, got tensor')
-        
+
         loss = loss / (count or 1)
 
         # For PP > 1, broadcast loss from last PP stage to all ranks
