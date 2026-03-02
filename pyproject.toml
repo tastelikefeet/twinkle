@@ -45,10 +45,6 @@ packages = [
   { include = "twinkle_client", from = "src" },
 ]
 
-[[tool.poetry.source]]
-name = "aliyun"
-url = "https://mirrors.aliyun.com/pypi/simple/"
-
 [build-system]
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
