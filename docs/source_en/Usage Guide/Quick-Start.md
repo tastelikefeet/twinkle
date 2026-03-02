@@ -46,7 +46,7 @@ def train():
 
     dataset = PackingDataset(dataset_meta)
     dataset.map(SelfCognitionProcessor(model_name='Twinkle Model', model_author='ModelScope Community'))
-    dataset.set_template('Template', model_id='ms://Qwen/Qwen3-4B', max_length=512)
+    dataset.set_template('Template', model_id='ms://Qwen/Qwen3.5-4B', max_length=512)
     dataset.encode()
     dataset.pack_dataset()
 
@@ -90,7 +90,7 @@ def train():
     # 1000 samples
     dataset = Dataset(dataset_meta=DatasetMeta('ms://swift/self-cognition', data_slice=range(1000)))
     # Set template to prepare encoding
-    dataset.set_template('Template', model_id='ms://Qwen/Qwen3-4B')
+    dataset.set_template('Template', model_id='ms://Qwen/Qwen3.5-4B')
     # Preprocess the dataset to standard format
     dataset.map(SelfCognitionProcessor('twinkle LLM', 'ModelScope Community'))
     # Encode dataset
@@ -98,7 +98,7 @@ def train():
     # Global batch size = 8, for GPUs, so 1 sample per GPU
     dataloader = DataLoader(dataset=dataset, batch_size=8)
     # Use a TransformersModel
-    model = TransformersModel(model_id='ms://Qwen/Qwen3-4B')
+    model = TransformersModel(model_id='ms://Qwen/Qwen3.5-4B')
 
     lora_config = LoraConfig(r=8, lora_alpha=32, target_modules='all-linear')
 
@@ -130,7 +130,7 @@ if __name__ == '__main__':
     train()
 ```
 
-In this training code, we constructed a dataset and loaded the Qwen/Qwen3-4B model, used LoRA with the all-linear approach, and completed one training run. In the logs, you can observe the process of loss gradually converging.
+In this training code, we constructed a dataset and loaded the Qwen/Qwen3.5-4B model, used LoRA with the all-linear approach, and completed one training run. In the logs, you can observe the process of loss gradually converging.
 
 ### torchrun
 
@@ -158,7 +158,7 @@ def train():
     # 1000 samples
     dataset = Dataset(dataset_meta=DatasetMeta('ms://swift/self-cognition', data_slice=range(1000)))
     # Set template to prepare encoding
-    dataset.set_template('Template', model_id='ms://Qwen/Qwen3-4B')
+    dataset.set_template('Template', model_id='ms://Qwen/Qwen3.5-4B')
     # Preprocess the dataset to standard format
     dataset.map(SelfCognitionProcessor('twinkle LLM', 'ModelScope Community'))
     # Encode dataset
@@ -166,7 +166,7 @@ def train():
     # Global batch size = 8, for GPUs, so 1 sample per GPU
     dataloader = DataLoader(dataset=dataset, batch_size=8)
     # Use a TransformersModel
-    model = TransformersModel(model_id='ms://Qwen/Qwen3-4B')
+    model = TransformersModel(model_id='ms://Qwen/Qwen3.5-4B')
 
     lora_config = LoraConfig(r=8, lora_alpha=32, target_modules='all-linear')
 
@@ -231,7 +231,7 @@ from twinkle.reward import GSM8KAccuracyReward, GSM8KFormatReward
 from twinkle.sampler import vLLMSampler
 from twinkle.template import Template
 
-MODEL_ID = os.environ.get('MODEL_ID', 'ms://Qwen/Qwen3-4B')
+MODEL_ID = os.environ.get('MODEL_ID', 'ms://Qwen/Qwen3.5-4B')
 MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 4))
 SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS',4))
 NUM_GPUS = MODEL_GPUS + SAMPLER_GPUS
@@ -437,7 +437,7 @@ from twinkle_client.sampler import vLLMSampler
 logger = get_logger()
 
 # ========== Configuration ==========
-MODEL_ID = 'ms://Qwen/Qwen3-4B'
+MODEL_ID = 'ms://Qwen/Qwen3.5-4B'
 NUM_GENERATIONS = 4
 MAX_NEW_TOKENS = 1024
 LEARNING_RATE = 1e-5
@@ -682,7 +682,7 @@ from twinkle.preprocessor import SelfCognitionProcessor
 from twinkle.server.tinker.common import input_feature_to_datum
 
 # The base model to fine-tune / evaluate
-base_model = 'ms://Qwen/Qwen3-4B'
+base_model = 'ms://Qwen/Qwen3.5-4B'
 
 
 def train():
@@ -747,7 +747,7 @@ This service shares the same code as the Tinker API section described above. The
 Switch the prefix.
 
 ```text
-ms://Qwen/Qwen3-4B -> hf://Qwen/Qwen3-4B
+ms://Qwen/Qwen3.5-4B -> hf://Qwen/Qwen3.5-4B
 ```
 
 ## 🛠️ Twinkle✨ Modular Ecosystem
@@ -874,10 +874,10 @@ DeviceGroup: Define how many resource groups are needed for this training sessio
 
 ```python
 from twinkle.model import TransformersModel
-model = TransformersModel(model_id='Qwen/Qwen3-4B', remote_group='default', device_mesh=device_mesh)
+model = TransformersModel(model_id='Qwen/Qwen3.5-4B', remote_group='default', device_mesh=device_mesh)
 # Or
 from twinkle.model import MegatronModel
-model = MegatronModel(model_id='Qwen/Qwen3-4B', remote_group='default', device_mesh=device_mesh)
+model = MegatronModel(model_id='Qwen/Qwen3.5-4B', remote_group='default', device_mesh=device_mesh)
 ```
 
 DeviceMesh specifies the topology of components like models within the resource group. It can be understood as how to perform parallelization. This affects a series of framework decisions, such as data acquisition, data consumption, data return, etc.
@@ -903,7 +903,7 @@ def train():
     # 1000 samples
     dataset = Dataset(dataset_meta=DatasetMeta('ms://swift/self-cognition', data_slice=range(1000)))
     # Set template to prepare encoding
-    dataset.set_template('Template', model_id='Qwen/Qwen3-4B')
+    dataset.set_template('Template', model_id='Qwen/Qwen3.5-4B')
     # Preprocess the dataset to standard format
     dataset.map(SelfCognitionProcessor('twinkle LLM', 'ModelScope Community'))
     # Encode dataset
@@ -911,7 +911,7 @@ def train():
     # Global batch size = 8, for GPUs, so 1 sample per GPU
     dataloader = DataLoader(dataset=dataset, batch_size=8, min_batch_size=8)
     # Use a TransformersModel
-    model = TransformersModel(model_id='Qwen/Qwen3-4B', remote_group='default')
+    model = TransformersModel(model_id='Qwen/Qwen3.5-4B', remote_group='default')
 
     lora_config = LoraConfig(
         r=8,
