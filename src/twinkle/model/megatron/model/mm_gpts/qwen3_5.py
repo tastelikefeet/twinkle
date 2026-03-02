@@ -161,6 +161,5 @@ register_megatron_model(
         ],
         bridge_cls=Qwen3_5Bridge,
         visual_cls=Qwen3_5Vit,
-        auto_model_cls=_auto_model_cls,
         loader=Qwen3_5MoeLoader,
     ))

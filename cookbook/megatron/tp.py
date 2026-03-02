@@ -9,7 +9,7 @@ from twinkle.dataset import Dataset, DatasetMeta
 from twinkle.model import MegatronModel
 from twinkle.preprocessor import SelfCognitionProcessor
 # Construct a device_mesh, tp=pp=cp=2, dp=1
-device_mesh = DeviceMesh.from_sizes(dp_size=1, tp_size=2, pp_size=2, cp_size=2)
+device_mesh = DeviceMesh.from_sizes(dp_size=2, tp_size=2, pp_size=2)
 # use torchrun mode
 twinkle.initialize(mode='local', global_device_mesh=device_mesh)
 

@@ -44,6 +44,7 @@ def train():
     dataloader = DataLoader(dataset=dataset, batch_size=8)
     # Use a TransformersModel
     model = TransformersModel(model_id='ms://Qwen/Qwen3.5-4B')
+    model.model._no_split_modules = {'Qwen3_5DecoderLayer'}
 
     lora_config = LoraConfig(r=8, lora_alpha=32, target_modules='all-linear')
 
