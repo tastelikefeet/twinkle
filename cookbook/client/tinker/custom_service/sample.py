@@ -56,7 +56,7 @@ params = types.SamplingParams(
 )
 
 # Step 6: Send the sampling request to the server.
-# num_samples=8 generates 8 independent completions for the same prompt.
+# num_samples=1 generates 1 independent completions for the same prompt.
 print('Sampling...')
 future = sampling_client.sample(prompt=prompt, sampling_params=params, num_samples=1)
 result = future.result()
