@@ -139,7 +139,6 @@ try:
 except ImportError:
     Qwen3_5MoeForConditionalGeneration = None
 
-
 try:
     from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForConditionalGeneration
 except ImportError:
@@ -161,7 +160,6 @@ register_megatron_model(
         auto_model_cls=Qwen3_5MoeForConditionalGeneration,
         loader=Qwen3_5MoeLoader,
     ))
-
 
 register_megatron_model(
     MegatronModelMeta(
