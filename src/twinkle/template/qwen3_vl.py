@@ -1,10 +1,10 @@
 import torch
 from PIL import Image
 from typing import Any, Dict, List, Optional, Union
-
 from twinkle import remote_class
 from twinkle.template import Template
 from twinkle.template.base import ImageInput, VideoInput
+from twinkle.template.utils import get_inputs_embeds_hf
 
 
 @remote_class()
@@ -76,18 +76,19 @@ class Qwen3VLTemplate(Template):
         except ImportError:
             return super().preprocess_video(video)
 
-    # _build_messages: Uses base class implementation.
-    # Qwen's HF processor accepts the standard format:
-    # [{'role': 'user', 'content': [{'type': 'image'}, {'type': 'text', 'text': '...'}]}]
-
-    def post_encode(self, model, inputs: Dict[str, Any]) -> Dict[str, Any]:
-        """Qwen3-VL handles embedding merge internally."""
-        return inputs
-
-    def _get_vision_token_id(self) -> Optional[int]:
-        if self.config is not None:
-            return getattr(self.config, 'image_token_id', None)
-        return None
+    def _post_encode(self, model, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        input_ids = inputs['input_ids']
+        from peft import PeftModel
+        if isinstance(model, PeftModel):
+            base_model = model.model
+        else:
+            base_model = model
+        if hasattr(base_model.model, 'embed_tokens'):
+            inputs_embeds = base_model.model.embed_tokens(input_ids)
+        else:
+            inputs_embeds = base_model.model.language_model.embed_tokens(input_ids)
+        inputs_embeds = get_inputs_embeds_hf(inputs_embeds, inputs, model.visual, self.processor, model.config)
+        return {'inputs_embeds': inputs_embeds}
 
     def _get_position_ids(self, inputs: Dict[str, Any]) -> Optional[torch.Tensor]:
         """Get 3D RoPE position_ids for Qwen VL."""

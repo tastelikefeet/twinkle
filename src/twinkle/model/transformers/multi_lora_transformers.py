@@ -1,6 +1,7 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 import os
 from peft import LoraConfig, PeftConfig, PeftModel, load_peft_weights
+from sympy.printing.pytorch import torch
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
@@ -57,10 +58,29 @@ class MultiLoraTransformersModel(TransformersModel, PreTrainedModel):
         self.multi_adapter.save_initial_weights()
         # Active group for compatibility with single adapter
         self.active_group = None
+        self.handler = self.register_global_mm_forward_hook()
 
     def _check_adapter_valid(self, adapter_name: str):
         assert adapter_name and adapter_name in self.optimizer_group, (f'Use a valid adapter_name first, '
                                                                        f'current is: {adapter_name}')
+
+    def register_global_mm_forward_hook(self):
+
+        def forward_hook(model: torch.nn.Module, args, kwargs):
+            active_adapter = model.active_adapters[0]
+            optimizer_group = self.optimizer_group[active_adapter]
+            template = optimizer_group.template
+            assert template is not None
+            return template.pre_forward_hook(model, args, kwargs)
+
+        model = self.strategy.unwrap_model(self.model)
+        return model.register_forward_hook(forward_hook)
+
+    def register_mm_forward_hook(self, optimizer_group: OptimizerGroup):
+        pass
+
+    def unregister_mm_forward_hook(self, optimizer_group: OptimizerGroup):
+        pass
 
     def _lazy_wrap_model(self):
         pass
