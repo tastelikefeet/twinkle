@@ -68,13 +68,14 @@ class MultiLoraTransformersModel(TransformersModel, PreTrainedModel):
 
         def forward_hook(model: torch.nn.Module, args, kwargs):
             active_adapter = model.active_adapters[0]
+            active_adapter = self.multi_adapter.find_lora(active_adapter).tenant_adapter_name
             optimizer_group = self.optimizer_group[active_adapter]
             template = optimizer_group.template
             assert template is not None
             return template.pre_forward_hook(model, args, kwargs)
 
         model = self.strategy.unwrap_model(self.model)
-        return model.register_forward_hook(forward_hook)
+        return model.register_forward_pre_hook(forward_hook, with_kwargs=True)
 
     def register_mm_forward_hook(self, optimizer_group: OptimizerGroup):
         pass

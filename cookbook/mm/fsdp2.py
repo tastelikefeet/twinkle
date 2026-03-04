@@ -5,14 +5,14 @@ import twinkle
 from twinkle import DeviceMesh, get_device_placement, get_logger
 from twinkle.data_format import Trajectory, Message
 from twinkle.dataloader import DataLoader
-from twinkle.dataset import LazyDataset, PackingDataset, DatasetMeta
+from twinkle.dataset import LazyDataset, DatasetMeta
 from twinkle.model import TransformersModel
-from twinkle.preprocessor import SelfCognitionProcessor, Preprocessor
+from twinkle.preprocessor import Preprocessor
 
-# Construct a device_mesh, fsdp=4, dp=2
-# device_mesh = DeviceMesh.from_sizes(fsdp_size=4, dp_size=2)
+# Construct a device_mesh, fsdp=2
+device_mesh = DeviceMesh.from_sizes(fsdp_size=2)
 # use torchrun mode
-# twinkle.initialize(mode='local', global_device_mesh=device_mesh)
+twinkle.initialize(mode='local', global_device_mesh=device_mesh)
 
 logger = get_logger()
 
@@ -28,18 +28,31 @@ class LatexOCRProcessor(Preprocessor):
         )
 
 
+def eval(model):
+    # 100 Samples
+    dataset = LazyDataset(dataset_meta=DatasetMeta('ms://AI-ModelScope/LaTeX_OCR', data_slice=range(100)))
+    dataset.set_template('Qwen3VLTemplate', model_id='ms://Qwen/Qwen3.5-4B')
+    dataset.map(LatexOCRProcessor)
+    dataset.encode()
+    dataloader = DataLoader(dataset=dataset, batch_size=8)
+    for step, batch in tqdm(enumerate(dataloader)):
+        model.forward_only(inputs=batch)
+        model.calculate_loss()
+    metrics = model.calculate_metric(is_training=False)
+    return metrics
+
+
 def train():
     # 2000 samples
-    dataset = PackingDataset(dataset_meta=DatasetMeta('ms://AI-ModelScope/LaTeX_OCR', data_slice=range(2000)))
+    dataset = LazyDataset(dataset_meta=DatasetMeta('ms://AI-ModelScope/LaTeX_OCR', data_slice=range(2000)))
     # Set template to prepare encoding
     dataset.set_template('Qwen3VLTemplate', model_id='ms://Qwen/Qwen3.5-4B', max_length=1024)
     # Preprocess the dataset to standard format
     dataset.map(LatexOCRProcessor)
     # Encode dataset
     dataset.encode()
-    dataset.pack_dataset()
-    # Global batch size = 8, for GPUs, so 1 sample per GPU
-    dataloader = DataLoader(dataset=dataset, batch_size=2)
+    # Global batch size = 4, for GPUs, so 2 sample per GPU
+    dataloader = DataLoader(dataset=dataset, batch_size=4)
     # Use a TransformersModel
     from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForConditionalGeneration
     model = TransformersModel(model_id='ms://Qwen/Qwen3.5-4B', model_cls=Qwen3_5ForConditionalGeneration)
@@ -61,8 +74,6 @@ def train():
     logger.info(model.get_train_configs())
     logger.info(f'Total steps: {len(dataloader)}')
     loss_metric = 99.0
-    # lora: 18G * 4
-    # full: 50G * 4
     for step, batch in enumerate(dataloader):
         # Do forward and backward
         model.forward_backward(inputs=batch)
