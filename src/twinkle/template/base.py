@@ -360,10 +360,10 @@ class Template:
         """Get position_ids. Override for models with special position encoding."""
         return None
 
-    def _post_encode(self, model: torch.nn.Module, inputs: Dict[str, Any]) -> Dict[str, Any]:
+    def _post_encode(self, model: 'torch.nn.Module', inputs: Dict[str, Any]) -> Dict[str, Any]:
         return inputs
 
-    def pre_forward_hook(self, model: torch.nn.Module, args, kwargs):
+    def pre_forward_hook(self, model: 'torch.nn.Module', args, kwargs):
         device = next(model.parameters()).device
         old_kwargs = to_device(kwargs, device)
         kwargs = to_device(self._post_encode(model, old_kwargs), device)
