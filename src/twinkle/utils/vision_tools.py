@@ -48,6 +48,7 @@ def load_mm_file(path: Union[str, bytes, _T]) -> Union[BytesIO, _T]:
 def load_image(image: Union[str, bytes, 'Image.Image']) -> 'Image.Image':
     image = load_mm_file(image)
     if isinstance(image, BytesIO):
+        from PIL import Image
         image = Image.open(image)
     if image.mode != 'RGB':
         image = image.convert('RGB')

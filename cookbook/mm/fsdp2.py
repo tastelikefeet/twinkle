@@ -32,7 +32,7 @@ def train():
     # 2000 samples
     dataset = LazyDataset(dataset_meta=DatasetMeta('ms://AI-ModelScope/LaTeX_OCR', data_slice=range(2000)))
     # Set template to prepare encoding
-    dataset.set_template('Template', model_id='ms://Qwen/Qwen3.5-4B')
+    dataset.set_template('Qwen3VLTemplate', model_id='ms://Qwen/Qwen3.5-4B')
     # Preprocess the dataset to standard format
     dataset.map(LatexOCRProcessor)
     # Encode dataset
@@ -40,7 +40,8 @@ def train():
     # Global batch size = 8, for GPUs, so 1 sample per GPU
     dataloader = DataLoader(dataset=dataset, batch_size=8)
     # Use a TransformersModel
-    model = TransformersModel(model_id='ms://Qwen/Qwen3.5-4B')
+    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForConditionalGeneration
+    model = TransformersModel(model_id='ms://Qwen/Qwen3.5-4B', model_cls=Qwen3_5ForConditionalGeneration)
     model.model._no_split_modules = {'Qwen3_5DecoderLayer'}
 
     lora_config = LoraConfig(r=8, lora_alpha=32, target_modules='all-linear')
@@ -49,6 +50,7 @@ def train():
     # Comment this to use full-parameter training
     model.add_adapter_to_model('default', lora_config, gradient_accumulation_steps=2)
     # Add Optimizer for lora `default`
+    model.set_template('Qwen3VLTemplate', model_id='ms://Qwen/Qwen3.5-4B')
     model.set_optimizer(optimizer_cls='AdamW', lr=1e-4)
     # Add LRScheduler for lora `default`
     model.set_lr_scheduler(

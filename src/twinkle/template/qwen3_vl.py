@@ -43,23 +43,19 @@ class Qwen3VLTemplate(Template):
         return self._merge_size or 2
 
     def preprocess_image(self, image: ImageInput) -> Image.Image:
-        try:
-            requires('qwen_vl_utils')
-            from qwen_vl_utils.vision_process import fetch_image
-            image = load_image(image)
-            if isinstance(image, str):
-                image_input = {'image': image}
-            elif isinstance(image, Image.Image):
-                image_input = {'image': image}
-            else:
-                # Fallback to base class for tensor inputs
-                return super().preprocess_image(image)
-
-            # Use qwen_vl_utils with correct patch_size
-            return fetch_image(image_input, image_patch_size=self.patch_size)
-
-        except ImportError:
+        requires('qwen_vl_utils')
+        from qwen_vl_utils.vision_process import fetch_image
+        image = super().preprocess_image(image)
+        if isinstance(image, str):
+            image_input = {'image': image}
+        elif isinstance(image, Image.Image):
+            image_input = {'image': image}
+        else:
+            # Fallback to base class for tensor inputs
             return super().preprocess_image(image)
+
+        # Use qwen_vl_utils with correct patch_size
+        return fetch_image(image_input, image_patch_size=self.patch_size)
 
     def preprocess_video(self, video: VideoInput) -> Union[List[Image.Image], torch.Tensor]:
         try:
@@ -90,7 +86,7 @@ class Qwen3VLTemplate(Template):
             inputs_embeds = base_model.model.embed_tokens(input_ids)
         else:
             inputs_embeds = base_model.model.language_model.embed_tokens(input_ids)
-        inputs_embeds = get_inputs_embeds_hf(inputs_embeds, inputs, model.visual, self.processor, model.config)
+        inputs_embeds = get_inputs_embeds_hf(inputs_embeds, inputs, base_model.model.visual, self.processor, model.config)
         return {'inputs_embeds': inputs_embeds}
 
     def _get_position_ids(self, inputs: Dict[str, Any]) -> Optional[torch.Tensor]:

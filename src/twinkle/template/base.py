@@ -115,6 +115,11 @@ class Template:
             self._template_support_assistant_tokens_mask = False
 
     def preprocess_image(self, image: ImageInput) -> 'Image.Image':
+        if isinstance(image, dict):
+            if image.get('path'):
+                image = image['path']
+            else:
+                image = image['bytes']
         return load_image(image)
 
     def preprocess_video(self, video: VideoInput) -> List['Image.Image']:

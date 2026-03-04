@@ -104,14 +104,14 @@ def tokenize_with_assistant_labels(
             assistant_count += 1
         _dummy_messages.append(msg)
 
-    encoded = encode_func(trajectory, )
+    encoded = encode_func(trajectory)
     full_ids = encoded.pop('input_ids')
     if isinstance(full_ids, torch.Tensor):
         full_ids = full_ids.tolist()[0]
 
     _dummy_trajectory = copy(trajectory)
     _dummy_trajectory['messages'] = _dummy_messages
-    template_ids = encode_func(_dummy_trajectory, )
+    template_ids = encode_func(_dummy_trajectory)
     template_ids = template_ids['input_ids']
     if isinstance(template_ids, torch.Tensor):
         template_ids = template_ids.tolist()[0]
