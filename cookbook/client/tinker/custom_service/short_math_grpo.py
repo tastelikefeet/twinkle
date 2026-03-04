@@ -60,7 +60,10 @@ SYSTEM_PROMPT = ('You are a math assistant that values brevity. '
 
 class MathPreprocessor(Preprocessor):
 
-    def __call__(self, sample):
+    def __call__(self, rows):
+        return [self.preprocess(row) for row in rows]
+
+    def preprocess(self, sample):
         if sample['level'] not in ('Level 4', 'Level 5'):
             return Trajectory(messages=[], user_data=[])
 

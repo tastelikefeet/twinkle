@@ -19,7 +19,10 @@ logger = get_logger()
 
 class LatexOCRProcessor(Preprocessor):
 
-    def __call__(self, row) -> Trajectory:
+    def __call__(self, rows):
+        return [self.preprocess(row) for row in rows]
+
+    def preprocess(self, row) -> Trajectory:
         return Trajectory(
             messages=[
                 Message(role='user', content='<image>Using LaTeX to perform OCR on the image.', images=[row['image']]),
