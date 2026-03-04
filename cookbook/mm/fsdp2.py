@@ -31,7 +31,7 @@ class LatexOCRProcessor(Preprocessor):
 def eval(model):
     # 100 Samples
     dataset = LazyDataset(dataset_meta=DatasetMeta('ms://AI-ModelScope/LaTeX_OCR', data_slice=range(100)))
-    dataset.set_template('Qwen3VLTemplate', model_id='ms://Qwen/Qwen3.5-4B')
+    dataset.set_template('Qwen3_5Template', model_id='ms://Qwen/Qwen3.5-4B')
     dataset.map(LatexOCRProcessor)
     dataset.encode()
     dataloader = DataLoader(dataset=dataset, batch_size=8)
@@ -46,7 +46,7 @@ def train():
     # 2000 samples
     dataset = LazyDataset(dataset_meta=DatasetMeta('ms://AI-ModelScope/LaTeX_OCR', data_slice=range(2000)))
     # Set template to prepare encoding
-    dataset.set_template('Qwen3VLTemplate', model_id='ms://Qwen/Qwen3.5-4B', max_length=1024)
+    dataset.set_template('Qwen3_5Template', model_id='ms://Qwen/Qwen3.5-4B', max_length=1024)
     # Preprocess the dataset to standard format
     dataset.map(LatexOCRProcessor)
     # Encode dataset
@@ -64,7 +64,7 @@ def train():
     # Comment this to use full-parameter training
     model.add_adapter_to_model('default', lora_config, gradient_accumulation_steps=2)
     # Add Optimizer for lora `default`
-    model.set_template('Qwen3VLTemplate', model_id='ms://Qwen/Qwen3.5-4B')
+    model.set_template('Qwen3_5Template', model_id='ms://Qwen/Qwen3.5-4B')
     model.set_optimizer(optimizer_cls='AdamW', lr=1e-4)
     # Add LRScheduler for lora `default`
     model.set_lr_scheduler(

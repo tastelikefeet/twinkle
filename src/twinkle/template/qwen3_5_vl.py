@@ -6,11 +6,10 @@ from twinkle import remote_class, requires
 from twinkle.template import Template
 from twinkle.template.base import ImageInput, VideoInput
 from twinkle.template.utils import get_inputs_embeds_hf
-from twinkle.utils import load_image
 
 
 @remote_class()
-class Qwen3VLTemplate(Template):
+class Qwen3_5Template(Template):
     """
     Processor for Qwen VL series.
 
@@ -83,33 +82,3 @@ class Qwen3VLTemplate(Template):
         inputs_embeds = get_inputs_embeds_hf(inputs_embeds, inputs, base_model.model.visual, self.processor,
                                              model.config)
         return {'inputs_embeds': inputs_embeds}
-
-    def _get_position_ids(self, inputs: Dict[str, Any]) -> Optional[torch.Tensor]:
-        """Get 3D RoPE position_ids for Qwen VL."""
-        if self.model is None:
-            return None
-
-        input_ids = inputs.get('input_ids')
-        if input_ids is None:
-            return None
-
-        # Find get_rope_index
-        base_model = self.model
-        if hasattr(base_model, 'base_model'):
-            base_model = base_model.base_model
-        if hasattr(base_model, 'model'):
-            base_model = base_model.model
-
-        get_rope_index = getattr(base_model, 'get_rope_index', None)
-        if get_rope_index is None and hasattr(base_model, 'model'):
-            get_rope_index = getattr(base_model.model, 'get_rope_index', None)
-
-        if get_rope_index is None:
-            return None
-
-        try:
-            position_ids, _ = get_rope_index(input_ids, inputs.get('image_grid_thw'), inputs.get('video_grid_thw'),
-                                             inputs.get('attention_mask'))
-            return position_ids
-        except Exception:
-            return None

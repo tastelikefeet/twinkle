@@ -28,7 +28,7 @@ from twinkle.data_format import SamplingParams, Trajectory
 from twinkle.sampler.torch_sampler import TorchSampler
 from twinkle.sampler.vllm_sampler import vLLMSampler
 from twinkle.template import Template
-from twinkle.template.qwen3_vl import Qwen3VLTemplate
+from twinkle.template.qwen3_vl import Qwen3_5Template
 
 # Test models
 LLM_MODEL_ID = 'Qwen/Qwen2.5-7B-Instruct'
@@ -269,7 +269,7 @@ def test_mllm_torch_sampler():
     seed_everything(42)
     from transformers import Qwen3VLForConditionalGeneration
     sampler = TorchSampler(MLLM_MODEL_ID, model_cls=Qwen3VLForConditionalGeneration)
-    sampler.set_template(Qwen3VLTemplate, model_id=MLLM_MODEL_ID)
+    sampler.set_template(Qwen3_5Template, model_id=MLLM_MODEL_ID)
 
     trajectory = Trajectory(messages=MLLM_MESSAGES, images=MLLM_IMAGES)
     sampling_params = SamplingParams(max_tokens=128, temperature=0)
@@ -297,7 +297,7 @@ def test_mllm_vllm_sampler():
 
     seed_everything(42)
     sampler = vLLMSampler(MLLM_MODEL_ID, gpu_memory_utilization=VLLM_GPU_MEM, max_model_len=VLLM_MAX_MODEL_LEN)
-    sampler.set_template(Qwen3VLTemplate, model_id=MLLM_MODEL_ID)
+    sampler.set_template(Qwen3_5Template, model_id=MLLM_MODEL_ID)
 
     trajectory = Trajectory(messages=MLLM_MESSAGES, images=MLLM_IMAGES)
     sampling_params = SamplingParams(max_tokens=128, temperature=0)

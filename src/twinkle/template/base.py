@@ -358,14 +358,12 @@ class Template:
         else:
             return self.processor.encode(self.image_placeholder)
 
-    def _get_position_ids(self, inputs: Dict[str, Any]) -> Optional['torch.Tensor']:
-        """Get position_ids. Override for models with special position encoding."""
-        return None
-
     def _post_encode(self, model: 'torch.nn.Module', inputs: Dict[str, Any]) -> Dict[str, Any]:
         return inputs
 
     def pre_forward_hook(self, model: 'torch.nn.Module', args, kwargs):
+        if not self.is_mm:
+            return args, kwargs
         device = next(model.parameters()).device
         old_kwargs = to_device(kwargs, device)
         kwargs = to_device(self._post_encode(model, old_kwargs), device)
