@@ -18,9 +18,7 @@ class Qwen3VLTemplate(Template):
     """
 
     def __init__(self, *args, **kwargs):
-        # TODO untested code
         super().__init__(*args, **kwargs)
-        # Cache processor config for preprocessing
         self._patch_size: Optional[int] = None
         self._merge_size: Optional[int] = None
         self._init_vision_config()
@@ -58,21 +56,16 @@ class Qwen3VLTemplate(Template):
         return fetch_image(image_input, image_patch_size=self.patch_size)
 
     def preprocess_video(self, video: VideoInput) -> Union[List[Image.Image], torch.Tensor]:
-        try:
-            from qwen_vl_utils.vision_process import fetch_video
+        requires('qwen_vl_utils')
+        from qwen_vl_utils.vision_process import fetch_video
 
-            if isinstance(video, str):
-                # Use qwen_vl_utils for video loading
-                video_input = {'video': video}
-                result = fetch_video(video_input, image_patch_size=self.patch_size, return_video_sample_fps=False)
-                return result
-            elif isinstance(video, list):
-                # List of images - preprocess each frame
-                return [self.preprocess_image(frame) for frame in video]
-            else:
-                return super().preprocess_video(video)
-
-        except ImportError:
+        if isinstance(video, str):
+            video_input = {'video': video}
+            result = fetch_video(video_input, image_patch_size=self.patch_size, return_video_sample_fps=False)
+            return result
+        elif isinstance(video, list):
+            return [self.preprocess_image(frame) for frame in video]
+        else:
             return super().preprocess_video(video)
 
     def _post_encode(self, model, inputs: Dict[str, Any]) -> Dict[str, Any]:

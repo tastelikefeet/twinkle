@@ -94,6 +94,10 @@ class InputProcessor:
                     value = torch.from_numpy(value)
                 elif isinstance(value, list) and isinstance(value[0], (int, float, np.number)):
                     value = torch.tensor(value)
+                elif key in self.VLM_CONCAT_FIELDS:
+                    if not isinstance(value[0], torch.Tensor):
+                        value = [torch.tensor(v) for v in value]
+                        value = torch.cat(value, dim=0)
                 if isinstance(value, torch.Tensor):
                     value = value.to(Platform.get_local_device())
                     if value.dim() == 1:

@@ -5,7 +5,7 @@ import twinkle
 from twinkle import DeviceMesh, get_device_placement, get_logger
 from twinkle.data_format import Trajectory, Message
 from twinkle.dataloader import DataLoader
-from twinkle.dataset import LazyDataset, DatasetMeta
+from twinkle.dataset import LazyDataset, PackingDataset, DatasetMeta
 from twinkle.model import TransformersModel
 from twinkle.preprocessor import SelfCognitionProcessor, Preprocessor
 
@@ -30,15 +30,16 @@ class LatexOCRProcessor(Preprocessor):
 
 def train():
     # 2000 samples
-    dataset = LazyDataset(dataset_meta=DatasetMeta('ms://AI-ModelScope/LaTeX_OCR', data_slice=range(2000)))
+    dataset = PackingDataset(dataset_meta=DatasetMeta('ms://AI-ModelScope/LaTeX_OCR', data_slice=range(2000)))
     # Set template to prepare encoding
-    dataset.set_template('Qwen3VLTemplate', model_id='ms://Qwen/Qwen3.5-4B')
+    dataset.set_template('Qwen3VLTemplate', model_id='ms://Qwen/Qwen3.5-4B', max_length=1024)
     # Preprocess the dataset to standard format
     dataset.map(LatexOCRProcessor)
     # Encode dataset
     dataset.encode()
+    dataset.pack_dataset()
     # Global batch size = 8, for GPUs, so 1 sample per GPU
-    dataloader = DataLoader(dataset=dataset, batch_size=8)
+    dataloader = DataLoader(dataset=dataset, batch_size=2)
     # Use a TransformersModel
     from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForConditionalGeneration
     model = TransformersModel(model_id='ms://Qwen/Qwen3.5-4B', model_cls=Qwen3_5ForConditionalGeneration)
