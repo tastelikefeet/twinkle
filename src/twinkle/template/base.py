@@ -1,17 +1,15 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 import inspect
-
 import numpy as np
 import os
 from collections.abc import Mapping
-from copy import deepcopy, copy
+from copy import copy, deepcopy
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, Union
 
 from twinkle.data_format import InputFeature, Message, Trajectory
 from twinkle.hub import HubOperation
+from twinkle.utils import load_image, to_device
 from .utils import tokenize_with_assistant_labels, transfer_to_standard_message
-from twinkle.utils import to_device
-from twinkle.utils import load_image
 
 if TYPE_CHECKING:
     import torch
@@ -235,8 +233,7 @@ class Template:
                 assert len(message['audios']) == content.count(self.audio_placeholder)
             new_messages.append(
                 transfer_to_standard_message(message, self.image_placeholder, self.video_placeholder,
-                                             self.audio_placeholder,
-                                             self.is_mm))
+                                             self.audio_placeholder, self.is_mm))
 
         trajectory['messages'] = new_messages
         return [trajectory]

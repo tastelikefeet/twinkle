@@ -172,13 +172,13 @@ def _load_image(img: Any) -> Optional[Any]:
 
 
 def _transfer_single_message(
-        content: str,
-        image_placeholder: str,
-        video_placeholder: str,
-        audio_placeholder: str,
-        images: list | None = None,
-        videos: list | None = None,
-        audios: list | None = None,
+    content: str,
+    image_placeholder: str,
+    video_placeholder: str,
+    audio_placeholder: str,
+    images: list | None = None,
+    videos: list | None = None,
+    audios: list | None = None,
 ) -> list[dict]:
     if not content:
         return []
@@ -228,8 +228,9 @@ def _transfer_single_message(
 
 def transfer_to_standard_message(message: Message, image_placeholder, video_placeholder, audio_placeholder, is_mm):
     if is_mm:
-        new_content = _transfer_single_message(message['content'], image_placeholder, video_placeholder, audio_placeholder,
-                                               message.get('images'), message.get('videos'), message.get('audios'))
+        new_content = _transfer_single_message(message['content'], image_placeholder, video_placeholder,
+                                               audio_placeholder, message.get('images'), message.get('videos'),
+                                               message.get('audios'))
     else:
         new_content = message['content']
 
@@ -279,7 +280,7 @@ def get_inputs_embeds_hf(inputs_embeds, inputs, visual, processor, config):
             image_embeds = mixed_embeds
             video_embeds = None
         else:
-            merge_length = processor.image_processor.merge_size ** 2
+            merge_length = processor.image_processor.merge_size**2
             image_tokens = (image_grid_thw.prod(dim=-1) // merge_length).sum()
             image_embeds = mixed_embeds[:image_tokens]
             video_embeds = mixed_embeds[image_tokens:]

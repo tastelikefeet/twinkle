@@ -1,6 +1,7 @@
 import torch
 from PIL import Image
 from typing import Any, Dict, List, Optional, Union
+
 from twinkle import remote_class, requires
 from twinkle.template import Template
 from twinkle.template.base import ImageInput, VideoInput
@@ -79,7 +80,8 @@ class Qwen3VLTemplate(Template):
             inputs_embeds = base_model.model.embed_tokens(input_ids)
         else:
             inputs_embeds = base_model.model.language_model.embed_tokens(input_ids)
-        inputs_embeds = get_inputs_embeds_hf(inputs_embeds, inputs, base_model.model.visual, self.processor, model.config)
+        inputs_embeds = get_inputs_embeds_hf(inputs_embeds, inputs, base_model.model.visual, self.processor,
+                                             model.config)
         return {'inputs_embeds': inputs_embeds}
 
     def _get_position_ids(self, inputs: Dict[str, Any]) -> Optional[torch.Tensor]:

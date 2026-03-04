@@ -165,7 +165,8 @@ class HubOperation:
                      subset_name: str,
                      split: str,
                      streaming: bool = False,
-                     revision: Optional[str] = None, **kwargs):
+                     revision: Optional[str] = None,
+                     **kwargs):
         """Load a dataset from the repo
 
         Args:
