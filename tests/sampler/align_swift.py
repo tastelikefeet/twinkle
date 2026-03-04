@@ -17,7 +17,6 @@ Run Ray test alone: python align_swift.py --ray
 
 import gc
 import os
-import sys
 import torch
 from swift.infer_engine import RequestConfig, TransformersEngine, VllmEngine
 from swift.utils import seed_everything
@@ -27,8 +26,7 @@ import twinkle
 from twinkle.data_format import SamplingParams, Trajectory
 from twinkle.sampler.torch_sampler import TorchSampler
 from twinkle.sampler.vllm_sampler import vLLMSampler
-from twinkle.template import Template
-from twinkle.template.qwen3_vl import Qwen3_5Template
+from twinkle.template import Qwen3_5Template, Template
 
 # Test models
 LLM_MODEL_ID = 'Qwen/Qwen2.5-7B-Instruct'
@@ -182,7 +180,6 @@ def test_llm_vllm_sampler_ray():
     from peft import LoraConfig
 
     from twinkle import DeviceGroup, DeviceMesh, get_device_placement, get_logger
-    from twinkle.checkpoint_engine import CheckpointEngineManager
     from twinkle.model import TransformersModel
     from twinkle.processor import InputProcessor
 
