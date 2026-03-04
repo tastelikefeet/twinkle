@@ -1,7 +1,6 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 import os
 from peft import LoraConfig, PeftConfig, PeftModel, load_peft_weights
-from sympy.printing.pytorch import torch
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
@@ -66,7 +65,7 @@ class MultiLoraTransformersModel(TransformersModel, PreTrainedModel):
 
     def register_global_mm_forward_hook(self):
 
-        def forward_hook(model: torch.nn.Module, args, kwargs):
+        def forward_hook(model, args, kwargs):
             active_adapter = model.active_adapters[0]
             active_adapter = self.multi_adapter.find_lora(active_adapter).tenant_adapter_name
             optimizer_group = self.optimizer_group[active_adapter]
