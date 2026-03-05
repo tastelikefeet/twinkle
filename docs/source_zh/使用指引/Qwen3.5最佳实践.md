@@ -208,12 +208,12 @@ def main():
     ]
     model_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, dp_size=MODEL_GPUS)
     sampler_mesh = DeviceMesh.from_sizes(world_size=SAMPLER_GPUS, dp_size=SAMPLER_GPUS)
-    
+
     # Ray 模式初始化
     twinkle.initialize(mode='ray', nproc_per_node=NUM_GPUS, groups=device_groups, lazy_collect=False)
 
     lora_config = LoraConfig(target_modules='all-linear', r=32, lora_alpha=64, lora_dropout=0.05)
-    
+
     # 模型部署在 'model' 组
     model = TransformersModel(model_id=MODEL_ID, device_mesh=model_mesh, remote_group='model')
     model.add_adapter_to_model(ADAPTER_NAME, lora_config, gradient_accumulation_steps=1)
@@ -246,7 +246,7 @@ def main():
         device_mesh=model_mesh,
         remote_group='model',
     )
-    
+
     advantage_fn = GRPOAdvantage()
     metrics = CompletionRewardMetric()
     sampling_params = SamplingParams(max_tokens=MAX_NEW_TOKENS)
@@ -259,11 +259,11 @@ def main():
             break
         metrics.reset()
         global_prompts = batch if isinstance(batch, list) else [batch]
-        
+
         # 同步权重到采样器
         ckpt_manager.sync_weights(merge_and_sync=True)
         sampler.reset_prefix_cache()
-        
+
         # 组采样：每个 prompt 采样 NUM_GENERATIONS 个结果
         sample_response = sampler.sample(
             global_prompts * NUM_GENERATIONS,
@@ -410,7 +410,7 @@ def train():
     model.set_processor('InputProcessor', padding_side='right')
     model.set_loss('CrossEntropyLoss')
     model.set_optimizer('Adam', lr=1e-4)
-    
+
     # Megatron 后端暂不支持 LR 调度器
     if not use_megatron:
         model.set_lr_scheduler('LinearLR')
