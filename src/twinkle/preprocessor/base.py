@@ -7,7 +7,9 @@ from twinkle.data_format import Trajectory
 class Preprocessor:
 
     @staticmethod
-    def map_col_to_row(rows: Dict[str, Any]):
+    def map_col_to_row(rows: Dict[str, List[Any]]) -> List[Dict[str, Any]]:
+        if not rows:
+            return []
         _new_rows = []
         total_count = len(rows[next(iter(list(rows.keys())))])
         for i in range(total_count):
