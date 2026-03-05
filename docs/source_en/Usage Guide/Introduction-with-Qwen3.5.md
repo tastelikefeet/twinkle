@@ -1,6 +1,6 @@
 # Qwen3.5 Training Best Practices
 
-Using Qwen3.5-4B as an example, this guide demonstrates the core capability of the Twinkle framework: **one codebase, from single GPU training to Client-Server mode**.
+Using Qwen3.5-4B as an example, this guide demonstrates the core capability of the Twinkle framework: **one component-based code, used from single GPU training to Client-Server mode**.
 
 ---
 

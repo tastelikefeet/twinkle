@@ -1,6 +1,6 @@
 # Qwen3.5 训练最佳实践
 
-本文以 Qwen3.5-4B 为例，演示 Twinkle 框架的核心能力：**一套代码，从单卡训练到Client-Server环境**。
+本文以 Qwen3.5-4B 为例，演示 Twinkle 框架的核心能力：**一套组件化代码，从单卡训练到Client-Server环境**。
 
 ---
 
