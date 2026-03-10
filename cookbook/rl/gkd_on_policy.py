@@ -55,7 +55,7 @@ logger = get_logger()
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 STUDENT_MODEL_ID = os.environ.get('STUDENT_MODEL_ID', 'ms://Qwen/Qwen2.5-1.5B-Instruct')
-TEACHER_MODEL_ID = os.environ.get('TEACHER_MODEL_ID', 'ms://Qwen/Qwen2.5-7B-Instruct')
+TEACHER_MODEL_ID = os.environ.get('TEACHER_MODEL_ID', 'ms://Qwen/Qwen3-4B')
 
 MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 4))
 SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS', 4))
@@ -98,7 +98,6 @@ def main():
         mode='ray',
         nproc_per_node=NUM_GPUS,
         groups=device_groups,
-        lazy_collect=False,
     )
     logger.info(get_device_placement())
 
@@ -156,16 +155,15 @@ def main():
             break
 
         # Teacher vLLM generates completions
-        prompts: List = batch if isinstance(batch, list) else [batch]
-        sample_response = teacher_sampler.sample(prompts, sampling_params, num_samples=1)
+        sample_response = teacher_sampler.sample(batch, sampling_params, num_samples=1)
         input_data = [seq.new_input_feature for seq in sample_response.sequences]
 
         # Teacher logits (frozen)
         teacher_output = teacher_model.forward_only(inputs=input_data)
-        teacher_logits = teacher_output.get('logits')
+        teacher_output = teacher_output()
 
         # Student forward + GKD backward
-        student_model.forward_backward(inputs=input_data, teacher_logits=teacher_logits, topk=topk)
+        student_model.forward_backward(inputs=input_data, teacher_output=teacher_output, topk=topk)
         student_model.clip_grad_and_step()
         optim_step += 1
 

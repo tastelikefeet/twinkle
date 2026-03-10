@@ -26,7 +26,7 @@ from twinkle import DeviceMesh, Platform, remote_class, remote_function, require
 from twinkle.checkpoint_engine.mixin import CheckpointEngineMixin
 from twinkle.data_format import InputFeature, ModelOutput, Trajectory
 from twinkle.hub import HubOperation
-from twinkle.loss import Loss, VocabParallelCrossEntropyLoss
+from twinkle.loss import Loss, CrossEntropyLoss
 from twinkle.metric import LossMetric, Metric, TrainMetric
 from twinkle.model.base import TwinkleModel
 from twinkle.patch import Patch, apply_patch
@@ -238,7 +238,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
 
     def _construct_default_optimizer_group(self):
         return MegatronOptimizerGroup(
-            loss_instance=VocabParallelCrossEntropyLoss(),
+            loss_instance=CrossEntropyLoss(),
             template=Template(self.tokenizer_id),
             processor=InputProcessor(self.device_mesh, framework='megatron'),
             _device_mesh=self.device_mesh,
@@ -398,6 +398,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         from megatron.core.pipeline_parallel import get_forward_backward_func
 
         adapter_name = kwargs.pop('adapter_name', self._get_default_group())
+        temperature = float(kwargs.pop('temperature', 1.0))
         forward_only = kwargs.pop('forward_only', False)
         optimizer_config = self.optimizer_group[adapter_name]
         loss_instance = self.optimizer_group[adapter_name].loss_instance
@@ -485,6 +486,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
                 loss_mask = (labels != -100).bool()
                 masked_labels = labels.clone()
                 masked_labels[~loss_mask] = 0
+                output_tensor.div_(temperature)
                 logps = selective_log_softmax(output_tensor, masked_labels)
                 if cp_size > 1:
                     logps = self._postprocess_tensor_cp(logps)

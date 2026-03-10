@@ -355,6 +355,7 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
             The output of the model forward.
         """
         adapter_name = kwargs.pop('adapter_name', self._get_default_group())
+        temperature = float(kwargs.pop('temperature', 1.0))
         optimizer_config = self.optimizer_group[adapter_name]
         self._lazy_wrap_model()
         if not inputs:
@@ -386,10 +387,12 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
             loss_mask = (labels != -100).bool()
             masked_labels = labels.clone()
             masked_labels[~loss_mask] = 0
-            outputs['logps'] = selective_log_softmax(outputs['logits'], masked_labels)
+            logits = outputs['logits']
+            logits.div_(temperature)
+            outputs['logps'] = selective_log_softmax(logits, masked_labels)
         return outputs
 
-    @remote_function(dispatch='slice_dp', collect='flatten')
+    @remote_function(dispatch='slice_dp')
     def forward_only(self, *, inputs: Union[InputFeature, List[InputFeature], List[Trajectory]], **kwargs):
         """Call forward function without grad and record the inputs and outputs.
 
@@ -401,6 +404,7 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
             The output of the model forward.
         """
         adapter_name = kwargs.pop('adapter_name', self._get_default_group())
+        temperature = float(kwargs.pop('temperature', 1.0))
         optimizer_config = self.optimizer_group[adapter_name]
         self._lazy_wrap_model()
         if not inputs:
@@ -433,7 +437,10 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
             loss_mask = (labels != -100).bool()
             masked_labels = labels.clone()
             masked_labels[~loss_mask] = 0
-            outputs['logps'] = selective_log_softmax(outputs['logits'], masked_labels)
+            logits = outputs['logits']
+            logits.div_(temperature)
+            outputs['logps'] = selective_log_softmax(logits, masked_labels)
+        outputs.pop('past_key_values', None)
         return outputs
 
     @remote_function(collect='mean')
