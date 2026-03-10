@@ -2,7 +2,7 @@ from typing import List, Dict, Any
 import torch
 
 
-def collect_tensor_dict(outputs: List[Dict[str, Any]], device_mesh) -> Dict[str, Any]:
+def collect_tensor_dict(outputs: List[Dict[str, Any]], **kwargs) -> Dict[str, Any]:
     if not outputs:
         return {}
 

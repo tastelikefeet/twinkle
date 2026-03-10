@@ -344,7 +344,8 @@ def _dispatch_args(workers, dispatch, execute, device_mesh: Optional[DeviceMesh]
         length = len(workers)
 
         def dispatch_func(arg, n):
-            if isinstance(arg, list):
+            import torch
+            if isinstance(arg, list) or isinstance(arg, torch.Tensor):
                 _args = []
                 for i in range(n):
                     _args.append(arg[device_mesh.get_slice(len(arg), device_mesh.get_data_rank_from_global_rank(i))])
