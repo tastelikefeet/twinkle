@@ -71,14 +71,13 @@ class GKDLoss(Loss):
         Returns:
             LossOutput with scalar 'loss' averaged over valid (non-ignored) response tokens.
         """
-        breakpoint()
         teacher_logits = teacher_output.get('logits')
-        teacher_topk_logprobs = teacher_output.get('teacher_topk_logprobs')
-        teacher_topk_indices = teacher_output.get('teacher_topk_indices')
+        teacher_topk_logprobs = teacher_output.get('topk_logprobs')
+        teacher_topk_indices = teacher_output.get('topk_indices')
         assert teacher_logits is not None or (
             teacher_topk_logprobs is not None and teacher_topk_indices is not None
         ), (
-            'Either teacher_logits or both teacher_topk_logprobs and teacher_topk_indices must be provided.'
+            'Either logits or both topk_logprobs and topk_indices must be provided.'
         )
 
         labels = inputs['labels']

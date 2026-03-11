@@ -1,5 +1,7 @@
-from typing import List, Dict, Any
-import torch
+from typing import List, Dict, Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import torch
 
 
 def collect_tensor_dict(outputs: List[Dict[str, Any]], **kwargs) -> Dict[str, Any]:
@@ -13,6 +15,7 @@ def collect_tensor_dict(outputs: List[Dict[str, Any]], **kwargs) -> Dict[str, An
     for d in outputs:
         all_keys.update(d.keys())
 
+    import torch
     result = {}
     for key in all_keys:
         values = [d[key] for d in outputs if key in d]
@@ -43,7 +46,8 @@ def collect_tensor_dict(outputs: List[Dict[str, Any]], **kwargs) -> Dict[str, An
     return result
 
 
-def _pad_and_stack_tensors(tensors: List[torch.Tensor], pad_value: float = 0) -> torch.Tensor:
+def _pad_and_stack_tensors(tensors: List['torch.Tensor'], pad_value: float = 0) -> 'torch.Tensor':
+    import torch
     if not tensors:
         raise ValueError("Empty tensor list")
 
