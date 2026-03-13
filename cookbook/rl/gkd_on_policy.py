@@ -128,7 +128,7 @@ def main():
     # ── Teacher vLLM sampler (for on-policy generation) ────────────────────────
     teacher_sampler = vLLMSampler(
         model_id=TEACHER_MODEL_ID,
-        engine_args={'gpu_memory_utilization': 0.85, 'max_model_len': 2048},
+        engine_args={'gpu_memory_utilization': 0.85, 'max_model_len': 2048, 'logprobs_mode': 'raw_logprobs'},
         device_mesh=sampler_mesh,
         remote_group='sampler',
     )
@@ -160,8 +160,6 @@ def main():
 
         # Teacher logits (frozen)
         teacher_output = teacher_model.forward_only(inputs=input_data)
-        teacher_output = teacher_output()
-
         # Student forward + GKD backward
         student_model.forward_backward(inputs=input_data, teacher_output=teacher_output, topk=topk)
         student_model.clip_grad_and_step()
