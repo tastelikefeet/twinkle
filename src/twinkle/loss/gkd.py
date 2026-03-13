@@ -85,8 +85,11 @@ class GKDLoss(Loss):
         # Align seq dimension: some MLLMs return extra prefix logits
         if student_logits.shape[1] != labels.shape[1]:
             student_logits = student_logits[:, -labels.shape[1]:]
-        if teacher_logits.shape[1] > student_logits.shape[1]:
+        if teacher_logits is not None and teacher_logits.shape[1] > student_logits.shape[1]:
             teacher_logits = teacher_logits[:, :student_logits.shape[1]]
+        if teacher_topk_logprobs is not None and teacher_topk_logprobs.shape[1] > student_logits.shape[1]:
+            teacher_topk_logprobs = teacher_topk_logprobs[:, :student_logits.shape[1]]
+            teacher_topk_indices = teacher_topk_indices[:, :student_logits.shape[1]]
 
         # Shift labels: label[i] = next token predicted by logits[i]
         # The last position wraps to label[0] via roll; since label[0] is -100 (prompt),
