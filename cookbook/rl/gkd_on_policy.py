@@ -218,8 +218,9 @@ def main():
         )
 
         # 3. Convert teacher logprobs to tensor format for GKDLoss
+        # teacher_response is List[SampleResponse], extract topk_prompt_logprobs from each
         teacher_output = convert_topk_prompt_logprobs(
-            teacher_response.topk_prompt_logprobs,
+            [resp.topk_prompt_logprobs for resp in teacher_response],
             device='cuda',
         )
 
