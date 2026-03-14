@@ -131,8 +131,8 @@ def convert_topk_prompt_logprobs(
             batch_indices[i].extend([[0] * topk] * pad_len)
 
     return {
-        'topk_logprobs': torch.tensor(batch_logprobs, dtype=torch.float32, device=device),
-        'topk_indices': torch.tensor(batch_indices, dtype=torch.long, device=device),
+        'teacher_topk_logprobs': torch.tensor(batch_logprobs, dtype=torch.float32, device=device),
+        'teacher_topk_indices': torch.tensor(batch_indices, dtype=torch.long, device=device),
     }
 
 
@@ -221,11 +221,10 @@ def main():
         # teacher_response is List[SampleResponse], extract topk_prompt_logprobs from each
         teacher_output = convert_topk_prompt_logprobs(
             [resp.topk_prompt_logprobs for resp in teacher_response],
-            device='cuda',
         )
 
         # 4. Student forward + GKD backward
-        student_model.forward_backward(inputs=input_data, teacher_output=teacher_output)
+        student_model.forward_backward(inputs=input_data, **teacher_output)
         student_model.clip_grad_and_step()
         optim_step += 1
 

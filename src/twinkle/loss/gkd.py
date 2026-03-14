@@ -49,7 +49,9 @@ class GKDLoss(Loss):
         inputs,
         outputs,
         *,
-        teacher_output: Optional['torch.Tensor'] = None,
+        teacher_logits: Optional['torch.Tensor'] = None,
+        teacher_topk_logprobs: Optional['torch.Tensor'] = None,
+        teacher_topk_indices: Optional['torch.Tensor'] = None,
         topk: Optional[int] = None,
         **kwargs,
     ) -> LossOutput:
@@ -58,22 +60,18 @@ class GKDLoss(Loss):
         Args:
             inputs: Dict containing 'labels' [batch, seq_len] with ignore_index for non-response tokens.
             outputs: Dict containing 'logits' [batch, seq_len, vocab_size] from the student model.
-            teacher_output: A dict contains:
-                teacher_logits: [batch, seq_len, vocab_size] full vocabulary logits from a local teacher.
-                            Either teacher_logits or (teacher_topk_logprobs + teacher_topk_indices)
-                            must be provided.
-                teacher_topk_logprobs: [batch, seq_len, topk] log-probs from a remote teacher API.
-                                    Returned by a vLLM-compatible /v1/completions prompt_logprobs call.
-                teacher_topk_indices: [batch, seq_len, topk] token indices corresponding to teacher_topk_logprobs.
+            teacher_logits: [batch, seq_len, vocab_size] full vocabulary logits from a local teacher.
+                                Either teacher_logits or (teacher_topk_logprobs + teacher_topk_indices)
+                                must be provided.
+            teacher_topk_logprobs: [batch, seq_len, topk] log-probs from a remote teacher API.
+                                Returned by a vLLM-compatible /v1/completions prompt_logprobs call.
+            teacher_topk_indices: [batch, seq_len, topk] token indices corresponding to teacher_topk_logprobs.
             topk: If set together with teacher_logits, only the top-k teacher tokens are used to
                   reduce vocabulary size before computing the JSD (memory-efficient local teacher mode).
 
         Returns:
             LossOutput with scalar 'loss' averaged over valid (non-ignored) response tokens.
         """
-        teacher_logits = teacher_output.get('logits')
-        teacher_topk_logprobs = teacher_output.get('topk_logprobs')
-        teacher_topk_indices = teacher_output.get('topk_indices')
         assert teacher_logits is not None or (
             teacher_topk_logprobs is not None and teacher_topk_indices is not None
         ), (
@@ -152,12 +150,15 @@ class GKDLoss(Loss):
         if teacher_topk_logprobs is not None and teacher_topk_indices is not None:
             # Remote API teacher: teacher already provides top-k log-probs (T=1).
             # Gather student logits at teacher's top-k indices, then scale in-place.
+            teacher_topk_indices = teacher_topk_indices.to(student_logits.device)
+            teacher_topk_logprobs = teacher_topk_logprobs.to(student_logits.device)
             student_logits = torch.gather(student_logits, dim=-1, index=teacher_topk_indices)
             student_logits.div_(temperature)
             teacher_logits = teacher_topk_logprobs / temperature
             temperature = 1.0
         elif topk is not None and teacher_logits is not None:
             # Local teacher: select top-k from teacher, gather corresponding student logits
+            teacher_logits = teacher_logits.to(student_logits.device())
             teacher_logits, topk_idx = torch.topk(teacher_logits, k=topk, dim=-1)
             teacher_logits.div_(temperature)
             student_logits = torch.gather(student_logits, dim=-1, index=topk_idx)
@@ -177,6 +178,8 @@ class GKDLoss(Loss):
             elif stu_dim > tea_dim:
                 teacher_logits = F.pad(teacher_logits, (0, stu_dim - tea_dim))
                 teacher_logits[..., tea_dim:] = student_logits[..., tea_dim:]
+            if student_logits.shape[1] != mask.shape[1]:
+                breakpoint()
             student_logits = student_logits[mask]   # [num_valid, vocab/topk]
             teacher_logits = teacher_logits[mask]
             num_valid = mask.sum()
