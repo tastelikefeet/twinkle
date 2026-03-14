@@ -180,10 +180,6 @@ class VLLMEngine(BaseSamplerEngine):
         self,
         prompt_token_ids: List[int],
         sampling_params: Union[SamplingParams, Dict[str, Any]],
-        num_samples: int = 1,
-        logprobs: bool = True,
-        include_prompt_logprobs: bool = False,
-        topk_prompt_logprobs: int = 0,
         lora_request: Optional[Any] = None,
         request_id: Optional[str] = None,
         priority: int = 0,
@@ -220,7 +216,7 @@ class VLLMEngine(BaseSamplerEngine):
         # Convert to vLLM params
         if isinstance(sampling_params, dict):
             sampling_params = SamplingParams.from_dict(sampling_params)
-        prompt_logprobs_k = topk_prompt_logprobs if topk_prompt_logprobs > 0 else (1 if include_prompt_logprobs else 0)
+        prompt_logprobs_k = sampling_params.prompt_logprobs or 0
         vllm_params = sampling_params.to_vllm(**kwargs)
 
         # Build request

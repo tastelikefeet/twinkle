@@ -206,8 +206,8 @@ def main():
             break
 
         # 1. Student vLLM generates completions
-        sample_response = student_sampler.sample(batch, SamplingParams(max_tokens=MAX_NEW_TOKENS, temperature=1.0), num_samples=1)
-        input_data = [seq.new_input_feature for seq in sample_response.sequences]
+        sample_response = student_sampler.sample(batch, SamplingParams(max_tokens=MAX_NEW_TOKENS, temperature=1.0, num_samples=1))
+        input_data = [seq.new_input_feature for response in sample_response for seq in response.sequences]
         for data in input_data:
             data.pop('input_ids', None)
             

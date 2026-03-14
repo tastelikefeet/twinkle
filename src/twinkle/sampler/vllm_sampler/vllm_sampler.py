@@ -35,29 +35,6 @@ from twinkle.utils import Platform
 logger = get_logger()
 
 
-def _collect_sample_responses(results: List[SampleResponse], **kwargs) -> SampleResponse:
-    """Custom collect function to merge multiple SampleResponse objects.
-
-    Args:
-        results: List of SampleResponse from each DP worker.
-
-    Returns:
-        Merged SampleResponse with all sequences combined.
-    """
-    if not results:
-        return SampleResponse(sequences=[])
-
-    if len(results) == 1:
-        return results[0]
-
-    all_sequences = []
-    for resp in results:
-        if resp is not None and hasattr(resp, 'sequences'):
-            all_sequences.extend(resp.sequences)
-
-    return SampleResponse(sequences=all_sequences)
-
-
 @remote_class()
 class vLLMSampler(Sampler, CheckpointEngineMixin):
     """A vLLM-based sampler using VLLMEngine (AsyncLLM).
@@ -224,7 +201,6 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
         lora_request: Optional[Any] = None,
         *,
         logprobs: bool = True,
-        num_samples: int = 1,
     ) -> List[SampledSequence]:
         """Sample a single input asynchronously.
 
@@ -250,14 +226,13 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
             prompt_token_ids=input_ids,
             sampling_params=sampling_params,
             logprobs=logprobs,
-            num_samples=num_samples,
             lora_request=lora_request,
             images=images,
             videos=videos,
         )
 
         # response.sequences contains num_samples sequences for this prompt
-        return [
+        return SampleResponse(sequences=[
             SampledSequence(
                 stop_reason=seq.stop_reason,
                 tokens=seq.tokens,
@@ -265,9 +240,9 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
                 decoded=self.template.decode(seq.tokens),
                 new_input_feature=self.template.concat_input_feature(feat, seq.tokens),
             ) for seq in response.sequences
-        ]
+        ], prompt_logprobs=response.prompt_logprobs, topk_prompt_logprobs=response.topk_prompt_logprobs)
 
-    @remote_function(dispatch='slice_dp', collect=_collect_sample_responses, lazy_collect=False)
+    @remote_function(dispatch='slice_dp', collect='flatten', lazy_collect=False)
     def sample(
         self,
         inputs: Union[InputFeature, List[InputFeature], Trajectory, List[Trajectory]],
@@ -276,7 +251,7 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
         adapter_path: Optional[str] = None,
         *,
         return_encoded: bool = False,
-    ) -> SampleResponse:
+    ) -> List[SampleResponse]:
         """Sample responses for given inputs.
 
         Args:
@@ -300,7 +275,6 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
         Note:
             In Ray mode with multiple workers (DP > 1):
             - Data is automatically sliced by DP rank (dispatch='slice_dp')
-            - Results are merged using _collect_sample_responses
             - Each worker receives already-sliced inputs (e.g., DP4 with 8 inputs -> 2 per worker)
         """
         if sampling_params is None:
@@ -339,12 +313,8 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
             ]
             return await asyncio.gather(*tasks)
 
-        results = self._run_in_loop(_sample_all())
-        # Flatten results (each result contains num_samples sequences)
-        all_sequences = []
-        for seqs in results:
-            all_sequences.extend(seqs)
-        return SampleResponse(sequences=all_sequences)
+        sample_results = self._run_in_loop(_sample_all())
+        return sample_results
 
     @remote_function(dispatch='all', collect='first')
     def sleep(self, level: int = 1) -> None:
