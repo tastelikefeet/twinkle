@@ -183,6 +183,15 @@ def get_inputs_embeds_hf(inputs_embeds, inputs, visual, processor, config):
 
 
 class TokenizeByRound:
+    """Tokenize by encoding messages round-by-round.
+
+    This approach handles <think></think> tags correctly by encoding each message
+    incrementally, determining token boundaries by comparing consecutive encode results.
+
+    Unlike TokenizeByPlaceHolder which uses dummy placeholders and may fail when
+    reasoning_content causes extra <think></think> tags, this method directly encodes
+    the trajectory up to each message and compares lengths to find token ranges.
+    """
 
     @staticmethod
     def tokenize_with_assistant_labels(
@@ -190,7 +199,64 @@ class TokenizeByRound:
         encode_func: Callable,
         trajectory: Trajectory,
     ) -> Tuple[List[int], List[int], Dict[str, Any]]:
-        pass
+        """Tokenize trajectory and generate labels for assistant turns.
+
+        Args:
+            tokenizer: The tokenizer (used for decoding if needed).
+            encode_func: Function to encode a trajectory.
+            trajectory: The trajectory containing messages.
+
+        Returns:
+            Tuple of (input_ids, labels, extra_encoded_fields).
+            Labels are -100 for non-assistant tokens, original token id for assistant tokens.
+        """
+        import torch
+        messages = trajectory['messages']
+
+        # Encode full trajectory
+        encoded = encode_func(trajectory)
+        full_ids = encoded.pop('input_ids')
+        if isinstance(full_ids, torch.Tensor):
+            full_ids = full_ids.tolist()[0]
+
+        # Initialize labels: all -100 (not trained)
+        labels = [-100] * len(full_ids)
+
+        if not messages:
+            return full_ids, labels, encoded
+
+        # Encode round by round to find token boundaries
+        # prev_len tracks where the previous message ended
+        prev_len = 0
+
+        for i, msg in enumerate(messages):
+            # Create partial trajectory up to current message (inclusive)
+            partial_trajectory = copy(trajectory)
+            partial_trajectory['messages'] = list(messages[:i + 1])
+
+            # Encode partial trajectory
+            partial_encoded = encode_func(partial_trajectory)
+            partial_ids = partial_encoded['input_ids']
+            if isinstance(partial_ids, torch.Tensor):
+                partial_ids = partial_ids.tolist()[0]
+
+            curr_len = len(partial_ids)
+
+            # If this is an assistant message, mark those tokens as trainable
+            if msg['role'] == 'assistant':
+                # Tokens from prev_len to curr_len belong to this assistant turn
+                for j in range(prev_len, min(curr_len, len(full_ids))):
+                    labels[j] = full_ids[j]
+
+            prev_len = curr_len
+
+        # Handle any remaining tokens after the last message (e.g., EOS added by full encode)
+        # If the last message was assistant, these trailing tokens should also be trainable
+        if messages and messages[-1]['role'] == 'assistant':
+            for j in range(prev_len, len(full_ids)):
+                labels[j] = full_ids[j]
+
+        return full_ids, labels, encoded
 
 
 class TokenizeByPlaceHolder:
