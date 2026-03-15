@@ -188,9 +188,8 @@ class TokenizeByRound:
     This approach handles <think></think> tags correctly by encoding each message
     incrementally, determining token boundaries by comparing consecutive encode results.
 
-    Unlike TokenizeByPlaceHolder which uses dummy placeholders and may fail when
-    reasoning_content causes extra <think></think> tags, this method directly encodes
-    the trajectory up to each message and compares lengths to find token ranges.
+    For assistant messages, uses add_generation_prompt=True to exclude the assistant
+    prefix (e.g., '<|im_start|>assistant\n') from training labels.
     """
 
     @staticmethod
@@ -202,13 +201,14 @@ class TokenizeByRound:
         """Tokenize trajectory and generate labels for assistant turns.
 
         Args:
-            tokenizer: The tokenizer (used for decoding if needed).
-            encode_func: Function to encode a trajectory.
+            tokenizer: The tokenizer (unused, kept for interface compatibility).
+            encode_func: Function to encode a trajectory. Must support add_generation_prompt.
             trajectory: The trajectory containing messages.
 
         Returns:
             Tuple of (input_ids, labels, extra_encoded_fields).
-            Labels are -100 for non-assistant tokens, original token id for assistant tokens.
+            Labels are -100 for non-assistant tokens, original token id for assistant content tokens.
+            Assistant prefix tokens (e.g., '<|im_start|>assistant\n') are excluded from training.
         """
         import torch
         messages = trajectory['messages']
@@ -225,35 +225,29 @@ class TokenizeByRound:
         if not messages:
             return full_ids, labels, encoded
 
-        # Encode round by round to find token boundaries
-        # prev_len tracks where the previous message ended
-        prev_len = 0
-
         for i, msg in enumerate(messages):
-            # Create partial trajectory up to current message (inclusive)
-            partial_trajectory = copy(trajectory)
-            partial_trajectory['messages'] = list(messages[:i + 1])
+            if msg['role'] != 'assistant':
+                continue
 
-            # Encode partial trajectory
-            partial_encoded = encode_func(partial_trajectory)
-            partial_ids = partial_encoded['input_ids']
+            # Get position AFTER assistant prefix:
+            # encode(messages[:i], add_generation_prompt=True) includes the prefix
+            partial_trajectory = copy(trajectory)
+            partial_trajectory['messages'] = list(messages[:i])
+            partial_ids = encode_func(partial_trajectory, add_generation_prompt=True)['input_ids']
             if isinstance(partial_ids, torch.Tensor):
                 partial_ids = partial_ids.tolist()[0]
+            start_pos = len(partial_ids)
 
-            curr_len = len(partial_ids)
+            # Get end position: encode(messages[:i+1]) includes full assistant turn
+            partial_trajectory = copy(trajectory)
+            partial_trajectory['messages'] = list(messages[:i + 1])
+            partial_ids = encode_func(partial_trajectory)['input_ids']
+            if isinstance(partial_ids, torch.Tensor):
+                partial_ids = partial_ids.tolist()[0]
+            end_pos = len(partial_ids)
 
-            # If this is an assistant message, mark those tokens as trainable
-            if msg['role'] == 'assistant':
-                # Tokens from prev_len to curr_len belong to this assistant turn
-                for j in range(prev_len, min(curr_len, len(full_ids))):
-                    labels[j] = full_ids[j]
-
-            prev_len = curr_len
-
-        # Handle any remaining tokens after the last message (e.g., EOS added by full encode)
-        # If the last message was assistant, these trailing tokens should also be trainable
-        if messages and messages[-1]['role'] == 'assistant':
-            for j in range(prev_len, len(full_ids)):
+            # Mark assistant CONTENT tokens as trainable (excluding prefix)
+            for j in range(start_pos, min(end_pos, len(full_ids))):
                 labels[j] = full_ids[j]
 
         return full_ids, labels, encoded

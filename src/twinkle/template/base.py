@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, 
 from twinkle.data_format import InputFeature, Message, Trajectory
 from twinkle.hub import HubOperation
 from twinkle.utils import load_image, to_device
-from .utils import tokenize_with_assistant_labels, transfer_to_standard_message, TokenizeByRound
+from .utils import transfer_to_standard_message, TokenizeByRound
 
 if TYPE_CHECKING:
     import torch
