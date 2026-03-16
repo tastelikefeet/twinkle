@@ -111,9 +111,7 @@ def convert_topk_prompt_logprobs(
         seq_indices = []
         for pos_topk in seq_topk:
             if pos_topk is None:
-                # First position typically has no logprobs
-                seq_logprobs.append([0.0] * len(seq_topk[1]) if len(seq_topk) > 1 and seq_topk[1] else [0.0])
-                seq_indices.append([0] * len(seq_topk[1]) if len(seq_topk) > 1 and seq_topk[1] else [0])
+                continue
             else:
                 seq_logprobs.append([lp for _, lp in pos_topk])
                 seq_indices.append([tid for tid, _ in pos_topk])
