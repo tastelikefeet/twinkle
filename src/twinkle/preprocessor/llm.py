@@ -123,7 +123,7 @@ class GSM8KProcessor(Preprocessor):
     Only includes system + user messages; assistant response is generated on-policy.
     """
 
-    system_prompt = ('You are a helpful math assistant. Solve the problem step by step and put your final answer within \\boxed{}.')
+    system_prompt = ('You are a helpful math assistant. Solve the problem step by step and put your final answer within #### <number>')
 
     def extract_ground_truth(self, answer_str: str) -> str:
         """Extract the number after '####' from GSM8K answer."""

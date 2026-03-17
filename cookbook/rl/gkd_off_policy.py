@@ -189,14 +189,13 @@ def main():
             break
 
         # Teacher vLLM computes top-k prompt logprobs on the reference sequences
-        # max_tokens=1: don't generate new content, just compute logprobs on input
+        # max_tokens=0: don't generate new content, just compute logprobs on input
         teacher_response = teacher_sampler.sample(
             batch,
-            SamplingParams(max_tokens=1, temperature=1.0, prompt_logprobs=GKD_TOPK, num_samples=1),
+            SamplingParams(max_tokens=0, temperature=1.0, prompt_logprobs=GKD_TOPK, num_samples=1),
         )
 
-        # Use original batch as input_data (dataset reference responses)
-        input_data = batch if isinstance(batch, list) else [batch]
+        input_data = [seq.new_input_feature for response in teacher_response for seq in response.sequences]
 
         # Convert teacher logprobs to tensor format for GKDLoss
         teacher_output = convert_topk_prompt_logprobs(
