@@ -122,10 +122,7 @@ class GSM8KProcessor(Preprocessor):
     Extracts the ground truth number and stores it in user_data for reward.
     """
 
-    system_prompt = ('You are a helpful math assistant. Solve the problem step by step. '
-                     'Show your reasoning in <think> </think> tags, then give the final '
-                     'numerical answer after ####.\n'
-                     'For example:\n<think> ... reasoning ... </think>\n#### 42')
+    system_prompt = ('You are a helpful math assistant. Solve the problem step by step and put your final answer within \\boxed{}.')
 
     def extract_ground_truth(self, answer_str: str) -> str:
         """Extract the number after '####' from GSM8K answer."""

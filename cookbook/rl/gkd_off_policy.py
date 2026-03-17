@@ -69,7 +69,7 @@ LEARNING_RATE = float(os.environ.get('LR', 5e-5))
 
 GKD_BETA = float(os.environ.get('GKD_BETA', 0.5))
 GKD_TEMPERATURE = float(os.environ.get('GKD_TEMPERATURE', 1.0))
-GKD_TOPK = int(os.environ.get('GKD_TOPK', 20))
+GKD_TOPK = int(os.environ.get('GKD_TOPK', 64))
 MAX_NEW_TOKENS = int(os.environ.get('MAX_NEW_TOKENS', 2048))
 N_SAMPLES = int(os.environ.get('N_SAMPLES', 1))
 ADAPTER_NAME = 'default'
@@ -188,7 +188,7 @@ def main():
     # ── Teacher vLLM sampler (for prompt logprobs) ─────────────────────────────
     teacher_sampler = vLLMSampler(
         model_id=TEACHER_MODEL_ID,
-        engine_args={'gpu_memory_utilization': 0.85, 'max_model_len': 10240, 'logprobs_mode': 'raw_logprobs'},
+        engine_args={'gpu_memory_utilization': 0.85, 'max_model_len': 10240, 'logprobs_mode': 'raw_logprobs', 'max_logprobs': 64},
         device_mesh=sampler_mesh,
         remote_group='teacher_sampler',
     )
@@ -199,7 +199,6 @@ def main():
         dataset=create_dataset,
         batch_size=BATCH_SIZE,
         min_batch_size=BATCH_SIZE,
-        device_mesh=model_mesh,
         remote_group='student_model',
     )
 
