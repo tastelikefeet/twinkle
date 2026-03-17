@@ -63,7 +63,7 @@ MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 8))
 SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS', 8))
 NUM_GPUS = MODEL_GPUS + SAMPLER_GPUS
 
-BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 8))
+BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 16))
 MAX_STEPS = int(os.environ.get('MAX_STEPS', 1000))
 LEARNING_RATE = float(os.environ.get('LR', 5e-5))
 
@@ -179,7 +179,6 @@ def main():
     student_model.add_adapter_to_model(
         ADAPTER_NAME,
         LoraConfig(r=16, lora_alpha=32, lora_dropout=0.05, target_modules='all-linear'),
-        gradient_accumulation_steps=1,
     )
     student_model.set_optimizer('default', lr=LEARNING_RATE)
     student_model.set_lr_scheduler('default', lr_decay_steps=MAX_STEPS)
@@ -229,10 +228,11 @@ def main():
         student_model.forward_backward(inputs=input_data, **teacher_output)
         student_model.clip_grad_and_step()
 
-        metric = student_model.calculate_metric(is_training=True)
-        logger.info(f'[Step {optim_step}/{MAX_STEPS}] {metric}')
+        if optim_step > 0:
+            metric = student_model.calculate_metric(is_training=True)
+            logger.info(f'[Step {optim_step}/{MAX_STEPS}] {metric}')
 
-        if optim_step % 50 == 0:
+        if optim_step % 50 == 0 and optim_step > 0:
             student_model.save(f'gkd-offpolicy-ckpt-{optim_step}')
         
         optim_step += 1
