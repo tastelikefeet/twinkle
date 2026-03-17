@@ -303,7 +303,8 @@ class VLLMEngine(BaseSamplerEngine):
 
             for i, lp_dict in enumerate(result.prompt_logprobs):
                 if lp_dict is None:
-                    assert i == 0, 'Postion > 0 should not has None lobprobs!'
+                    result_prompt_logprobs.append(None)
+                    result_topk_prompt_logprobs.append(None)
                     continue
 
                 # Get logprob for the actual token
@@ -322,7 +323,6 @@ class VLLMEngine(BaseSamplerEngine):
                     lp_dict.items(), key=lambda x: -(x[1].logprob))[:prompt_logprobs_k]
                 result_topk_prompt_logprobs.append([(tid, lp_obj.logprob)
                                                     for tid, lp_obj in sorted_items])
-
         return SampleResponse(
             sequences=sequences,
             prompt_logprobs=result_prompt_logprobs,

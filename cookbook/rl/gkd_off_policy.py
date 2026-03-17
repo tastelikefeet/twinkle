@@ -49,29 +49,29 @@ from twinkle.dataloader import DataLoader
 from twinkle.dataset import Dataset, DatasetMeta
 from twinkle.loss import GKDLoss
 from twinkle.model import TransformersModel
-from twinkle.preprocessor import GSM8KFullProcessor
+from twinkle.preprocessor import GSM8KProcessor
 from twinkle.sampler import vLLMSampler
 from twinkle.template import Template
 
 logger = get_logger()
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-STUDENT_MODEL_ID = os.environ.get('STUDENT_MODEL_ID', 'ms://Qwen/Qwen3-0.6B')
-TEACHER_MODEL_ID = os.environ.get('TEACHER_MODEL_ID', 'ms://Qwen/Qwen3-8B')
+STUDENT_MODEL_ID = os.environ.get('STUDENT_MODEL_ID', 'ms://Qwen/Qwen3.5-2B')
+TEACHER_MODEL_ID = os.environ.get('TEACHER_MODEL_ID', 'ms://Qwen/Qwen3.5-9B')
 
-MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 4))
-SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS', 2))
+MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 8))
+SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS', 8))
 NUM_GPUS = MODEL_GPUS + SAMPLER_GPUS
 
 BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 8))
-MAX_STEPS = int(os.environ.get('MAX_STEPS', 200))
-LEARNING_RATE = float(os.environ.get('LR', 1e-4))
+MAX_STEPS = int(os.environ.get('MAX_STEPS', 1000))
+LEARNING_RATE = float(os.environ.get('LR', 5e-5))
 
 GKD_BETA = float(os.environ.get('GKD_BETA', 0.5))
 GKD_TEMPERATURE = float(os.environ.get('GKD_TEMPERATURE', 1.0))
 GKD_TOPK = int(os.environ.get('GKD_TOPK', 20))
-MAX_NEW_TOKENS = int(os.environ.get('MAX_NEW_TOKENS', 1024))
-
+MAX_NEW_TOKENS = int(os.environ.get('MAX_NEW_TOKENS', 2048))
+N_SAMPLES = int(os.environ.get('N_SAMPLES', 1))
 ADAPTER_NAME = 'default'
 
 
@@ -81,33 +81,63 @@ def create_dataset():
     """Full-text dataset with prompt + reference answer for off-policy distillation."""
     dataset = Dataset(DatasetMeta('ms://modelscope/gsm8k', subset_name='main', split='train'))
     dataset.set_template('Template', model_id=STUDENT_MODEL_ID, max_length=1024)
-    dataset.map(GSM8KFullProcessor())
+    dataset.map(GSM8KProcessor())
     return dataset
 
 
 # ── Utility ───────────────────────────────────────────────────────────────────
 
 def convert_topk_prompt_logprobs(
-    topk_prompt_logprobs_batch: List[List[Optional[List[tuple]]]],
+    prompt_logprobs_batch: List[Optional[List[List[tuple]]]],
+    sequences_logprobs_batch: List[List[Optional[List[List[tuple]]]]],
 ) -> dict:
-    """Convert vLLM topk_prompt_logprobs to GKDLoss teacher_output format."""
+    """Convert vLLM topk_prompt_logprobs to GKDLoss teacher_output format.
+
+    Args:
+        prompt_logprobs_batch: [batch] each is topk_prompt_logprobs for one request.
+            Shape: [prompt_seq_len, topk] per request.
+        sequences_logprobs_batch: [batch][n_samples] each is generated logprobs.
+            Shape: [generated_len, topk] per sequence.
+
+    Returns:
+        Dict with expanded teacher logprobs/indices tensors.
+        Each prompt is expanded N times (one per generated sequence).
+    """
     batch_logprobs = []
     batch_indices = []
 
-    for seq_topk in topk_prompt_logprobs_batch:
-        seq_logprobs = []
-        seq_indices = []
-        for pos_topk in seq_topk:
-            if pos_topk is None:
-                continue
-            else:
-                seq_logprobs.append([lp for _, lp in pos_topk])
-                seq_indices.append([tid for tid, _ in pos_topk])
-        batch_logprobs.append(seq_logprobs)
-        batch_indices.append(seq_indices)
+    for prompt_logprobs, sequences_logprobs in zip(prompt_logprobs_batch, sequences_logprobs_batch):
+        n_samples = len(sequences_logprobs)
+
+        # Parse prompt logprobs (shared across all sequences)
+        # prompt_logprobs is List[float], expand to [seq_len, topk] with padding
+        prompt_lps = []
+        prompt_ids = []
+        if prompt_logprobs is not None:
+            for lp in prompt_logprobs:
+                if lp is None:
+                    lp = -1
+                # Expand single logprob to topk slots: [lp, 0, 0, ...]
+                prompt_lps.append([lp] + [0.0] * (GKD_TOPK - 1))
+                prompt_ids.append([0] * GKD_TOPK)
+
+        # Expand prompt and concat with each sequence's generated logprobs
+        for seq_logprobs in sequences_logprobs:
+            # Start with prompt logprobs (copy for each sequence)
+            seq_lps = list(prompt_lps)
+            seq_ids = list(prompt_ids)
+
+            # Append generated token logprobs
+            if seq_logprobs is not None:
+                for pos_topk in seq_logprobs:
+                    seq_lps.append([lp for _, lp in pos_topk])
+                    seq_ids.append([tid for tid, _ in pos_topk])
+
+            batch_logprobs.append(seq_lps)
+            batch_indices.append(seq_ids)
 
     # Pad to same seq_len within batch
-    max_len = max(len(seq) for seq in batch_logprobs)
+    max_len = max(len(seq) for seq in batch_logprobs) if batch_logprobs else 1
     topk = len(batch_logprobs[0][0]) if batch_logprobs and batch_logprobs[0] else GKD_TOPK
 
     for i in range(len(batch_logprobs)):
@@ -116,9 +146,10 @@ def convert_topk_prompt_logprobs(
             batch_logprobs[i].extend([[0.0] * topk] * pad_len)
             batch_indices[i].extend([[0] * topk] * pad_len)
 
+    # In vllm output, the first position is None, we returns an invalid value(-10000), so roll it to match the labels
     return {
-        'teacher_topk_logprobs': torch.tensor(batch_logprobs, dtype=torch.float32),
-        'teacher_topk_indices': torch.tensor(batch_indices, dtype=torch.long),
+        'teacher_topk_logprobs': torch.roll(torch.tensor(batch_logprobs, dtype=torch.float32), shifts=-1, dims=1),
+        'teacher_topk_indices': torch.roll(torch.tensor(batch_indices, dtype=torch.long), shifts=-1, dims=1),
     }
 
 
@@ -158,7 +189,7 @@ def main():
     # ── Teacher vLLM sampler (for prompt logprobs) ─────────────────────────────
     teacher_sampler = vLLMSampler(
         model_id=TEACHER_MODEL_ID,
-        engine_args={'gpu_memory_utilization': 0.85, 'max_model_len': 2048, 'logprobs_mode': 'raw_logprobs'},
+        engine_args={'gpu_memory_utilization': 0.85, 'max_model_len': 10240, 'logprobs_mode': 'raw_logprobs'},
         device_mesh=sampler_mesh,
         remote_group='teacher_sampler',
     )
@@ -184,12 +215,9 @@ def main():
         # Teacher vLLM computes top-k prompt logprobs on the reference sequences
         teacher_response = teacher_sampler.sample(
             batch,
-            SamplingParams(max_tokens=MAX_NEW_TOKENS, temperature=1.0, prompt_logprobs=1, logprobs=GKD_TOPK),
+            SamplingParams(max_tokens=MAX_NEW_TOKENS, temperature=1.0, prompt_logprobs=1, logprobs=GKD_TOPK, num_samples=N_SAMPLES),
         )
         input_data = [seq.new_input_feature for response in teacher_response for seq in response.sequences]
-        input_ids_list = []
-        for data in input_data:
-            input_ids_list.append(data.pop('input_ids', None))
 
         # Convert teacher logprobs to tensor format for GKDLoss
         teacher_output = convert_topk_prompt_logprobs(

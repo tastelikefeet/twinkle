@@ -154,26 +154,3 @@ class GSM8KProcessor(Preprocessor):
             user_data=[('ground_truth', ground_truth)],
         )
 
-
-class GSM8KFullProcessor(GSM8KProcessor):
-    """GSM8K preprocessor that includes the reference answer as the assistant message.
-
-    Produces a full Trajectory (prompt + reference answer) suitable for
-    off-policy knowledge distillation: the student and teacher both see the
-    ground-truth response text, and labels cover the response tokens.
-    """
-
-    def preprocess(self, row) -> Trajectory:
-        question = row['question']
-        answer = row.get('answer', '')
-        ground_truth = self.extract_ground_truth(answer)
-
-        messages = [
-            Message(role='system', content=self.system_prompt),
-            Message(role='user', content=question),
-            Message(role='assistant', content=answer),
-        ]
-        return Trajectory(
-            messages=messages,
-            user_data=[('ground_truth', ground_truth)],
-        )

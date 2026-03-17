@@ -90,7 +90,6 @@ def create_dataset():
 
 def convert_topk_prompt_logprobs(
     topk_prompt_logprobs_batch: List[List[Optional[List[tuple]]]],
-    device: str = 'cpu',
 ) -> dict:
     """Convert vLLM topk_prompt_logprobs to GKDLoss teacher_output format.
 
@@ -111,7 +110,8 @@ def convert_topk_prompt_logprobs(
         seq_indices = []
         for pos_topk in seq_topk:
             if pos_topk is None:
-                continue
+                seq_logprobs.append([0.0] * len(seq_topk[1]) if len(seq_topk) > 1 and seq_topk[1] else [0.0])
+                seq_indices.append([0] * len(seq_topk[1]) if len(seq_topk) > 1 and seq_topk[1] else [0])
             else:
                 seq_logprobs.append([lp for _, lp in pos_topk])
                 seq_indices.append([tid for tid, _ in pos_topk])
@@ -120,7 +120,7 @@ def convert_topk_prompt_logprobs(
 
     # Pad to same seq_len within batch
     max_len = max(len(seq) for seq in batch_logprobs)
-    topk = len(batch_logprobs[0][0]) if batch_logprobs and batch_logprobs[0] else GKD_TOPK
+    topk = GKD_TOPK
 
     for i in range(len(batch_logprobs)):
         pad_len = max_len - len(batch_logprobs[i])
@@ -129,8 +129,8 @@ def convert_topk_prompt_logprobs(
             batch_indices[i].extend([[0] * topk] * pad_len)
 
     return {
-        'teacher_topk_logprobs': torch.tensor(batch_logprobs, dtype=torch.float32, device=device),
-        'teacher_topk_indices': torch.tensor(batch_indices, dtype=torch.long, device=device),
+        'teacher_topk_logprobs': torch.roll(torch.tensor(batch_logprobs, dtype=torch.float32), shifts=-1, dims=1),
+        'teacher_topk_indices': torch.roll(torch.tensor(batch_indices, dtype=torch.long), shifts=-1, dims=1),
     }
 
 
@@ -206,8 +206,6 @@ def main():
         # 1. Student vLLM generates completions
         sample_response = student_sampler.sample(batch, SamplingParams(max_tokens=MAX_NEW_TOKENS, temperature=1.0, num_samples=N_SAMPLES))
         input_data = [seq.new_input_feature for response in sample_response for seq in response.sequences]
-        for data in input_data:
-            data.pop('input_ids', None)
             
         # 2. Teacher vLLM computes top-k prompt logprobs on generated sequences
         teacher_response = teacher_sampler.sample(

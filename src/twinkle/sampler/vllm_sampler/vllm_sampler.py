@@ -184,14 +184,14 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
         if hasattr(input_ids, 'tolist'):
             input_ids = input_ids.tolist()
 
-        result = InputFeature(input_ids=input_ids)
+        result = trajectory
+        result['input_ids'] = input_ids
 
         # Attach preprocessed images/videos for vLLM
         if images:
             result['images'] = images
         if videos:
             result['videos'] = videos
-
         return result
 
     async def _sample_single(
