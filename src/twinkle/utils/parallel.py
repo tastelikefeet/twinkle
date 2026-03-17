@@ -18,7 +18,10 @@ def _sanitize_lock_name(name: str) -> str:
 
 def acquire_lock(lock: FileLock, blocking: bool):
     try:
-        lock.acquire(blocking=blocking)
+        if 'blocking' in inspect.signature(AsyncEngineArgs).parameters:
+            lock.acquire(blocking=blocking)
+        else:
+            lock.acquire(timeout=(0 if not blocking else None))
         return True
     except TimeoutError:
         return False
