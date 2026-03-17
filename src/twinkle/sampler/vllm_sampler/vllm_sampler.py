@@ -170,17 +170,14 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
                             new_content.append({'type': 'text', 'text': part})
                     msg['content'] = new_content if new_content else [{'type': 'text', 'text': ''}]
 
-        encoded = template.processor.apply_chat_template(
-            messages,
-            tokenize=True,
-            return_dict=True,
+        encoded = template.batch_encode(
+            [Trajectory(messages=messages)],
             add_generation_prompt=True,
-            return_tensors='pt',
-        )
+        )[0]
 
         input_ids = encoded['input_ids']
         if hasattr(input_ids, 'squeeze'):
-            input_ids = input_ids.squeeze(0)
+            input_ids = input_ids.squeeze()
         if hasattr(input_ids, 'tolist'):
             input_ids = input_ids.tolist()
 

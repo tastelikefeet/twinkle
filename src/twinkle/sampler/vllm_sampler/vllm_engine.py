@@ -53,7 +53,7 @@ class VLLMEngine(BaseSamplerEngine):
         gpu_memory_utilization: float = 0.7,
         max_model_len: Optional[int] = None,
         max_num_seqs: int = 256,
-        enable_lora: bool = True,
+        enable_lora: bool = False,
         max_loras: int = 1,
         max_lora_rank: int = 32,
         enable_sleep_mode: bool = False,
