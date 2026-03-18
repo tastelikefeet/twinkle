@@ -44,6 +44,7 @@ from peft import LoraConfig
 
 import twinkle
 from twinkle import DeviceMesh, DeviceGroup, get_device_placement, get_logger
+from twinkle.checkpoint_engine import CheckpointEngineManager
 from twinkle.data_format import SamplingParams
 from twinkle.dataloader import DataLoader
 from twinkle.dataset import Dataset, DatasetMeta
@@ -171,7 +172,7 @@ def main():
     # ── Student vLLM sampler (for on-policy generation) ────────────────────────
     student_sampler = vLLMSampler(
         model_id=STUDENT_MODEL_ID,
-        engine_args={'gpu_memory_utilization': 0.85, 'max_model_len': 2048},
+        engine_args={'gpu_memory_utilization': 0.85, 'max_model_len': 2048, 'enable_lora': True, 'max_loras': 1},
         device_mesh=sampler_mesh,
         remote_group='student_sampler',
     )
@@ -195,6 +196,9 @@ def main():
         remote_group='student_model',
     )
 
+    # ── Checkpoint manager for weight sync ──────────────────────────────────────
+    ckpt_manager = CheckpointEngineManager(model=student_model, sampler=student_sampler)
+
     logger.info(f'GKD On-Policy | student={STUDENT_MODEL_ID}  teacher={TEACHER_MODEL_ID}')
     logger.info(f'  beta={GKD_BETA}  T={GKD_TEMPERATURE}  topk={GKD_TOPK}')
 
@@ -203,23 +207,27 @@ def main():
         if optim_step >= MAX_STEPS:
             break
 
-        # 1. Student vLLM generates completions
+        # 1. Sync student model weights to student sampler
+        ckpt_manager.sync_weights(merge_and_sync=False)
+        student_sampler.reset_prefix_cache()
+
+        # 2. Student vLLM generates completions
         sample_response = student_sampler.sample(batch, SamplingParams(max_tokens=MAX_NEW_TOKENS, temperature=1.0, num_samples=N_SAMPLES))
         input_data = [seq.new_input_feature for response in sample_response for seq in response.sequences]
 
-        # 2. Teacher vLLM computes top-k prompt logprobs on generated sequences
+        # 3. Teacher vLLM computes top-k prompt logprobs on generated sequences
         teacher_response = teacher_sampler.sample(
             input_data,
             SamplingParams(max_tokens=1, temperature=1.0, prompt_logprobs=GKD_TOPK),
         )
 
-        # 3. Convert teacher logprobs to tensor format for GKDLoss
+        # 4. Convert teacher logprobs to tensor format for GKDLoss
         # teacher_response is List[SampleResponse], extract topk_prompt_logprobs from each
         teacher_output = convert_topk_prompt_logprobs(
             [resp.topk_prompt_logprobs for resp in teacher_response],
         )
 
-        # 4. Student forward + GKD backward
+        # 5. Student forward + GKD backward
         student_model.forward_backward(inputs=input_data, **teacher_output)
         student_model.clip_grad_and_step()
         optim_step += 1
