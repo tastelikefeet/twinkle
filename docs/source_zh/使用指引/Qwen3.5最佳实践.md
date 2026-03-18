@@ -250,7 +250,7 @@ def main():
 
     advantage_fn = GRPOAdvantage()
     metrics = CompletionRewardMetric()
-    sampling_params = SamplingParams(max_tokens=MAX_NEW_TOKENS, num_samples=1)
+    sampling_params = SamplingParams(max_tokens=MAX_NEW_TOKENS, num_samples=1, logprobs=1)
 
     optim_step = 0
     logger.info(get_device_placement())
