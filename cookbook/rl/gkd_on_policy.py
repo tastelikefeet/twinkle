@@ -73,7 +73,8 @@ N_SAMPLES = int(os.environ.get('N_SAMPLES', 1))
 GKD_BETA = float(os.environ.get('GKD_BETA', 0.5))
 GKD_TEMPERATURE = float(os.environ.get('GKD_TEMPERATURE', 1.0))
 GKD_TOPK = int(os.environ.get('GKD_TOPK', 64))
-
+SYSTEM_PROMPT = ('You are a helpful math assistant. Solve the problem step by step and put '
+                 'your final answer within #### <number>')
 ADAPTER_NAME = 'default'
 
 
@@ -83,7 +84,7 @@ def create_dataset():
     """Prompt-only dataset; student vLLM will generate completions on-policy."""
     dataset = Dataset(DatasetMeta('ms://modelscope/gsm8k', subset_name='main', split='train'))
     dataset.set_template('Template', model_id=STUDENT_MODEL_ID, max_length=1024)
-    dataset.map(GSM8KProcessor())
+    dataset.map(GSM8KProcessor(system=SYSTEM_PROMPT))
     return dataset
 
 
@@ -228,16 +229,17 @@ def main():
         )
 
         # 5. Student forward + GKD backward
-        student_model.forward_backward(inputs=input_data, **teacher_output)()
+        student_model.forward_backward(inputs=input_data, **teacher_output)
         student_model.clip_grad_and_step()
-        optim_step += 1
 
-        if optim_step % 10 == 0:
+        if optim_step > 0 and optim_step % 10 == 0:
             metric = student_model.calculate_metric(is_training=True)
             logger.info(f'[Step {optim_step}/{MAX_STEPS}] {metric}')
 
-        if optim_step % 50 == 0:
+        if optim_step > 0 and optim_step % 50 == 0:
             student_model.save(f'gkd-onpolicy-ckpt-{optim_step}')
+
+        optim_step += 1
 
     student_model.save('gkd-onpolicy-final')
     logger.info('GKD on-policy training completed.')

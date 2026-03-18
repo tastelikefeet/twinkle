@@ -52,6 +52,7 @@ actor = MegatronModel(..., device_mesh=actor_device_mesh, remote_group=...)
 
 for data in dataloader:
     sampler_output = sampler.sample(data)
+    ...
     model_output = actor.forward(sampler_output)
 ```
 

@@ -21,11 +21,10 @@ Data Flow:
 """
 import asyncio
 import atexit
+import numpy as np
 import os
 import threading
 from typing import Any, Dict, List, Optional, Union
-
-import numpy as np
 
 from twinkle import DeviceMesh, get_logger, remote_class, remote_function, requires
 from twinkle.checkpoint_engine import CheckpointEngineMixin
@@ -144,7 +143,10 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
         """Create engine in async context to ensure output_handler starts correctly."""
         return engine_cls(model_id=model_id, **engine_kwargs)
 
-    def encode_trajectory_for_vllm(self, trajectory: Trajectory, adapter_name: str = '', add_generation_prompt=True) -> InputFeature:
+    def encode_trajectory_for_vllm(self,
+                                   trajectory: Trajectory,
+                                   adapter_name: str = '',
+                                   add_generation_prompt=True) -> InputFeature:
         """Encode trajectory for vLLM - does not expand image tokens.
 
         Args:
@@ -256,8 +258,7 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
                         logprobs=seq.logprobs,
                         decoded=self.template.decode(seq.tokens),
                         new_input_feature=_convert_ndarray_to_list(
-                            self.template.concat_input_feature(feat, seq.tokens)
-                        ),
+                            self.template.concat_input_feature(feat, seq.tokens)),
                     ) for seq in response.sequences
                 ],
                 prompt_logprobs=response.prompt_logprobs,
@@ -272,7 +273,7 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
                     ) for seq in response.sequences
                 ],
                 prompt_logprobs=response.prompt_logprobs,
-                topk_prompt_logprobs=response.topk_prompt_logprobs) 
+                topk_prompt_logprobs=response.topk_prompt_logprobs)
 
     @remote_function(dispatch='slice_dp', collect='flatten', lazy_collect=False)
     def sample(
@@ -322,12 +323,14 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
         if sampling_params.max_tokens == 0:
             sampling_params.max_tokens = 1
             logprobs_only = True
-        
+
         if is_trajectory:
             template = self.template
             assert template is not None, \
                 'Use set_template to add a template when trying to input Trajectory'
-            encoded_inputs = [self.encode_trajectory_for_vllm(traj, adapter_name, not logprobs_only) for traj in inputs_list]
+            encoded_inputs = [
+                self.encode_trajectory_for_vllm(traj, adapter_name, not logprobs_only) for traj in inputs_list
+            ]
         else:
             encoded_inputs = inputs_list
 

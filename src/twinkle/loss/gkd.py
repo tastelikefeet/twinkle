@@ -205,10 +205,10 @@ class GKDLoss(Loss):
             del s_chunk, t_chunk
 
             if beta == 0:
-                # Forward KL: KL(S || T)
+                # Forward KL: KL(T || S)
                 jsd_chunk = F.kl_div(s_log_probs, t_log_probs, reduction='none', log_target=True)
             elif beta == 1:
-                # Reverse KL: KL(T || S)
+                # Reverse KL: KL(S || T)
                 jsd_chunk = F.kl_div(t_log_probs, s_log_probs, reduction='none', log_target=True)
             else:
                 # Generalised JSD: β·KL(T||M) + (1-β)·KL(S||M)

@@ -49,7 +49,7 @@ from twinkle.dataloader import DataLoader
 from twinkle.dataset import Dataset, DatasetMeta
 from twinkle.loss import GKDLoss
 from twinkle.model import MegatronModel
-from twinkle.preprocessor import GSM8KFullProcessor
+from twinkle.preprocessor import GSM8KProcessor
 from twinkle.sampler import vLLMSampler
 from twinkle.template import Template
 
@@ -71,6 +71,8 @@ GKD_BETA = float(os.environ.get('GKD_BETA', 0.5))
 GKD_TEMPERATURE = float(os.environ.get('GKD_TEMPERATURE', 1.0))
 GKD_TOPK = int(os.environ.get('GKD_TOPK', 64))
 ADAPTER_NAME = 'default'
+SYSTEM_PROMPT = ('You are a helpful math assistant. Solve the problem step by step and put '
+                 'your final answer within #### <number>')
 
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
@@ -79,7 +81,7 @@ def create_dataset():
     """Full-text dataset with prompt + reference answer for off-policy distillation."""
     dataset = Dataset(DatasetMeta('ms://modelscope/gsm8k', subset_name='main', split='train'))
     dataset.set_template('Template', model_id=STUDENT_MODEL_ID, max_length=1024)
-    dataset.map(GSM8KFullProcessor())
+    dataset.map(GSM8KProcessor(system=SYSTEM_PROMPT, add_assistant=True))
     return dataset
 
 
@@ -206,13 +208,13 @@ def main():
         student_model.forward_backward(inputs=input_data, **teacher_output)
         student_model.clip_grad_and_step()
 
-        if optim_step > 0:
+        if optim_step > 0 and optim_step % 10 == 0:
             metric = student_model.calculate_metric(is_training=True)
             logger.info(f'[Step {optim_step}/{MAX_STEPS}] {metric}')
 
-        if optim_step % 50 == 0 and optim_step > 0:
+        if optim_step > 0 and optim_step % 50 == 0:
             student_model.save(f'gkd-offpolicy-ckpt-{optim_step}')
-        
+
         optim_step += 1
 
     student_model.save('gkd-offpolicy-final')

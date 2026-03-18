@@ -96,7 +96,6 @@ class CheckpointEngineManager:
         Returns:
             None
         """
-        start_time = time.time()
         model_metadata = self.model.prepare_checkpoint_engine([True]
                                                               + [False] * (self.model.device_mesh.world_size - 1))
         self.sampler.prepare_checkpoint_engine(False)
