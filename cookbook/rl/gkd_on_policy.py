@@ -60,12 +60,12 @@ logger = get_logger()
 STUDENT_MODEL_ID = os.environ.get('STUDENT_MODEL_ID', 'ms://Qwen/Qwen3-0.6B')
 TEACHER_MODEL_ID = os.environ.get('TEACHER_MODEL_ID', 'ms://Qwen/Qwen3-8B')
 
-MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 8))
+MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 4))
 SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS', 4))
 NUM_GPUS = MODEL_GPUS + 2*SAMPLER_GPUS
 
 MAX_NEW_TOKENS = int(os.environ.get('MAX_NEW_TOKENS', 2048))
-BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 32))
+BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 16))
 MAX_STEPS = int(os.environ.get('MAX_STEPS', 1000))
 LEARNING_RATE = float(os.environ.get('LR', 5e-5))
 N_SAMPLES = int(os.environ.get('N_SAMPLES', 1))
@@ -228,7 +228,7 @@ def main():
         )
 
         # 5. Student forward + GKD backward
-        student_model.forward_backward(inputs=input_data, **teacher_output)
+        student_model.forward_backward(inputs=input_data, **teacher_output)()
         student_model.clip_grad_and_step()
         optim_step += 1
 

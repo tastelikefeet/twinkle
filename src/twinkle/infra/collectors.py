@@ -55,7 +55,7 @@ def collect_tensor_dict(outputs: List[Dict[str, Any]], device_mesh: DeviceMesh) 
     return result
 
 
-def _pad_and_stack_tensors(tensors: List['torch.Tensor'], pad_value: float = 0) -> 'torch.Tensor':
+def _pad_and_stack_tensors(tensors: List['torch.Tensor'], pad_value: float = -200) -> 'torch.Tensor':
     import torch
     if not tensors:
         raise ValueError('Empty tensor list')
