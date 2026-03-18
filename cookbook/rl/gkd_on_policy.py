@@ -64,8 +64,8 @@ MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 8))
 SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS', 4))
 NUM_GPUS = MODEL_GPUS + 2*SAMPLER_GPUS
 
-MAX_NEW_TOKENS = int(os.environ.get('MAX_NEW_TOKENS', 1024))
-BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 8))
+MAX_NEW_TOKENS = int(os.environ.get('MAX_NEW_TOKENS', 2048))
+BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 32))
 MAX_STEPS = int(os.environ.get('MAX_STEPS', 1000))
 LEARNING_RATE = float(os.environ.get('LR', 5e-5))
 N_SAMPLES = int(os.environ.get('N_SAMPLES', 1))
@@ -171,7 +171,7 @@ def main():
     # ── Student vLLM sampler (for on-policy generation) ────────────────────────
     student_sampler = vLLMSampler(
         model_id=STUDENT_MODEL_ID,
-        engine_args={'gpu_memory_utilization': 0.85, 'max_model_len': 2048, 'enable_lora': True, 'max_loras': 1},
+        engine_args={'gpu_memory_utilization': 0.85, 'max_model_len': 4096, 'enable_lora': True, 'max_loras': 1},
         device_mesh=sampler_mesh,
         remote_group='student_sampler',
     )
@@ -180,7 +180,7 @@ def main():
     # ── Teacher vLLM sampler (for prompt logprobs) ───────────────────────────────
     teacher_sampler = vLLMSampler(
         model_id=TEACHER_MODEL_ID,
-        engine_args={'gpu_memory_utilization': 0.85, 'max_model_len': 2048, 'logprobs_mode': 'raw_logprobs', 'max_logprobs': 64},
+        engine_args={'gpu_memory_utilization': 0.85, 'max_model_len': 4096, 'logprobs_mode': 'raw_logprobs', 'max_logprobs': 64},
         device_mesh=sampler_mesh,
         remote_group='teacher_sampler',
     )
@@ -218,7 +218,7 @@ def main():
         # 3. Teacher vLLM computes top-k prompt logprobs on generated sequences
         teacher_response = teacher_sampler.sample(
             input_data,
-            SamplingParams(max_tokens=1, temperature=1.0, prompt_logprobs=GKD_TOPK),
+            SamplingParams(max_tokens=0, temperature=1.0, prompt_logprobs=GKD_TOPK),
         )
 
         # 4. Convert teacher logprobs to tensor format for GKDLoss

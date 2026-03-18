@@ -38,13 +38,19 @@ logger = get_logger()
 
 
 def _convert_ndarray_to_list(obj: Any) -> Any:
-    """Recursively convert numpy arrays to lists in a dict/list structure."""
     if isinstance(obj, np.ndarray):
         return obj.tolist()
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
     elif isinstance(obj, dict):
         return {k: _convert_ndarray_to_list(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [_convert_ndarray_to_list(item) for item in obj]
+    elif isinstance(obj, (list, tuple)):
+        converted = [_convert_ndarray_to_list(item) for item in obj]
+        return type(obj)(converted) if isinstance(obj, tuple) else converted
     return obj
 
 
