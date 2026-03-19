@@ -768,7 +768,7 @@ class vLLMSampler(Sampler):
         adapter_name: str = '',
         adapter_uri: Optional[str] = None,
         num_samples: int = 1,
-    ) -> SampleResponseModel:
+    ) -> List[SampleResponseModel]:
         """Sample from the model.
 
         Args:
