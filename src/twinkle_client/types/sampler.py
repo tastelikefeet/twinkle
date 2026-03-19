@@ -24,18 +24,23 @@ class SampledSequenceModel(BaseModel):
     """A single sampled sequence, mirroring twinkle.data_format.SampledSequence."""
     stop_reason: StopReason = Field(..., description="Stop reason: 'length' or 'stop'")
     tokens: List[int] = Field(..., description='Token IDs of the sampled sequence')
-    logprobs: Optional[List[float]] = Field(None, description='Per-token log-probabilities')
+    logprobs: Optional[List[Optional[List[Tuple[int, float]]]]] = Field(None, description='Per-token log-probabilities')
     decoded: Optional[str] = Field(None, description='Decoded text of the sampled sequence')
     new_input_feature: Optional[Dict[str, Any]] = Field(
         None, description='Updated InputFeature after sampling (input_ids, labels, etc.)')
 
 
 class SampleResponseModel(BaseModel):
-    """Response body for the /sample endpoint, mirroring twinkle.data_format.SampleResponse."""
+    """Mirroring twinkle.data_format.SampleResponse."""
     sequences: List[SampledSequenceModel] = Field(
         ..., description='List of sampled sequences')
     prompt_logprobs: Optional[List[Optional[float]]] = None
     topk_prompt_logprobs: Optional[List[Optional[List[Tuple[int, float]]]]] = None
+
+
+class SampleResponseModelList(BaseModel):
+    """Response body for the /sample endpoint"""
+    samples: List[SampleResponseModel] = Field(..., description='List of sample responses')
 
 
 class SetTemplateRequest(BaseModel):

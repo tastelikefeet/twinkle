@@ -127,6 +127,7 @@ def train():
         'temperature': TEMPERATURE,
         'top_p': 0.95,
         'num_samples': NUM_GENERATIONS,
+        'logprobs': 1,
     }
 
     # Track the current adapter path for sampling

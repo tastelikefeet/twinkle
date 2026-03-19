@@ -59,10 +59,10 @@ def _register_twinkle_sampler_routes(app: FastAPI, self_fn: Callable[[], Sampler
         """Health check / session creation endpoint."""
         return types.CreateResponse()
 
-    @app.post('/twinkle/sample', response_model=types.SampleResponseModel)
+    @app.post('/twinkle/sample', response_model=types.SampleResponseModelList)
     def sample(
         request: Request, body: types.SampleRequest,
-        self: SamplerManagement = Depends(self_fn)) -> list[types.SampleResponseModel]:
+        self: SamplerManagement = Depends(self_fn)) -> types.SampleResponseModelList:
         """Sample completions from the model.
 
         Supports Trajectory or InputFeature inputs, with optional LoRA adapter.
@@ -98,7 +98,6 @@ def _register_twinkle_sampler_routes(app: FastAPI, self_fn: Callable[[], Sampler
             params = None
             if body.sampling_params:
                 params = SamplingParams.from_dict(body.sampling_params)
-            params.num_samples = body.num_samples
 
             # Call sampler
             responses = self.sampler.sample(
@@ -129,7 +128,7 @@ def _register_twinkle_sampler_routes(app: FastAPI, self_fn: Callable[[], Sampler
                         prompt_logprobs=response.prompt_logprobs,
                         topk_prompt_logprobs=response.topk_prompt_logprobs,
                     ))
-            return sample_models
+            return types.SampleResponseModelList(samples=sample_models)
         except Exception:
             logger.error(traceback.format_exc())
             raise HTTPException(status_code=500, detail=traceback.format_exc())

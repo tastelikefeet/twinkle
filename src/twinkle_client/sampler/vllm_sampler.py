@@ -84,7 +84,7 @@ class vLLMSampler(Sampler):
             json_data=json_data
         )
         response.raise_for_status()
-        return [SampleResponseModel(**r) for r in response.json()]
+        return [SampleResponseModel(**r) for r in response.json()['samples']]
 
     def set_template(self, template_cls: str, adapter_name: str = '', **kwargs) -> SetTemplateResponse:
         """Set the template for encoding trajectories."""
