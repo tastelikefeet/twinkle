@@ -1,3 +1,4 @@
+from cookbook.client.tinker.modelscope.sample import trajectory
 from twinkle.dataset import DatasetMeta, LazyDataset
 from twinkle.preprocessor import Preprocessor
 from typing import Any, Dict, List, Tuple
@@ -194,7 +195,7 @@ class Condense(Preprocessor):
         return rows
 
     @staticmethod
-    def condense_sequence(text: str, ratio: float = 0.5, chunk_size: int = 512) -> Tuple[str, List[str]]:
+    def condense_sequence(text: str, ratio: float = 0.5, chunk_size: int = 512, start_index: int = 0) -> Tuple[str, List[str], int]:
         if not text or ratio >= 1.0:
             return text, [text] if text else []
 
@@ -240,10 +241,10 @@ class Condense(Preprocessor):
                 current_len += len(chunks[idx])
 
         selected.sort()
-        condensed = '\n'.join(f'<chunk_{i}>{chunks[i]}</chunk_{i}>' for i in selected)
-        return condensed, chunks
+        condensed = '\n'.join(f'<chunk_{start_index + i}>{chunks[i]}</chunk_{start_index + i}>' for i in selected)
+        return condensed, chunks, start_index+len(selected)
 
-    def preprocess(self, row) -> Trajectory:
+    def preprocess(self, row: Trajectory) -> Trajectory:
         messages = row.get('messages')
         tool = Tool(
             tool_name='read_detail',
@@ -251,16 +252,26 @@ class Condense(Preprocessor):
                         'You should read as little of the original information as possible to prevent the input sequence from becoming too long.',
             parameters='[{"name":"block","type":"int","description":"The condensed block number"}]',
         )
+        start_idx = 0
+        chunks = []
         for message in messages:
             if message['role'] == 'user':
                 if len(message['content']) > self.THRESHOLD and not (message['images'] or message['audios'] or message['videos']):
-                    condense_20, chunks = self.condense_sequence(message['content'], ratio=0.2)
+                    condense_20, _chunks, start_idx = self.condense_sequence(message['content'], ratio=0.2, start_index=start_idx)
                     message['content'] = condense_20
+                    chunks.extend(_chunks)
+        if len(chunks) > 0:
+            if not row.get('tools'):
+                row['tools'] = [tool]
+            else:
+                row['tools'].append(tool)
+            if not row.get('user_data'):
+                row['user_data'] = []
+            row['user_data'].append(('chunks', json.dumps(chunks)))
+        return row
 
 
-
-
-def create_dataset(template: str):
+def create_dataset(template: str='Qwen3_5Template'):
     # 1. Text QA
     # 50000
     step_flash_sft = DatasetMeta(
@@ -371,7 +382,7 @@ def create_dataset(template: str):
     # Computer Use: 50K
     # OCR: 20K
     dataset.mix_dataset(interleave=False)
-    dataset.map()
+    dataset.map(Condense)
     dataset.set_template(template)
     dataset.encode()
     return dataset
