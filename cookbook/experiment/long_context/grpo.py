@@ -1,7 +1,10 @@
+import json
 import os
 import random
 from copy import copy
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
+
+import numpy as np
 
 from twinkle.template import Qwen3_5Template
 
@@ -10,7 +13,7 @@ from data import create_dataset
 from twinkle import DeviceMesh, DeviceGroup, get_device_placement, get_logger
 from twinkle.advantage import GRPOAdvantage
 from twinkle.checkpoint_engine import CheckpointEngineManager
-from twinkle.data_format import SamplingParams, Message, Trajectory
+from twinkle.data_format import SamplingParams, Message, Trajectory, ToolCall
 from twinkle.dataloader import DataLoader
 from twinkle.metric import CompletionRewardMetric
 from twinkle.model import TransformersModel
@@ -145,17 +148,56 @@ Now Begin:
     return batch
 
 
+def compute_rewards(
+    trajectories: List[Dict[str, Any]],
+) -> Tuple[List[float], List[float], List[float]]:
+    accuracy_reward_fn = GSM8KAccuracyReward()
+    format_reward_fn = GSM8KFormatReward()
+
+    accuracy_rewards = accuracy_reward_fn(trajectories)
+    format_rewards = format_reward_fn(trajectories)
+    total_rewards = [a + f for a, f in zip(accuracy_rewards, format_rewards)]
+    return total_rewards, format_rewards, accuracy_rewards
+
+
+
 def multi_round_sample(samples: List[Trajectory], sampler: vLLMSampler, sampling_params: SamplingParams, num_generations, template, max_round=10) -> List[Trajectory]:
     results = samples * num_generations
+    for r in results:
+        r['done'] = False
     for i in range(max_round):
-        responses = sampler.sample(results, sampling_params=sampling_params)
+        responses = sampler.sample([r for r in results if not r['done']], sampling_params=sampling_params)
         for j, response in enumerate(responses):
             new_input_features = response.sequences[0].new_input_feature
             new_input_features.pop('input_ids', None)
             results[j] = new_input_features
             last_content = new_input_features['messages'][-1]['content']
             output_dict = template.tokenizer.parse_response(last_content)
-            
+            tool_calls = None
+            if output_dict.get('tool_calls'):
+                tool_calls = [
+                    ToolCall(
+                        tool_name=tc['function']['name'],
+                        arguments=json.dumps(tc['function']['arguments']) if isinstance(tc['function']['arguments'], dict) else tc['function']['arguments']
+                    ) for tc in output_dict['tool_calls']
+                ]
+            if not tool_calls:
+                results[j]['done'] = True
+                logprobs = [logprob[1] for logprob in response.prompt_logprobs]
+                logprobs += [logprob[1] for logprob in response.sequences[0].logprobs]
+                results[j]['logprobs'] = logprobs
+            else:
+                for tool_call in tool_calls:
+                    arguments = json.loads(tool_call['arguments'])
+                    if tool_call['tool_name'] == 'read_detail':
+                        block = arguments['block']
+                        blocks = [user_data[1] for user_data in new_input_features['user_data'] if user_data[0] == 'chunks'][0]
+                        block_content = blocks[block]
+                        new_input_features['messages'].append(Message(role='tool', content=f'Block {block}:{block_content}'))
+        if all(r['done'] for r in results):
+            break
+    return results
+
 
 def main():
     # set sampler and model separate to use different gpus
@@ -209,7 +251,7 @@ def main():
     advantage_fn = GRPOAdvantage()
     metrics = CompletionRewardMetric()
 
-    sampling_params = SamplingParams(max_tokens=MAX_NEW_TOKENS, num_samples=1, logprobs=1)
+    sampling_params = SamplingParams(max_tokens=MAX_NEW_TOKENS, num_samples=1, logprobs=1, prompt_logprobs=1)
 
     optim_step = 0
     logger.info(get_device_placement())
@@ -225,10 +267,9 @@ def main():
         all_completion_lengths: List[int] = []
 
         for sample_response in sample_responses:
-            for sequence in sample_response.sequences:
-                all_input_data.append(sequence.new_input_feature)
-                all_old_logps.append([logprob[0][1] for logprob in sequence.logprobs])
-                all_completion_lengths.append(len(sequence.tokens))
+            all_input_data.append(sample_response['messages'])
+            all_old_logps.append(sample_response['logprobs'])
+            all_completion_lengths.append(sum(np.where(sample_response['labels']==-100, 0, 1)))
         total_rewards, format_rewards, accuracy_rewards = compute_rewards(
             all_input_data
         )
@@ -260,8 +301,6 @@ def main():
             model.clip_grad_and_step()
             optim_step += 1
 
-            if optim_step >= MAX_STEPS:
-                break
             log_dict = metrics.calculate()
             log_dict.update(model.calculate_metric(is_training=True))
             metrics.reset()
