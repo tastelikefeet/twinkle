@@ -32,7 +32,7 @@ class RetrySampler(Sampler):
                     yield idx
                     total += 1
                     break
-                except Exception as e:  # noqa
+                except Exception:  # noqa
                     import traceback
                     traceback.print_exc()
                     continue
@@ -55,6 +55,8 @@ class RetrySampler(Sampler):
                     yield idx
                     total += 1
                 except Exception:  # noqa
+                    import traceback
+                    traceback.print_exc()
                     continue
             else:
                 raise ValueError(f'Max retries exceeded: {self.max_retries}, no valid data found.')

@@ -137,6 +137,13 @@ def _register_twinkle_routes(app: FastAPI, self_fn: Callable[[], ModelManagement
     ) -> types.ForwardBackwardResponse:
         adapter_name = _get_twinkle_adapter_name(request, body.adapter_name)
 
+        def first_element(data):
+            while isinstance(data, list):
+                if len(data) == 0:
+                    return None
+                data = data[0]
+            return data
+
         async def _task():
             self.assert_adapter_exists(adapter_name=adapter_name)
             extra_kwargs = body.model_extra or {}
@@ -144,7 +151,7 @@ def _register_twinkle_routes(app: FastAPI, self_fn: Callable[[], ModelManagement
             all_inputs = _parse_inputs(body.inputs)
             for inputs in all_inputs:
                 for key in inputs:
-                    if isinstance(inputs[key], list):
+                    if isinstance(inputs[key], list) and isinstance(first_element(inputs[key]), (int, float)):
                         inputs[key] = torch.tensor(inputs[key])
             ret = self.model.forward_backward(inputs=all_inputs, adapter_name=adapter_name, **extra_kwargs)
             return {'result': ret}
