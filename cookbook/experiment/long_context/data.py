@@ -1,18 +1,14 @@
-from cookbook.client.tinker.modelscope.sample import trajectory
-from twinkle.dataset import DatasetMeta, LazyDataset
-from twinkle.preprocessor import Preprocessor
-from typing import Any, Dict, List, Tuple
-from collections import Counter
+import json
 import math
 import re
+from collections import Counter
+from typing import Any, Dict, List, Tuple, Optional
 
 from twinkle.data_format import Message, Tool, ToolCall, Trajectory
-import json
+from twinkle.dataset import DatasetMeta, LazyDataset
+from twinkle.preprocessor import Preprocessor
 
-
-SYSTEM = """You are a helpful assistant. You first thinks and outputs about the reasoning process 
-and then provides the user with the answer. If the solution can be expressed with a number/definite sequence, you
-should output it and wrap it with \\boxed{...}.
+SYSTEM = """You are a helpful assistant. You first thinks and outputs about the reasoning process and then provides the user with the answer. If the answer can be expressed with deterministic numbers or text, you should wrap it with \\boxed{...}.
 """
 
 class StepFlashPreprocessor(Preprocessor):
@@ -58,7 +54,7 @@ class StepFlashPreprocessor(Preprocessor):
             )
             messages.append(message)
 
-        return Trajectory(messages=messages, tools=tools)
+        return Trajectory(messages=messages, tools=tools, user_data=[('loss', 'CrossEntropyLoss')])
 
 
 class WorldVQAPreprocessor(Preprocessor):
@@ -74,7 +70,7 @@ class WorldVQAPreprocessor(Preprocessor):
             Message(role='system', content=SYSTEM),
             Message(role='user', content='<image>' + row['question'], images=[row['image']]),
             Message(role='assistant', content=row['answer']),
-        ])
+        ], user_data=[('loss', 'GRPOLoss')])
 
 
 class DocVQAPreprocessor(Preprocessor):
@@ -90,7 +86,7 @@ class DocVQAPreprocessor(Preprocessor):
             Message(role='system', content=SYSTEM),
             Message(role='user', content='<image>' + row['question'], images=[row['image']]),
             Message(role='assistant', content=row['answers'][0]),
-        ])
+        ], user_data=[('loss', 'GRPOLoss')])
 
 
 class ArxivSummarization(Preprocessor):
@@ -106,7 +102,7 @@ class ArxivSummarization(Preprocessor):
             Message(role='system', content=SYSTEM),
             Message(role='user', content='Summarize this article: \n\n' + row['article']),
             Message(role='assistant', content=row['abstract']),
-        ])
+        ], user_data=[('loss', 'GRPOLoss')])
 
 
 class LLaVAVideo178K(Preprocessor):
@@ -129,7 +125,7 @@ class LLaVAVideo178K(Preprocessor):
             videos = [video] if role == 'user' and '<image>' in content and video else None
             messages.append(Message(role=role, content=content, videos=videos))
 
-        return Trajectory(messages=messages)
+        return Trajectory(messages=messages, user_data=[('loss', 'GRPOLoss')])
 
 
 class VerifiableCoding(Preprocessor):
@@ -145,7 +141,7 @@ class VerifiableCoding(Preprocessor):
         rows = self.map_row_to_col(new_rows)
         return rows
 
-    def preprocess(self, row) -> Trajectory:
+    def preprocess(self, row) -> Optional[Trajectory]:
         problem = row.get('problem')
         answer = row.get('gold_standard_solution')
         verification_info = row.get('verification_info')
@@ -156,7 +152,7 @@ class VerifiableCoding(Preprocessor):
             Message(role='user', content=problem),
             Message(role='assistant', content=answer),
         ],
-        user_data=[('verification_info', row['verification_info'])])
+        user_data=[('verification_info', row['verification_info']), ('loss', 'GRPOLoss')])
 
 
 class ComputerUse(Preprocessor):
@@ -174,7 +170,7 @@ class ComputerUse(Preprocessor):
             Message(role='system', content=SYSTEM),
             Message(role='user', content=problem),
             Message(role='assistant', content=answer),
-        ])
+        ], user_data=[('loss', 'GRPOLoss')])
 
 
 class LatexOCR(Preprocessor):
@@ -192,7 +188,7 @@ class LatexOCR(Preprocessor):
             Message(role='system', content=SYSTEM),
             Message(role='user', content='<image>Carefully read the image, and turn it into latex.', images=[image]),
             Message(role='assistant', content=text),
-        ])
+        ], user_data=[('loss', 'GRPOLoss')])
 
 
 class Condense(Preprocessor):
