@@ -162,23 +162,75 @@ def length_reward(trajectories: List[Dict[str, Any]], scale: float = 8192.0) -> 
     return rewards
 
 
-def kl_reward(trajectories: List[Dict[str, Any]], all_logprobs) -> List[float]:
-    for trajectory, logprobs in zip(trajectories, all_logprobs):
-        hidden_logprobs = trajectory['prompt_logprobs']
-        ground_logprobs = trajectory['prompt_logprobs']
+def kl_reward(hidden_topk_logprobs: List[List[List[Tuple[int, float]]]],
+              ground_topk_logprobs: List[List[List[Tuple[int, float]]]],
+              scale: float = 1.0) -> List[float]:
+    rewards = []
+    for hidden_seq, ground_seq in zip(hidden_topk_logprobs, ground_topk_logprobs):
+        if not hidden_seq or not ground_seq:
+            rewards.append(1.0)
+            continue
+
+        # 对齐序列长度
+        min_len = min(len(hidden_seq), len(ground_seq))
+        total_kl = 0.0
+        valid_positions = 0
         
+        for pos in range(min_len):
+            hidden_topk = hidden_seq[pos]
+            ground_topk = ground_seq[pos]
+            
+            if hidden_topk is None or ground_topk is None:
+                continue
+
+            # 构建 token -> logprob 映射
+            hidden_dict = {tok: logp for tok, logp in hidden_topk}
+            ground_dict = {tok: logp for tok, logp in ground_topk}
+            
+            # 计算共同 token 的 KL 散度
+            # KL(P || Q) = Σ P(x) * (log P(x) - log Q(x))
+            common_tokens = set(hidden_dict.keys()) & set(ground_dict.keys())
+            if not common_tokens:
+                continue
+            
+            # 归一化 ground truth 分布 (P) 在共同 token 上
+            ground_logps = np.array([ground_dict[t] for t in common_tokens])
+            ground_probs = np.exp(ground_logps - np.max(ground_logps))  # 数值稳定
+            ground_probs = ground_probs / ground_probs.sum()
+            
+            # 获取 hidden 分布 (Q) 的 log 概率
+            hidden_logps = np.array([hidden_dict[t] for t in common_tokens])
+            hidden_probs = np.exp(hidden_logps - np.max(hidden_logps))
+            hidden_probs = hidden_probs / hidden_probs.sum()
+            
+            # KL(P || Q) = Σ P * log(P / Q)
+            kl = np.sum(ground_probs * (np.log(ground_probs + 1e-10) - np.log(hidden_probs + 1e-10)))
+            total_kl += max(0, kl)  # KL >= 0
+            valid_positions += 1
+        
+        if valid_positions > 0:
+            avg_kl = total_kl / valid_positions
+            # reward = exp(-kl / scale): kl=0 -> 1, kl大 -> 0
+            reward = np.exp(-avg_kl / scale)
+        else:
+            reward = 1.0
+        
+        rewards.append(reward)
+    
+    return rewards
 
 
 def compute_rewards(
     trajectories: List[Dict[str, Any]],
-    all_logprobs: List[List[float]],
-) -> Tuple[List[float], List[float], List[float]]:
+    hidden_topk_logprobs: List[List[List[Tuple[int, float]]]],
+    ground_topk_logprobs: List[List[List[Tuple[int, float]]]],
+) -> Tuple[List[float], List[float], List[float], List[float]]:
     accuracy_reward_fn = MathReward()
     accuracy_rewards = accuracy_reward_fn(trajectories, trajectories)
     length_rewards = length_reward(trajectories)
-    kl_rewards = kl_reward(trajectories, all_logprobs)
-    total_rewards = [a + f + k for a, f, k in zip(accuracy_rewards, length_rewards, kl_rewards)]
-    return total_rewards, length_rewards, accuracy_rewards
+    kl_rewards = kl_reward(hidden_topk_logprobs, ground_topk_logprobs)
+    total_rewards = [a + l + k for a, l, k in zip(accuracy_rewards, length_rewards, kl_rewards)]
+    return total_rewards, length_rewards, accuracy_rewards, kl_rewards
 
 
 def multi_round_sample(samples: List[Trajectory], sampler: vLLMSampler, sampling_params: SamplingParams, num_generations, template, max_round=10) -> List[Trajectory]:
@@ -206,6 +258,8 @@ def multi_round_sample(samples: List[Trajectory], sampler: vLLMSampler, sampling
                 logprobs = [logprob[1] for logprob in response.prompt_logprobs]
                 logprobs += [logprob[1] for logprob in response.sequences[0].logprobs]
                 results[j]['logprobs'] = logprobs
+                # 存储 topk_prompt_logprobs 用于 KL 计算
+                results[j]['topk_prompt_logprobs'] = response.topk_prompt_logprobs
             else:
                 for tool_call in tool_calls:
                     arguments = json.loads(tool_call['arguments'])
@@ -235,11 +289,10 @@ You need to think about the question and give a better answer according to the q
 
     sample_responses = sampler.sample(trajectories, sampling_params=sampling_params)
 
-    all_logprobs = []
+    all_topk_logprobs = []
     for response in sample_responses:
-        logprobs = [prompt_logprob[1] for prompt_logprob in response.prompt_logprobs]
-        all_logprobs.append(logprobs)
-    return all_logprobs
+        all_topk_logprobs.append(response.topk_prompt_logprobs)
+    return all_topk_logprobs
 
 
 def main():
@@ -313,16 +366,21 @@ def main():
             all_input_data.append(sample_response['messages'])
             all_old_logps.append(sample_response['logprobs'])
             all_completion_lengths.append(sum(np.where(sample_response['labels']==-100, 0, 1)))
-        all_logprobs = compute_lobprobs_given_ground_truth(trajectories=all_input_data, sampler=sampler)
-        total_rewards, format_rewards, accuracy_rewards = compute_rewards(
-            all_input_data, all_logprobs
+        
+        # 获取 hidden context 和 ground truth context 的 topk logprobs
+        hidden_topk_logprobs = [r.get('topk_prompt_logprobs', []) for r in sample_responses]
+        ground_topk_logprobs = compute_lobprobs_given_ground_truth(trajectories=all_input_data, sampler=sampler)
+        
+        total_rewards, length_rewards, accuracy_rewards, kl_rewards = compute_rewards(
+            all_input_data, hidden_topk_logprobs, ground_topk_logprobs
         )
         metrics.accumulate(
             completion_lengths=all_completion_lengths,
             rewards={
                 'total': total_rewards,
-                'format': format_rewards,
+                'length': length_rewards,
                 'accuracy': accuracy_rewards,
+                'kl': kl_rewards,
             },
         )
 
