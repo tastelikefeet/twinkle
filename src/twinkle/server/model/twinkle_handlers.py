@@ -8,6 +8,7 @@ self_fn is injected via FastAPI Depends to obtain the ModelManagement instance a
 """
 from __future__ import annotations
 
+import torch
 import traceback
 from fastapi import Depends, FastAPI, HTTPException, Request
 from peft import LoraConfig
@@ -147,7 +148,6 @@ def _register_twinkle_routes(app: FastAPI, self_fn: Callable[[], ModelManagement
         async def _task():
             self.assert_adapter_exists(adapter_name=adapter_name)
             extra_kwargs = body.model_extra or {}
-            import torch
             all_inputs = _parse_inputs(body.inputs)
             for inputs in all_inputs:
                 for key in inputs:
