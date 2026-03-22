@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Tuple
 
 import numpy as np
 
+from twinkle.reward import MathReward
 from twinkle.template import Qwen3_5Template
 
 import twinkle
@@ -148,17 +149,36 @@ Now Begin:
     return batch
 
 
+def length_reward(trajectories: List[Dict[str, Any]], scale: float = 8192.0) -> List[float]:
+    rewards = []
+    for trajectory in trajectories:
+        length = 0
+        for i, message in enumerate(trajectory['messages']):
+            if message['role'] == 'assistant' and 'read_detail' in message['content'] and i < len(trajectory['messages']) - 1:
+                length += len(trajectory['messages'][i + 1]['content'])
+        # exp(-length / scale): length=0 → 1, length→∞ → 0
+        reward = np.exp(-length / scale)
+        rewards.append(reward)
+    return rewards
+
+
+def kl_reward(trajectories: List[Dict[str, Any]], all_logprobs) -> List[float]:
+    for trajectory, logprobs in zip(trajectories, all_logprobs):
+        hidden_logprobs = trajectory['prompt_logprobs']
+        ground_logprobs = trajectory['prompt_logprobs']
+        
+
+
 def compute_rewards(
     trajectories: List[Dict[str, Any]],
+    all_logprobs: List[List[float]],
 ) -> Tuple[List[float], List[float], List[float]]:
-    accuracy_reward_fn = GSM8KAccuracyReward()
-    format_reward_fn = GSM8KFormatReward()
-
-    accuracy_rewards = accuracy_reward_fn(trajectories)
-    format_rewards = format_reward_fn(trajectories)
-    total_rewards = [a + f for a, f in zip(accuracy_rewards, format_rewards)]
-    return total_rewards, format_rewards, accuracy_rewards
-
+    accuracy_reward_fn = MathReward()
+    accuracy_rewards = accuracy_reward_fn(trajectories, trajectories)
+    length_rewards = length_reward(trajectories)
+    kl_rewards = kl_reward(trajectories, all_logprobs)
+    total_rewards = [a + f + k for a, f, k in zip(accuracy_rewards, length_rewards, kl_rewards)]
+    return total_rewards, length_rewards, accuracy_rewards
 
 
 def multi_round_sample(samples: List[Trajectory], sampler: vLLMSampler, sampling_params: SamplingParams, num_generations, template, max_round=10) -> List[Trajectory]:
@@ -199,6 +219,29 @@ def multi_round_sample(samples: List[Trajectory], sampler: vLLMSampler, sampling
     return results
 
 
+def compute_lobprobs_given_ground_truth(trajectories: List[Trajectory], sampler: vLLMSampler):
+    SYSTEM = """
+You are a helpful assistant to help me to solve problems. You will be given a question, and the ground truth answer will be given to you too.
+You need to think about the question and give a better answer according to the question/ground truth.
+"""
+
+    sampling_params = SamplingParams(max_tokens=0, prompt_logprobs=64)
+    for trajectory in trajectories:
+        ground_truth = [data[1] for data in trajectory['user_data'] if data[0] == 'ground_truth'][0]
+        messages = trajectory['messages']
+        messages[0]['content'] = SYSTEM
+        message = [m for m in messages if m['role'] == 'user'][0]
+        message['content'] = message['content'] + '\n\nThe ground truth of this problem is:\n' + ground_truth
+
+    sample_responses = sampler.sample(trajectories, sampling_params=sampling_params)
+
+    all_logprobs = []
+    for response in sample_responses:
+        logprobs = [prompt_logprob[1] for prompt_logprob in response.prompt_logprobs]
+        all_logprobs.append(logprobs)
+    return all_logprobs
+
+
 def main():
     # set sampler and model separate to use different gpus
     device_groups = [
@@ -231,7 +274,7 @@ def main():
     else:
         model.set_optimizer('AdamW', lr=LEARNING_RATE)
         model.set_lr_scheduler('CosineAnnealingLR', T_max=len(dataloader), eta_min=0)
-    model.set_loss('GRPOLoss', epsilon=0.2)
+    # model.set_loss('GRPOLoss', epsilon=0.2)
     model.set_processor(InputProcessor)
     model.set_template('Qwen3_5Template', model_id=MODEL_ID)
 
@@ -251,7 +294,7 @@ def main():
     advantage_fn = GRPOAdvantage()
     metrics = CompletionRewardMetric()
 
-    sampling_params = SamplingParams(max_tokens=MAX_NEW_TOKENS, num_samples=1, logprobs=1, prompt_logprobs=1)
+    sampling_params = SamplingParams(max_tokens=MAX_NEW_TOKENS, num_samples=1, logprobs=1, prompt_logprobs=64)
 
     optim_step = 0
     logger.info(get_device_placement())
@@ -270,8 +313,9 @@ def main():
             all_input_data.append(sample_response['messages'])
             all_old_logps.append(sample_response['logprobs'])
             all_completion_lengths.append(sum(np.where(sample_response['labels']==-100, 0, 1)))
+        all_logprobs = compute_lobprobs_given_ground_truth(trajectories=all_input_data, sampler=sampler)
         total_rewards, format_rewards, accuracy_rewards = compute_rewards(
-            all_input_data
+            all_input_data, all_logprobs
         )
         metrics.accumulate(
             completion_lengths=all_completion_lengths,

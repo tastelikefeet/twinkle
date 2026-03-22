@@ -10,6 +10,11 @@ from twinkle.data_format import Message, Tool, ToolCall, Trajectory
 import json
 
 
+SYSTEM = """You are a helpful assistant. You first thinks and outputs about the reasoning process 
+and then provides the user with the answer. If the solution can be expressed with a number/definite sequence, you
+should output it and wrap it with \\boxed{...}.
+"""
+
 class StepFlashPreprocessor(Preprocessor):
 
     def __call__(self, rows: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
@@ -20,7 +25,7 @@ class StepFlashPreprocessor(Preprocessor):
 
     def preprocess(self, row) -> Trajectory:
         raw_messages = row.get('messages', [])
-        messages = []
+        messages = [Message(role='system', content=SYSTEM)]
         tools = None
 
         for msg in raw_messages:
@@ -66,6 +71,7 @@ class WorldVQAPreprocessor(Preprocessor):
 
     def preprocess(self, row) -> Trajectory:
         return Trajectory(messages=[
+            Message(role='system', content=SYSTEM),
             Message(role='user', content='<image>' + row['question'], images=[row['image']]),
             Message(role='assistant', content=row['answer']),
         ])
@@ -81,6 +87,7 @@ class DocVQAPreprocessor(Preprocessor):
 
     def preprocess(self, row) -> Trajectory:
         return Trajectory(messages=[
+            Message(role='system', content=SYSTEM),
             Message(role='user', content='<image>' + row['question'], images=[row['image']]),
             Message(role='assistant', content=row['answers'][0]),
         ])
@@ -96,6 +103,7 @@ class ArxivSummarization(Preprocessor):
 
     def preprocess(self, row) -> Trajectory:
         return Trajectory(messages=[
+            Message(role='system', content=SYSTEM),
             Message(role='user', content='Summarize this article: \n\n' + row['article']),
             Message(role='assistant', content=row['abstract']),
         ])
@@ -112,7 +120,7 @@ class LLaVAVideo178K(Preprocessor):
     def preprocess(self, row) -> Trajectory:
         conversations = row.get('conversations', [])
         video = row.get('video')
-        messages = []
+        messages = [Message(role='system', content=SYSTEM)]
 
         role_map = {'human': 'user', 'gpt': 'assistant'}
         for conv in conversations:
@@ -144,6 +152,7 @@ class VerifiableCoding(Preprocessor):
         if not answer or not verification_info:
             return None
         return Trajectory(messages=[
+            Message(role='system', content=SYSTEM),
             Message(role='user', content=problem),
             Message(role='assistant', content=answer),
         ],
@@ -162,6 +171,7 @@ class ComputerUse(Preprocessor):
         problem = row.get('problem')
         answer = row.get('gold_standard_solution')
         return Trajectory(messages=[
+            Message(role='system', content=SYSTEM),
             Message(role='user', content=problem),
             Message(role='assistant', content=answer),
         ])
@@ -179,6 +189,7 @@ class LatexOCR(Preprocessor):
         image = row.get('image')
         text = row.get('text')
         return Trajectory(messages=[
+            Message(role='system', content=SYSTEM),
             Message(role='user', content='<image>Carefully read the image, and turn it into latex.', images=[image]),
             Message(role='assistant', content=text),
         ])

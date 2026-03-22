@@ -1,6 +1,6 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 import sys
-from typing import Any, List, Tuple
+from typing import Any, List, Tuple, Optional
 
 from .message import Message, Tool
 
