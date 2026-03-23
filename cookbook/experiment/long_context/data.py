@@ -202,9 +202,9 @@ class Condense(Preprocessor):
         return rows
 
     @staticmethod
-    def condense_sequence(text: str, ratio: float = 0.5, chunk_size: int = 512, start_index: int = 0) -> Tuple[str, List[str], int]:
+    def condense_sequence(text: str, ratio: float = 0.2, chunk_size: int = 512, start_index: int = 0) -> Tuple[str, List[str], int]:
         if not text or ratio >= 1.0:
-            return text, [text] if text else []
+            return text, [text] if text else [], 0
 
         sentences = re.split(r'(?<=[.!?。！？\n])', text)
         chunks = []
@@ -222,7 +222,7 @@ class Condense(Preprocessor):
 
         chunks = [c for c in chunks if c]
         if len(chunks) <= 1:
-            return text[:int(len(text) * ratio)], chunks
+            return text[:int(len(text) * ratio)], chunks, 0
 
         chunk_words = [chunk.lower().split() for chunk in chunks]
         all_words = [w for words in chunk_words for w in words]
