@@ -134,6 +134,12 @@ _BASE_LAYER_SUFFIXES = [
     '.mlp.gate.weight',
     '.mlp.gate.bias',
     '.mlp.gate.e_score_correction_bias',
+    '.in_proj_qkv.weight',
+    '.in_proj_z.weight',
+    '.in_proj_a.weight',
+    '.in_proj_b.weight',
+    '.out_proj.weight',
+    '.conv1d.weight',
 ]
 
 
@@ -1587,7 +1593,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
 
         if base_sync_done and adapter_name:
             if merge_and_sync:
-
+                # LoRA Training and sync full model(merge_adapter)
                 def weight_generator():
                     for _model in self.strategy.unwrap_model(self.model):
                         if isinstance(_model, PeftModel):
@@ -1616,7 +1622,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
                         yield name, tensor
 
         else:
-
+            # First full base-model sync.
             def _raw_weights():
                 for name, tensor in self.get_hf_state_dict(adapter_name=''):
                     if name is None or tensor is None:
@@ -1627,7 +1633,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
                     yield _trim_vocab(name, tensor)
 
             def weight_generator():
-                if is_peft_format:
+                if is_peft_format and not merge_and_sync:
                     yield from _add_base_layer_suffix(_raw_weights())
                 else:
                     yield from _raw_weights()
