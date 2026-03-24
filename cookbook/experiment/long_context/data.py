@@ -206,58 +206,113 @@ class Condense(Preprocessor):
         if not text or ratio >= 1.0:
             return text, [text] if text else [], 0
 
-        sentences = re.split(r'(?<=[.!?。！？\n])', text)
-        chunks = []
-        current_chunk = ""
+        # 1. 分句
+        sentences = re.split(r'(?<=[.!?。！？])', text)
+        sentences = [s.strip() for s in sentences if s.strip()]
+        
+        if not sentences:
+            return text, [text], 0
 
+        # 2. 计算全文 TF-IDF
+        all_words = []
+        sentence_words = []
         for sent in sentences:
-            if len(current_chunk) + len(sent) <= chunk_size:
-                current_chunk += sent
-            else:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                current_chunk = sent
-        if current_chunk:
-            chunks.append(current_chunk.strip())
-
-        chunks = [c for c in chunks if c]
-        if len(chunks) <= 1:
-            return text[:int(len(text) * ratio)], chunks, 0
-
-        chunk_words = [chunk.lower().split() for chunk in chunks]
-        all_words = [w for words in chunk_words for w in words]
+            words = re.findall(r'\b\w+\b|[\u4e00-\u9fff]', sent.lower())
+            sentence_words.append(words)
+            all_words.extend(words)
+        
+        if not all_words:
+            return text, [text], 0
+        
+        # TF: 词频
         word_freq = Counter(all_words)
-
-        n_chunks = len(chunks)
-        doc_freq = Counter(w for words in chunk_words for w in set(words))
-        idf = {w: math.log(n_chunks / (df + 1)) for w, df in doc_freq.items()}
-
-        scores = []
-        for words in chunk_words:
-            score = sum(word_freq[w] * idf.get(w, 0) for w in words) / (len(words) + 1)
-            scores.append(score)
-
+        total_words = len(all_words)
+        tf = {w: freq / total_words for w, freq in word_freq.items()}
+        
+        # IDF: 包含该词的句子数
+        n_sentences = len(sentences)
+        doc_freq = Counter(w for words in sentence_words for w in set(words))
+        idf = {w: math.log((n_sentences + 1) / (df + 1)) + 1 for w, df in doc_freq.items()}
+        
+        # TF-IDF 分数
+        tfidf = {w: tf[w] * idf[w] for w in word_freq}
+        
+        # 3. 按块组织句子
+        chunks = []
+        current_chunk_sentences = []
+        current_chunk_len = 0
+        
+        for sent in sentences:
+            if current_chunk_len + len(sent) <= chunk_size:
+                current_chunk_sentences.append(sent)
+                current_chunk_len += len(sent)
+            else:
+                if current_chunk_sentences:
+                    chunks.append(current_chunk_sentences)
+                current_chunk_sentences = [sent]
+                current_chunk_len = len(sent)
+        if current_chunk_sentences:
+            chunks.append(current_chunk_sentences)
+        
+        # 4. 对每个块内的句子进行压缩
         target_len = int(len(text) * ratio)
-        ranked = sorted(range(len(chunks)), key=lambda i: scores[i], reverse=True)
-
-        selected = []
-        current_len = 0
-        for idx in ranked:
-            if current_len + len(chunks[idx]) <= target_len:
-                selected.append(idx)
-                current_len += len(chunks[idx])
-
-        selected.sort()
-        condensed = '\n'.join(f'<chunk_{start_index + i}>{chunks[i]}</chunk_{start_index + i}>' for i in selected)
-        return condensed, chunks, start_index+len(selected)
+        condensed_chunks = []
+        original_chunks = []
+        
+        for chunk_sents in chunks:
+            original_text = ''.join(chunk_sents)
+            original_chunks.append(original_text)
+            
+            # 对每个句子，保留高分词
+            condensed_sents = []
+            for sent in chunk_sents:
+                words = re.findall(r'\b\w+\b|[\u4e00-\u9fff]', sent)
+                if not words:
+                    condensed_sents.append(sent)
+                    continue
+                
+                # 计算每个词的分数，保留 top ratio 的词
+                word_scores = [(w, tfidf.get(w.lower(), 0)) for w in words]
+                word_scores.sort(key=lambda x: x[1], reverse=True)
+                
+                keep_count = max(1, int(len(words) * ratio))
+                kept_words = set(w for w, _ in word_scores[:keep_count])
+                
+                # 重建句子，保留高分词和标点
+                condensed = []
+                for token in re.findall(r'\b\w+\b|[\u4e00-\u9fff]|[^\w\s]|\s+', sent):
+                    if token in kept_words or not re.match(r'\b\w+\b|[\u4e00-\u9fff]', token):
+                        condensed.append(token)
+                condensed_sents.append(''.join(condensed))
+            
+            condensed_chunks.append(''.join(condensed_sents))
+        
+        # 5. 包裹标签
+        result = '\n'.join(
+            f'<chunk_{start_index + i}>{condensed_chunks[i]}</chunk_{start_index + i}>'
+            for i in range(len(condensed_chunks))
+        )
+        
+        return result, original_chunks, start_index + len(chunks)
 
     def preprocess(self, row: Trajectory) -> Trajectory:
         messages = row.get('messages')
         tool = Tool(
             tool_name='read_detail',
-            description='Use this tool to read the original text. Use it when the current compressed information is insufficient for you to accurately answer the user\'s request. '
-                        'You should read as little of the original information as possible to prevent the input sequence from becoming too long.',
-            parameters='[{"name":"block","type":"int","description":"The condensed block number"}]',
+            description='Read the original uncompressed content of a specific chunk. '
+                        'The user input has been compressed with key information preserved in <chunk_N> tags. '
+                        'Call this tool when the compressed content is insufficient to answer accurately. '
+                        'Minimize usage to avoid context length overflow.',
+            parameters=json.dumps({
+                'type': 'object',
+                'properties': {
+                    'block': {
+                        'type': 'integer',
+                        'description': 'The chunk number N from <chunk_N> tag to retrieve original content'
+                    }
+                },
+                'required': ['block']
+            }),
         )
         start_idx = 0
         chunks = []
