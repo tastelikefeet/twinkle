@@ -9,7 +9,7 @@ Reference:
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 from twinkle.data_format import LossOutput
-from twinkle.kernel import selective_log_softmax
+from twinkle.utils.torch_utils import selective_log_softmax
 from twinkle.loss.base import Loss
 
 if TYPE_CHECKING:
