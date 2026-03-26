@@ -306,11 +306,13 @@ class Template:
             input_ids = self.tokenizer.encode(text)
             encoded = {}
             labels = deepcopy(input_ids)
-        return InputFeature(
+        input_feature = InputFeature(
             input_ids=np.array(input_ids),
             labels=np.array(labels),
             **encoded,
         )
+        trajectory.update(input_feature)
+        return input_feature
 
     @staticmethod
     def map_col_to_row(trajectories: Dict[str, Any]):
