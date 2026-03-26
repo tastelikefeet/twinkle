@@ -8,8 +8,6 @@ Reference:
 """
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
-import numpy as np
-
 from twinkle.data_format import LossOutput
 from twinkle.kernel import selective_log_softmax
 from twinkle.loss.base import Loss
@@ -640,10 +638,12 @@ class ORPOLoss(Loss):
         rejected_avg_logps = self._compute_avg_logps(rejected_logps, rejected_labels)
 
         # Odds ratio: log(odds_chosen / odds_rejected)
-        # log(p/(1-p)) ≈ log(p) - log(1-p) ≈ log(p) + p for small p
-        # Simplified: log_odds = avg_logp (since p is small)
-        log_odds_chosen = chosen_avg_logps - torch.log1p(-torch.exp(chosen_avg_logps).clamp(max=1-1e-7))
-        log_odds_rejected = rejected_avg_logps - torch.log1p(-torch.exp(rejected_avg_logps).clamp(max=1-1e-7))
+        # log_odds = log(p/(1-p)) = log(p) - log(1-p)
+        # Use numerically stable computation
+        prob_chosen = torch.exp(chosen_avg_logps).clamp(min=1e-7, max=1-1e-7)
+        prob_rejected = torch.exp(rejected_avg_logps).clamp(min=1e-7, max=1-1e-7)
+        log_odds_chosen = torch.log(prob_chosen) - torch.log(1 - prob_chosen)
+        log_odds_rejected = torch.log(prob_rejected) - torch.log(1 - prob_rejected)
 
         # ORPO odds ratio loss
         odds_ratio = log_odds_chosen - log_odds_rejected

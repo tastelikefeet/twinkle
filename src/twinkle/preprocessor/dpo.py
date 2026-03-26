@@ -23,10 +23,12 @@ class DPOProcessor(Preprocessor):
         3. {'messages': List[Message], 'chosen': str, 'rejected': str}
         4. {'chosen': List[Message], 'rejected': List[Message]} (full conversations)
 
-    Output: Each sample generates TWO Trajectories:
-        - First: chosen response trajectory
-        - Second: rejected response trajectory
-        The DPO loss expects batch to be [chosen_1, ..., chosen_n, rejected_1, ..., rejected_n]
+    Output: Each sample is expanded into TWO rows in the dataset:
+        - Row 2i: chosen response trajectory
+        - Row 2i+1: rejected response trajectory
+
+    The DPO loss expects batch to be [chosen_1, ..., chosen_n, rejected_1, ..., rejected_n],
+    which should be handled by a custom collate function or DataLoader.
 
     Args:
         system: Optional system prompt to prepend.
@@ -34,6 +36,9 @@ class DPOProcessor(Preprocessor):
         rejected_key: Key for rejected response (default: 'rejected').
         prompt_key: Key for prompt/question (default: 'prompt').
         messages_key: Key for conversation messages (default: 'messages').
+        output_format: How to structure the output:
+            - 'interleaved': [chosen_1, rejected_1, chosen_2, rejected_2, ...]
+            - 'paired': {'chosen': [Traj1, ...], 'rejected': [Traj1, ...]}
     """
 
     def __init__(
@@ -43,12 +48,14 @@ class DPOProcessor(Preprocessor):
         rejected_key: str = 'rejected',
         prompt_key: str = 'prompt',
         messages_key: str = 'messages',
+        output_format: str = 'interleaved',
     ):
         self.system = system
         self.chosen_key = chosen_key
         self.rejected_key = rejected_key
         self.prompt_key = prompt_key
         self.messages_key = messages_key
+        self.output_format = output_format
 
     def _parse_response(self, response: Union[str, List[Dict], List[Message]]) -> List[Message]:
         """Parse response into list of Messages."""
@@ -125,13 +132,28 @@ class DPOProcessor(Preprocessor):
     def __call__(self, rows: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
         """Process batched data into paired trajectories.
 
-        Note: Output maintains separate 'chosen' and 'rejected' columns.
-        The DataLoader/collator should handle pairing them appropriately
-        for the DPO loss (concatenating chosen batch + rejected batch).
+        Output format depends on self.output_format:
+        - 'interleaved': Returns standard Trajectory column with alternating
+          chosen/rejected pairs for proper encoding. The DataLoader should use
+          a custom collate function to reorder into [chosen..., rejected...].
+        - 'paired': Returns separate 'chosen' and 'rejected' columns (requires
+          special handling in DataLoader).
         """
         rows = self.map_col_to_row(rows)
         processed = [self.preprocess(row) for row in rows]
-        return self.map_row_to_col(processed)
+
+        if self.output_format == 'interleaved':
+            # Flatten to interleaved format: [chosen_1, rejected_1, chosen_2, rejected_2, ...]
+            # This allows standard Dataset.encode() to work
+            trajectories = []
+            for pair in processed:
+                trajectories.append(pair['chosen'])
+                trajectories.append(pair['rejected'])
+            # Return as standard trajectory column
+            return {'messages': trajectories}
+        else:
+            # Paired format: separate columns
+            return self.map_row_to_col(processed)
 
 
 class HHRLHFProcessor(Preprocessor):

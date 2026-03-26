@@ -71,8 +71,8 @@ else:
     NUM_GPUS = MODEL_GPUS
     USE_REFERENCE_MODEL = False
 
-BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 8))
-MICRO_BATCH_SIZE = int(os.environ.get('MICRO_BATCH_SIZE', 2))
+BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 8))  # Number of preference pairs
+MICRO_BATCH_SIZE = int(os.environ.get('MICRO_BATCH_SIZE', 2))  # Must be even (chosen + rejected)
 GRADIENT_ACCUMULATION_STEPS = int(os.environ.get('GRADIENT_ACCUMULATION_STEPS', 1))
 MAX_STEPS = int(os.environ.get('MAX_STEPS', 1000))
 LEARNING_RATE = float(os.environ.get('LR', 5e-6))
@@ -88,41 +88,49 @@ ADAPTER_NAME = 'default'
 def create_dpo_dataset():
     """Create preference dataset for DPO training.
 
-    The dataset should contain 'chosen' and 'rejected' columns after preprocessing.
-    Each sample will be duplicated: first the chosen, then the rejected version.
+    The dataset will contain interleaved chosen/rejected pairs after preprocessing:
+    [chosen_1, rejected_1, chosen_2, rejected_2, ...]
+
+    The collate function will reorder to: [chosen_1, ..., chosen_n, rejected_1, ..., rejected_n]
     """
     dataset = Dataset(DatasetMeta(DATASET_ID, split='train'))
     dataset.set_template('Template', model_id=MODEL_ID, max_length=MAX_LENGTH)
 
-    # Use DPOProcessor to convert dataset to standard format
-    # Adjust processor based on your dataset format
+    # Use DPOProcessor with interleaved output format
+    # This creates alternating chosen/rejected pairs that can be properly encoded
     dataset.map(DPOProcessor(
         system='You are a helpful, harmless, and honest assistant.',
         chosen_key='chosen',
         rejected_key='rejected',
         prompt_key='prompt',
+        output_format='interleaved',  # Output: [chosen_1, rejected_1, chosen_2, ...]
     ))
 
-    # Encode both chosen and rejected trajectories
+    # Encode the interleaved trajectories
     dataset.encode()
     return dataset
 
 
-def collate_preference_batch(batch: List[Dict[str, Any]]) -> Dict[str, List]:
-    """Collate preference pairs into DPO batch format.
+def collate_preference_batch(batch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Collate interleaved preference pairs into DPO batch format.
 
-    DPO loss expects: [chosen_1, ..., chosen_n, rejected_1, ..., rejected_n]
+    Input: [chosen_1, rejected_1, chosen_2, rejected_2, ...] (interleaved)
+    Output: [chosen_1, chosen_2, ..., rejected_1, rejected_2, ...] (grouped)
+
+    DPO loss expects: first half chosen, second half rejected.
     """
+    if not batch:
+        return batch
+
+    # Extract alternating chosen/rejected
     chosen_samples = []
     rejected_samples = []
 
-    for item in batch:
-        if 'chosen' in item and 'rejected' in item:
-            chosen_samples.append(item['chosen'])
-            rejected_samples.append(item['rejected'])
-        else:
-            # Assume alternating format if not explicitly separated
+    for i, item in enumerate(batch):
+        if i % 2 == 0:  # Even indices are chosen
             chosen_samples.append(item)
+        else:  # Odd indices are rejected
+            rejected_samples.append(item)
 
     # Concatenate: all chosen first, then all rejected
     return chosen_samples + rejected_samples
@@ -209,7 +217,9 @@ def main():
         logger.info(f'Training without reference model (loss_type={LOSS_TYPE})')
 
     # ── DataLoader Setup ──────────────────────────────────────────────────────
-    GLOBAL_BATCH_SIZE = BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS
+    # Since dataset is interleaved (chosen, rejected, chosen, rejected, ...),
+    # we need batch_size * 2 samples to get BATCH_SIZE preference pairs
+    GLOBAL_BATCH_SIZE = BATCH_SIZE * 2 * GRADIENT_ACCUMULATION_STEPS
     dataloader = DataLoader(
         dataset=create_dpo_dataset,
         batch_size=GLOBAL_BATCH_SIZE,
@@ -239,10 +249,12 @@ def main():
                 ref_logps = ref_outputs.get('logps')
 
         # Forward-backward pass with DPO loss
+        # micro_batch_size must be even to maintain chosen/rejected pairing
+        actual_micro_batch = MICRO_BATCH_SIZE * 2  # Convert pairs to samples
         policy_model.forward_backward(
             inputs=preference_batch,
             ref_logps=ref_logps,
-            micro_batch_size=MICRO_BATCH_SIZE,
+            micro_batch_size=actual_micro_batch,
         )
 
         # Gradient clipping and optimizer step
