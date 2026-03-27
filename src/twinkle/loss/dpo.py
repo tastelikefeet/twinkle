@@ -154,12 +154,23 @@ class DPOLoss(PreferenceLossBase):
         import torch
 
         if torch.is_tensor(logps):
-            if logps.shape == target_shape:
-                return logps.to(device=device, dtype=dtype)
-            elif logps.dim() == 1:
+            if logps.dim() == 1:
                 logps = logps.unsqueeze(0)
             if logps.shape == target_shape:
                 return logps.to(device=device, dtype=dtype)
+            # Handle tensor with different sequence length - align to target shape
+            if logps.dim() == 2 and logps.shape[0] == target_shape[0]:
+                batch_size, target_seq_len = target_shape
+                src_seq_len = logps.shape[1]
+                logps = logps.to(device=device, dtype=dtype)
+                if src_seq_len > target_seq_len:
+                    # Truncate: take the last target_seq_len tokens (response part)
+                    return logps[:, -target_seq_len:]
+                else:
+                    # Pad: add zeros at the beginning
+                    padded = torch.zeros(target_shape, device=device, dtype=dtype)
+                    padded[:, -src_seq_len:] = logps
+                    return padded
 
         # Handle ragged list input
         if isinstance(logps, (list, tuple)):

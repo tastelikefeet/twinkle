@@ -25,14 +25,13 @@ DPO Trajectory format:
     - extend_message: [('rejected_messages', List[Message])] - rejected response
 
 For SimPO/ORPO variants that don't require a reference model,
-set USE_REFERENCE_MODEL=0 to skip reference model computation.
+set REF_MODEL_GPUS=0 to skip reference model computation.
 
 Environment variables (all optional):
     MODEL_ID          – (default: ms://Qwen/Qwen3.5-4B)
     DATASET_ID        – (default: ms://hjh0119/shareAI-Llama3-DPO-zh-en-emoji)
     MODEL_GPUS        – GPUs for policy model                 (default: 4)
     REF_MODEL_GPUS    – GPUs for reference model              (default: 4, 0 to disable)
-    USE_REFERENCE_MODEL – Whether to use reference model      (default: 1)
     BATCH_SIZE        – global batch size (preference pairs)  (default: 8)
     MICRO_BATCH_SIZE  – per-device micro batch size           (default: 2)
     MAX_STEPS         – total optimization steps              (default: 1000)
@@ -62,6 +61,7 @@ from twinkle.dataloader import DataLoader
 from twinkle.dataset import Dataset, DatasetMeta
 from twinkle.loss import CPOLoss, DPOLoss, ORPOLoss, SimPOLoss
 from twinkle.model import TransformersModel
+from twinkle.preprocessor import EmojiDPOProcessor
 from twinkle.processor import InputProcessor
 from twinkle.template import Template
 
@@ -73,14 +73,7 @@ DATASET_ID = os.environ.get('DATASET_ID', 'ms://hjh0119/shareAI-Llama3-DPO-zh-en
 
 MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 4))
 REF_MODEL_GPUS = int(os.environ.get('REF_MODEL_GPUS', 4))
-USE_REFERENCE_MODEL = bool(int(os.environ.get('USE_REFERENCE_MODEL', 1)))
-
-# Adjust total GPUs based on whether reference model is used
-if USE_REFERENCE_MODEL and REF_MODEL_GPUS > 0:
-    NUM_GPUS = MODEL_GPUS + REF_MODEL_GPUS
-else:
-    NUM_GPUS = MODEL_GPUS
-    USE_REFERENCE_MODEL = False
+NUM_GPUS = MODEL_GPUS + REF_MODEL_GPUS
 
 BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 8))  # Number of preference pairs
 MICRO_BATCH_SIZE = int(os.environ.get('MICRO_BATCH_SIZE', 2))
@@ -92,30 +85,18 @@ LOSS_TYPE = os.environ.get('LOSS_TYPE', 'sigmoid')  # sigmoid, hinge, ipo, simpo
 SAVE_STEPS = int(os.environ.get('SAVE_STEPS', 100))
 MAX_LENGTH = int(os.environ.get('MAX_LENGTH', 2048))
 ADAPTER_NAME = 'default'
-
-
-# ── Dataset ───────────────────────────────────────────────────────────────────
-
-# Dataset field configuration for shareAI/DPO-zh-en-emoji
-PROMPT_KEY = os.environ.get('PROMPT_KEY', 'prompt')
-CHOSEN_KEY = os.environ.get('CHOSEN_KEY', 'answer_zh')
-REJECTED_KEY = os.environ.get('REJECTED_KEY', 'answer_en')
 SYSTEM_PROMPT = os.environ.get('SYSTEM_PROMPT', 'You are a helpful assistant.')
 
 
 def create_dpo_dataset():
-    """Create preference dataset for DPO training.
-
-    Uses shareAI/DPO-zh-en-emoji dataset:
-    - answer_zh: chosen response (Chinese)
-    - answer_en: rejected response (English)
-
-    Returns raw dataset without preprocessing - preprocessing is done
-    in prepare_dpo_batch() to avoid PyArrow serialization issues.
-    """
-    dataset = Dataset(DatasetMeta(DATASET_ID, split='train'))
+    dataset = Dataset(DatasetMeta(DATASET_ID))
     dataset.set_template('Template', model_id=MODEL_ID, max_length=MAX_LENGTH)
-    # Do NOT apply preprocessor here - raw data will be processed in prepare_dpo_batch
+    dataset.map(
+        EmojiDPOProcessor,
+        init_args={
+            'system': SYSTEM_PROMPT,
+        }
+    )
     return dataset
 
 
@@ -130,7 +111,6 @@ def prepare_dpo_batch(
 
     Returns:
         List organized as [chosen_1, ..., chosen_n, rejected_1, ..., rejected_n]
-        where each item is an encoded InputFeature dict.
     """
     chosen_trajectories = []
     rejected_trajectories = []
@@ -189,15 +169,10 @@ def create_loss(loss_type: str, beta: float, reference_free: bool = False):
 
 def main():
     # Set up device groups
-    if USE_REFERENCE_MODEL:
-        device_groups = [
-            DeviceGroup(name='policy', ranks=list(range(MODEL_GPUS)), device_type='GPU'),
-            DeviceGroup(name='reference', ranks=list(range(MODEL_GPUS, NUM_GPUS)), device_type='GPU'),
-        ]
-    else:
-        device_groups = [
-            DeviceGroup(name='policy', ranks=list(range(MODEL_GPUS)), device_type='GPU'),
-        ]
+    device_groups = [
+        DeviceGroup(name='policy', ranks=list(range(MODEL_GPUS)), device_type='GPU'),
+        DeviceGroup(name='reference', ranks=list(range(MODEL_GPUS, NUM_GPUS)), device_type='GPU'),
+    ]
 
     policy_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, dp_size=MODEL_GPUS)
     twinkle.initialize(mode='ray', nproc_per_node=NUM_GPUS, groups=device_groups, lazy_collect=False)
@@ -226,7 +201,7 @@ def main():
     reference_free = LOSS_TYPE in ['simpo', 'orpo', 'cpo']
 
     # Set up loss function
-    loss_fn = create_loss(LOSS_TYPE, DPO_BETA, reference_free=not USE_REFERENCE_MODEL)
+    loss_fn = create_loss(LOSS_TYPE, DPO_BETA, reference_free=False)
     policy_model.set_loss(loss_fn)
     policy_model.set_processor(InputProcessor)
     policy_model.set_template('Template', model_id=MODEL_ID)
@@ -234,9 +209,9 @@ def main():
     # Get template for encoding rejected messages
     template = Template(model_id=MODEL_ID, max_length=MAX_LENGTH)
 
-    # ── Reference Model Setup (if needed) ─────────────────────────────────────
+    # ── Reference Model Setup ─────────────────────────────────────────────────
     ref_model = None
-    if USE_REFERENCE_MODEL and not reference_free:
+    if not reference_free:
         ref_mesh = DeviceMesh.from_sizes(world_size=REF_MODEL_GPUS, dp_size=REF_MODEL_GPUS)
         ref_model = TransformersModel(
             model_id=MODEL_ID,
@@ -261,8 +236,7 @@ def main():
 
     optim_step = 0
     logger.info(get_device_placement())
-    logger.info(f'Starting DPO training: loss_type={LOSS_TYPE}, beta={DPO_BETA}, '
-                f'use_ref_model={USE_REFERENCE_MODEL}')
+    logger.info(f'Starting DPO training: loss_type={LOSS_TYPE}, beta={DPO_BETA}')
 
     # ── Training Loop ─────────────────────────────────────────────────────────
     for batch in dataloader:
@@ -274,19 +248,46 @@ def main():
         dpo_batch = prepare_dpo_batch(batch_list, template)
 
         # Compute reference log probabilities if using reference model
-        ref_logps = None
+        # We compute sequence-level logps here to avoid alignment issues with micro-batching
+        ref_chosen_logps = None
+        ref_rejected_logps = None
         if ref_model is not None:
             with torch.no_grad():
                 ref_outputs = ref_model.forward_only(inputs=dpo_batch)
-                ref_logps = ref_outputs.get('logps')
+                ref_logps = ref_outputs.get('logps')  # [batch, seq_len]
+                if ref_logps is not None:
+                    # Get labels and pad to same length for stacking
+                    label_tensors = [torch.as_tensor(s['labels']) for s in dpo_batch]
+                    max_len = max(t.shape[0] for t in label_tensors)
+                    # Pad labels with -100 (ignore_index) to max length
+                    padded_labels = []
+                    for t in label_tensors:
+                        if t.shape[0] < max_len:
+                            pad_size = max_len - t.shape[0]
+                            t = torch.cat([torch.full((pad_size,), -100, dtype=t.dtype), t])
+                        padded_labels.append(t)
+                    ref_labels = torch.stack(padded_labels)
+                    if ref_labels.device != ref_logps.device:
+                        ref_labels = ref_labels.to(ref_logps.device)
+                    # Align sequence lengths if needed
+                    if ref_logps.shape[1] != ref_labels.shape[1]:
+                        min_len = min(ref_logps.shape[1], ref_labels.shape[1])
+                        ref_logps = ref_logps[:, -min_len:]
+                        ref_labels = ref_labels[:, -min_len:]
+                    # Compute sequence-level logps (sum of valid token logps)
+                    loss_mask = (ref_labels != -100).float()
+                    seq_logps = (ref_logps * loss_mask).sum(dim=-1)  # [batch]
+
+                    # Split into chosen and rejected
+                    half = seq_logps.shape[0] // 2
+                    ref_chosen_logps = seq_logps[:half]
+                    ref_rejected_logps = seq_logps[half:]
 
         # Forward-backward pass with DPO loss
-        # micro_batch_size should be even to maintain chosen/rejected pairing
-        actual_micro_batch = MICRO_BATCH_SIZE * 2
         policy_model.forward_backward(
             inputs=dpo_batch,
-            ref_logps=ref_logps,
-            micro_batch_size=actual_micro_batch,
+            ref_chosen_logps=ref_chosen_logps,
+            ref_rejected_logps=ref_rejected_logps,
         )
 
         # Gradient clipping and optimizer step
