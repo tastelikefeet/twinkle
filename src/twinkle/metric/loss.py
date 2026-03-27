@@ -52,7 +52,6 @@ class LossMetric(Metric):
             'grad_norm': self.grad_norm,
             'num_tokens': self.num_tokens
         }]
-
         all_results = self.gather_results(local_results)
 
         total_loss = sum(r['loss'] for r in all_results)

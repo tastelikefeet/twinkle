@@ -51,7 +51,6 @@ Environment variables (all optional):
 import os
 from typing import Any, Dict, List, Optional
 
-import torch
 from peft import LoraConfig
 
 import twinkle
@@ -63,7 +62,6 @@ from twinkle.loss import CPOLoss, DPOLoss, ORPOLoss, SimPOLoss
 from twinkle.model import TransformersModel
 from twinkle.preprocessor import EmojiDPOProcessor
 from twinkle.processor import InputProcessor
-from twinkle.template import Template
 
 logger = get_logger()
 
@@ -75,8 +73,8 @@ MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 4))
 REF_MODEL_GPUS = int(os.environ.get('REF_MODEL_GPUS', 4))
 NUM_GPUS = MODEL_GPUS + REF_MODEL_GPUS
 
-BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 8))  # Number of preference pairs
-MICRO_BATCH_SIZE = int(os.environ.get('MICRO_BATCH_SIZE', 2))
+BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 4))  # Number of preference pairs
+MICRO_BATCH_SIZE = int(os.environ.get('MICRO_BATCH_SIZE', 4))
 GRADIENT_ACCUMULATION_STEPS = int(os.environ.get('GRADIENT_ACCUMULATION_STEPS', 1))
 MAX_STEPS = int(os.environ.get('MAX_STEPS', 1000))
 LEARNING_RATE = float(os.environ.get('LR', 5e-6))
@@ -100,31 +98,38 @@ def create_dpo_dataset():
     )
     # DPO preprocessor returns {'positive': [...], 'negative': [...]}
     # batch_encode handles this format automatically
-    dataset.encode()
+    dataset.encode(load_from_cache_file=True)
     return dataset
 
 
-def prepare_dpo_batch(
-    batch: Dict[str, List[Any]],
-    template: Template,
-) -> List[Dict[str, Any]]:
-    """Prepare DPO batch: convert encoded batch to list format for training.
+def prepare_dpo_batch(batch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Prepare DPO batch: reorganize batch for training with DP-safe interleaving.
 
     Args:
-        batch: Dict with 'positive' and 'negative' keys, each containing List[InputFeature]
+        batch: List of rows, each with 'positive' and 'negative' InputFeatures
+               and other fields (question, etc.)
 
     Returns:
-        List organized as [positive_1, ..., positive_n, negative_1, ..., negative_n]
+        List interleaved as [pos_1, neg_1, pos_2, neg_2, ...] to ensure each DP
+        worker gets complete positive/negative pairs after slicing.
+        Each item contains all original fields plus the InputFeature fields.
     """
-    positive_features = batch.get('positive', [])
-    negative_features = batch.get('negative', [])
+    result = []
 
-    # Convert to list of dicts
-    positive_samples = [dict(f) for f in positive_features]
-    negative_samples = [dict(f) for f in negative_features]
+    for row in batch:
+        # Get base fields (excluding positive/negative)
+        base_fields = {k: v for k, v in row.items() if k not in ('positive', 'negative')}
 
-    # Return [positive..., negative...]
-    return positive_samples + negative_samples
+        # Positive sample: merge base fields with positive InputFeature
+        pos_sample = {**base_fields, **row['positive']}
+        # Negative sample: merge base fields with negative InputFeature
+        neg_sample = {**base_fields, **row['negative']}
+
+        # Interleave: [pos, neg] per pair for DP-safe slicing
+        result.append(pos_sample)
+        result.append(neg_sample)
+
+    return result
 
 
 # ── Loss Factory ──────────────────────────────────────────────────────────────
@@ -196,9 +201,6 @@ def main():
     policy_model.set_processor(InputProcessor)
     policy_model.set_template('Template', model_id=MODEL_ID)
 
-    # Get template for encoding rejected messages
-    template = Template(model_id=MODEL_ID, max_length=MAX_LENGTH)
-
     # ── Reference Model Setup ─────────────────────────────────────────────────
     ref_model = None
     if not reference_free:
@@ -223,50 +225,19 @@ def main():
         if optim_step >= MAX_STEPS:
             break
 
-        # batch is Dict[str, List[Trajectory]] with 'positive' and 'negative' keys
-        dpo_batch = prepare_dpo_batch(batch, template)
+        # batch is List[Dict] with 'positive' and 'negative' keys
+        dpo_batch = prepare_dpo_batch(batch)
 
-        # Compute reference log probabilities if using reference model
-        # We compute sequence-level logps here to avoid alignment issues with micro-batching
-        ref_chosen_logps = None
-        ref_rejected_logps = None
+        # Get reference outputs (lazy - not collected to driver)
+        ref_outputs = None
         if ref_model is not None:
-            with torch.no_grad():
-                ref_outputs = ref_model.forward_only(inputs=dpo_batch)
-                ref_logps = ref_outputs.get('logps')  # [batch, seq_len]
-                if ref_logps is not None:
-                    # Get labels and pad to same length for stacking
-                    label_tensors = [torch.as_tensor(s['labels']) for s in dpo_batch]
-                    max_len = max(t.shape[0] for t in label_tensors)
-                    # Pad labels with -100 (ignore_index) to max length
-                    padded_labels = []
-                    for t in label_tensors:
-                        if t.shape[0] < max_len:
-                            pad_size = max_len - t.shape[0]
-                            t = torch.cat([torch.full((pad_size,), -100, dtype=t.dtype), t])
-                        padded_labels.append(t)
-                    ref_labels = torch.stack(padded_labels)
-                    if ref_labels.device != ref_logps.device:
-                        ref_labels = ref_labels.to(ref_logps.device)
-                    # Align sequence lengths if needed
-                    if ref_logps.shape[1] != ref_labels.shape[1]:
-                        min_len = min(ref_logps.shape[1], ref_labels.shape[1])
-                        ref_logps = ref_logps[:, -min_len:]
-                        ref_labels = ref_labels[:, -min_len:]
-                    # Compute sequence-level logps (sum of valid token logps)
-                    loss_mask = (ref_labels != -100).float()
-                    seq_logps = (ref_logps * loss_mask).sum(dim=-1)  # [batch]
-
-                    # Split into chosen and rejected
-                    half = seq_logps.shape[0] // 2
-                    ref_chosen_logps = seq_logps[:half]
-                    ref_rejected_logps = seq_logps[half:]
+            ref_outputs = ref_model.forward_only(inputs=dpo_batch)
 
         # Forward-backward pass with DPO loss
+        # ref_outputs is passed to loss which extracts logps internally
         policy_model.forward_backward(
             inputs=dpo_batch,
-            ref_chosen_logps=ref_chosen_logps,
-            ref_rejected_logps=ref_rejected_logps,
+            ref_outputs=ref_outputs,
         )
 
         # Gradient clipping and optimizer step

@@ -88,9 +88,13 @@ class PreferenceLossBase(Loss):
         self,
         tensor: 'torch.Tensor',
     ) -> tuple:
-        """Split tensor into chosen (first half) and rejected (second half)."""
-        half = tensor.shape[0] // 2
-        return tensor[:half], tensor[half:]
+        """Split interleaved tensor into chosen and rejected.
+
+        Input format: [pos_1, neg_1, pos_2, neg_2, ...] (interleaved for DP-safe slicing)
+        Output: (chosen [pos_1, pos_2, ...], rejected [neg_1, neg_2, ...])
+        """
+        # Even indices = chosen (positive), odd indices = rejected (negative)
+        return tensor[0::2], tensor[1::2]
 
 
 class DPOLoss(PreferenceLossBase):
@@ -131,20 +135,18 @@ class DPOLoss(PreferenceLossBase):
         self.loss_type = loss_type
         self.reference_free = reference_free
 
-    def _pad_and_align_logps(
+    def _align_logps(
         self,
-        logps: Union['torch.Tensor', List[List[float]]],
+        logps: 'torch.Tensor',
         target_shape: tuple,
-        loss_mask: 'torch.Tensor',
         device: 'torch.device',
         dtype: 'torch.dtype',
     ) -> 'torch.Tensor':
-        """Pad and align log probabilities to target shape.
+        """Align log probabilities to target shape.
 
         Args:
-            logps: Input log probabilities (tensor or ragged list)
+            logps: Input log probabilities tensor
             target_shape: Target (batch, seq_len) shape
-            loss_mask: Boolean mask for valid positions
             device: Target device
             dtype: Target dtype
 
@@ -153,40 +155,32 @@ class DPOLoss(PreferenceLossBase):
         """
         import torch
 
-        if torch.is_tensor(logps):
-            if logps.dim() == 1:
-                logps = logps.unsqueeze(0)
-            if logps.shape == target_shape:
-                return logps.to(device=device, dtype=dtype)
-            # Handle tensor with different sequence length - align to target shape
-            if logps.dim() == 2 and logps.shape[0] == target_shape[0]:
-                batch_size, target_seq_len = target_shape
-                src_seq_len = logps.shape[1]
-                logps = logps.to(device=device, dtype=dtype)
-                if src_seq_len > target_seq_len:
-                    # Truncate: take the last target_seq_len tokens (response part)
-                    return logps[:, -target_seq_len:]
-                else:
-                    # Pad: add zeros at the beginning
-                    padded = torch.zeros(target_shape, device=device, dtype=dtype)
-                    padded[:, -src_seq_len:] = logps
-                    return padded
+        if not torch.is_tensor(logps):
+            raise TypeError(f'Expected torch.Tensor, got {type(logps)}')
 
-        # Handle ragged list input
-        if isinstance(logps, (list, tuple)):
-            batch_size, seq_len = target_shape
-            padded = torch.zeros(target_shape, device=device, dtype=dtype)
-            for i, row in enumerate(logps):
-                if row is None:
-                    continue
-                row_t = torch.as_tensor(row, device=device, dtype=dtype)
-                valid_positions = loss_mask[i].nonzero(as_tuple=True)[0]
-                length = min(len(row_t), len(valid_positions))
-                if length > 0:
-                    padded[i, valid_positions[:length]] = row_t[:length]
-            return padded
+        if logps.dim() == 1:
+            logps = logps.unsqueeze(0)
 
-        return logps.to(device=device, dtype=dtype)
+        if logps.shape == target_shape:
+            return logps.to(device=device, dtype=dtype)
+
+        # Handle tensor with different sequence length
+        if logps.dim() == 2 and logps.shape[0] == target_shape[0]:
+            batch_size, target_seq_len = target_shape
+            src_seq_len = logps.shape[1]
+            logps = logps.to(device=device, dtype=dtype)
+            if src_seq_len > target_seq_len:
+                # Truncate right (keep left part) - may happen in Ray result merging
+                return logps[:, :target_seq_len]
+            else:
+                raise ValueError(
+                    f'ref_logps seq_len ({src_seq_len}) < target seq_len ({target_seq_len}). '
+                    f'This should not happen when both models process the same batch.'
+                )
+
+        raise ValueError(
+            f'Cannot align ref_logps shape {logps.shape} to target shape {target_shape}'
+        )
 
     def _compute_dpo_loss(
         self,
@@ -254,6 +248,7 @@ class DPOLoss(PreferenceLossBase):
         inputs: Dict,
         outputs: Dict,
         *,
+        ref_outputs: Optional[Dict] = None,
         ref_logps: Optional[Union['torch.Tensor', List[List[float]]]] = None,
         ref_chosen_logps: Optional['torch.Tensor'] = None,
         ref_rejected_logps: Optional['torch.Tensor'] = None,
@@ -271,6 +266,7 @@ class DPOLoss(PreferenceLossBase):
             outputs: Dict containing either:
                 - 'logps': [batch, seq_len] pre-computed log probs, OR
                 - 'logits': [batch, seq_len, vocab] from which logps will be computed
+            ref_outputs: Dict from reference model forward, containing 'logps'.
             ref_logps: [batch, seq_len] or List[List[float]] reference model log probs.
                       Can also be provided as separate ref_chosen_logps and ref_rejected_logps.
             ref_chosen_logps: [batch/2] pre-computed reference log probs for chosen.
@@ -281,6 +277,10 @@ class DPOLoss(PreferenceLossBase):
             LossOutput with DPO loss and metrics.
         """
         import torch
+
+        # Extract ref_logps from ref_outputs if provided
+        if ref_outputs is not None and ref_logps is None:
+            ref_logps = ref_outputs.get('logps')
 
         labels = inputs.get('labels')
         assert labels is not None, "inputs must contain 'labels'"
@@ -312,9 +312,8 @@ class DPOLoss(PreferenceLossBase):
             reference_rejected_logps = ref_rejected_logps.to(device=device, dtype=dtype)
         elif ref_logps is not None:
             # Per-token reference log probs provided, need to align and sum
-            loss_mask = (labels != self.ignore_index).bool()
-            ref_logps_aligned = self._pad_and_align_logps(
-                ref_logps, labels.shape, loss_mask, device, dtype
+            ref_logps_aligned = self._align_logps(
+                ref_logps, labels.shape, device, dtype
             )
             ref_chosen, ref_rejected = self._split_chosen_rejected(ref_logps_aligned)
             reference_chosen_logps = self._compute_sequence_logps(ref_chosen, chosen_labels)

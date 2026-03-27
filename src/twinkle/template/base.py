@@ -362,86 +362,68 @@ class Template:
         """Check if an object is a Trajectory (has 'messages' key)."""
         return isinstance(obj, Mapping) and 'messages' in obj
 
-    def _is_trajectory_dict(self, obj: Any) -> bool:
-        """Check if obj is Dict[str, Trajectory] - all values are Trajectories."""
-        if not isinstance(obj, Mapping) or not obj:
-            return False
-        return all(self._is_trajectory(v) for v in obj.values())
-
-    def _get_trajectory_keys(self, obj: Mapping) -> List[str]:
-        """Get keys in a dict whose values are Trajectories."""
-        return [k for k, v in obj.items() if self._is_trajectory(v)]
-
-    def _is_columnar_format(self, obj: Any) -> bool:
-        """Check if obj is columnar format: Dict[str, List[Any]] but NOT a Trajectory."""
-        if not isinstance(obj, Mapping) or not obj:
-            return False
-        # Trajectory has 'messages' key with list of Message dicts - not columnar
-        if self._is_trajectory(obj):
-            return False
-        # Dict[str, Trajectory] - not columnar
-        if self._is_trajectory_dict(obj):
-            return False
-        # Check if all values are non-empty lists of same length
-        first_val = next(iter(obj.values()))
-        if not isinstance(first_val, list) or len(first_val) == 0:
-            return False
-        length = len(first_val)
-        return all(isinstance(v, list) and len(v) == length for v in obj.values())
+    def _get_trajectory_keys(self, columnar: Mapping) -> List[str]:
+        """Get keys whose values are lists of Trajectories in columnar format."""
+        keys = []
+        for k, v in columnar.items():
+            if isinstance(v, list) and v and self._is_trajectory(v[0]):
+                keys.append(k)
+        return keys
 
     def batch_encode(
         self,
-        trajectories: Union[Dict[str, Any], List[Trajectory], Trajectory],
+        trajectories: Union[Dict[str, Any], List[Trajectory]],
         add_generation_prompt: bool = False,
-    ) -> Union[Dict[str, Any], List[InputFeature], InputFeature]:
+    ) -> Union[Dict[str, Any], List[InputFeature]]:
         """Encode trajectories into InputFeatures.
 
-        Supports three input formats:
-            1. Trajectory -> InputFeature
-            2. List[Trajectory] -> List[InputFeature]
-            3. Dict containing Trajectories -> Dict with Trajectories encoded
+        Args:
+            trajectories: Either List[Trajectory] or columnar Dict[str, List].
+                For DPO, columnar format with 'positive'/'negative' keys containing
+                List[Trajectory] is supported.
+            add_generation_prompt: Whether to add generation prompt.
 
-        Also handles columnar format (Dict[str, List]) by converting to rows first.
+        Returns:
+            List[InputFeature] or columnar Dict[str, List[InputFeature]].
         """
-        # Handle columnar format: convert to rows first
-        if self._is_columnar_format(trajectories):
-            rows = self.map_col_to_row(trajectories)
-            encoded = self.batch_encode(rows, add_generation_prompt=add_generation_prompt)
-            if isinstance(encoded, list) and encoded:
-                return self.map_row_to_col(encoded)
-            return encoded
+        _transfer = False
 
-        # Case 1: Single Trajectory
-        if self._is_trajectory(trajectories) and not self._is_trajectory_dict(trajectories):
-            processed = self._invoke_pre_pipeline([trajectories])
-            output = [self.encode(t, add_generation_prompt=add_generation_prompt) for t in processed]
-            output = self._invoke_post_pipeline(output)
-            return output[0] if len(output) == 1 else output
-
-        # Case 2: List (Trajectory or Dict containing Trajectories)
-        if isinstance(trajectories, list):
-            if not trajectories:
-                return []
-            first = trajectories[0]
-            if isinstance(first, Mapping) and self._get_trajectory_keys(first):
-                # List of dicts containing Trajectories
-                return [self.batch_encode(row, add_generation_prompt=add_generation_prompt) for row in trajectories]
-            else:
-                # List[Trajectory]
-                processed = self._invoke_pre_pipeline(trajectories)
-                output = [self.encode(t, add_generation_prompt=add_generation_prompt) for t in processed]
-                return self._invoke_post_pipeline(output)
-
-        # Case 3: Dict containing Trajectories (encode only Trajectory values)
         if isinstance(trajectories, Mapping):
+            _transfer = True
+            # Check if it has trajectory list columns (DPO format)
             traj_keys = self._get_trajectory_keys(trajectories)
             if traj_keys:
-                result = dict(trajectories)  # Copy non-trajectory keys
-                for key in traj_keys:
-                    result[key] = self.batch_encode(trajectories[key], add_generation_prompt=add_generation_prompt)
+                # DPO format: encode each trajectory list separately, keep other columns
+                result = {}
+                for key in trajectories:
+                    if key in traj_keys:
+                        # Encode this trajectory list
+                        result[key] = self.batch_encode(
+                            trajectories[key], add_generation_prompt=add_generation_prompt
+                        )
+                    else:
+                        # Keep non-trajectory columns as-is
+                        result[key] = trajectories[key]
                 return result
+            else:
+                # Standard columnar format
+                trajectories = self.map_col_to_row(trajectories)
 
-        raise ValueError(f'Unsupported input type: {type(trajectories)}')
+        # Process List[Trajectory]
+        trajectories = self._invoke_pre_pipeline(trajectories)
+
+        # Use thread pool for parallel encoding
+        from concurrent.futures import ThreadPoolExecutor
+        from functools import partial
+        encode_fn = partial(self.encode, add_generation_prompt=add_generation_prompt)
+        with ThreadPoolExecutor() as executor:
+            output = list(executor.map(encode_fn, trajectories))
+
+        output = self._invoke_post_pipeline(output)
+
+        if _transfer:
+            output = self.map_row_to_col(output)
+        return output
 
     def check(self, trajectory: Trajectory) -> Optional[Trajectory]:
         encoded = None
