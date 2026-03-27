@@ -179,7 +179,7 @@ class Template:
         if self.use_chat_template and self.default_system:
             if trajectory['messages'][0]['role'] == 'user':
                 trajectory['messages'].insert(0, Message(role='system', content=self.default_system))
-            for (_, messages) in trajectory.get('extend_message', []):
+            for messages in trajectory.get('extend_message', []):
                 if messages and messages[0]['role'] == 'user':
                     messages.insert(0, Message(role='system', content=self.default_system))
         return [trajectory]
@@ -209,43 +209,79 @@ class Template:
         extra_messages = trajectory.get('extend_message', [])
         if extra_messages:
             result = []
-            for key, extra_message in trajectory.get('extend_message', []):
-                result.append((key, _extract_reasoning_content(extra_message)))
+            for extra_message in trajectory.get('extend_message', []):
+                result.append(_extract_reasoning_content(extra_message))
             trajectory['extend_message'] = result
         return [trajectory]
 
+    def _truncate_feature(self, feature: InputFeature, strategy: str) -> InputFeature:
+        """Truncate input_ids and labels in a single InputFeature."""
+        length = len(feature['input_ids'])
+        if length <= self.max_length:
+            return feature
+        if strategy == 'raise':
+            raise ValueError(f'Input length {length} exceeds max_length {self.max_length}')
+        result = dict(feature)
+        if strategy == 'left':
+            result['input_ids'] = result['input_ids'][-self.max_length:]
+            if 'labels' in result:
+                result['labels'] = result['labels'][-self.max_length:]
+        elif strategy == 'right':
+            result['input_ids'] = result['input_ids'][:self.max_length]
+            if 'labels' in result:
+                result['labels'] = result['labels'][:self.max_length]
+        return InputFeature(**result)
+
     def _check_max_length(self, input_feature: InputFeature) -> List[InputFeature]:
-        if self.max_length and len(input_feature['input_ids']) > self.max_length:
-            if self.truncation_strategy == 'raise':
-                raise ValueError(f'An input message(length: {len(input_feature["input_ids"])} '
-                                 f'exceeds the maximum length({self.max_length})')
-            elif self.truncation_strategy == 'left':
-                return [InputFeature(**{key: value[-self.max_length:] for key, value in input_feature.items()})]
-            elif self.truncation_strategy == 'right':
-                return [InputFeature(**{key: value[:self.max_length] for key, value in input_feature.items()})]
-            else:  # split
-                result = []
-                total_length = len(input_feature['input_ids'])
-                for start in range(0, total_length, self.max_length):
-                    end = min(start + self.max_length, total_length)
-                    result.append(InputFeature(**{key: value[start:end] for key, value in input_feature.items()}))
-                return result
-        else:
+        if not self.max_length:
             return [input_feature]
 
+        strategy = self.truncation_strategy
+
+        # Split strategy: doesn't support extend_message
+        if strategy == 'split':
+            if input_feature.get('extend_message'):
+                raise ValueError('Split strategy does not support extend_message.')
+            results = []
+            for start in range(0, len(input_feature['input_ids']), self.max_length):
+                end = min(start + self.max_length, len(input_feature['input_ids']))
+                feat = dict(input_feature)
+                feat['input_ids'] = feat['input_ids'][start:end]
+                if 'labels' in feat:
+                    feat['labels'] = feat['labels'][start:end]
+                results.append(InputFeature(**feat))
+            return results
+
+        # left/right/raise: apply to main and extend_message
+        result = self._truncate_feature(input_feature, strategy)
+        if input_feature.get('extend_message'):
+            result['extend_message'] = [self._truncate_feature(f, strategy) for f in input_feature['extend_message']]
+        return [result]
+
+    def _add_attention_to_feature(self, feature: InputFeature) -> InputFeature:
+        """Add attention fields to a single InputFeature."""
+        input_ids = feature['input_ids']
+        feature['attention_mask'] = np.ones_like(input_ids)
+        feature['position_ids'] = np.arange(len(input_ids))
+        feature['length'] = len(input_ids)
+        return feature
+
     def _add_attention_fields(self, input_feature: InputFeature) -> List[InputFeature]:
-        input_ids = input_feature['input_ids']
-        input_feature['attention_mask'] = np.ones_like(input_ids)
-        input_feature['position_ids'] = np.arange(len(input_ids))
-        input_feature['length'] = len(input_ids)
+        self._add_attention_to_feature(input_feature)
+        if input_feature.get('extend_message'):
+            for f in input_feature['extend_message']:
+                self._add_attention_to_feature(f)
         return [input_feature]
 
     def _roll_labels(self, input_feature: InputFeature) -> List[InputFeature]:
         input_feature['labels'] = np.roll(input_feature['labels'], -1, axis=-1)
+        if input_feature.get('extend_message'):
+            for f in input_feature['extend_message']:
+                f['labels'] = np.roll(f['labels'], -1, axis=-1)
         return [input_feature]
 
-    def _build_mm_messages(self, trajectory: Trajectory) -> List[Trajectory]:
-        messages = trajectory['messages']
+    def _process_mm_messages(self, messages: List) -> List:
+        """Process multimodal content in a list of messages."""
         new_messages = []
         for message in messages:
             message = copy(message)
@@ -265,8 +301,16 @@ class Template:
             new_messages.append(
                 transfer_to_standard_message(message, self.image_placeholder, self.video_placeholder,
                                              self.audio_placeholder, self.is_mm))
+        return new_messages
 
-        trajectory['messages'] = new_messages
+    def _build_mm_messages(self, trajectory: Trajectory) -> List[Trajectory]:
+        trajectory['messages'] = self._process_mm_messages(trajectory['messages'])
+        if trajectory.get('extend_message'):
+            new_extend_message = []
+            for msgs in trajectory['extend_message']:
+                new_extend_message.append(self._process_mm_messages(msgs))
+            trajectory['extend_message'] = new_extend_message
+
         return [trajectory]
 
     def _apply_chat_template(self, trajectory: Trajectory, add_generation_prompt: bool = False, **kwargs):
@@ -283,7 +327,8 @@ class Template:
             **kwargs)
         return inputs
 
-    def encode(self, trajectory: Trajectory, add_generation_prompt: bool = False) -> InputFeature:
+    def _encode_messages(self, trajectory: Trajectory, add_generation_prompt: bool = False) -> InputFeature:
+        """Encode a single trajectory's messages into InputFeature."""
         if self.use_chat_template:
             if add_generation_prompt:
                 # For inference: just get input_ids with generation prompt, no labels needed
@@ -306,11 +351,30 @@ class Template:
             input_ids = self.tokenizer.encode(text)
             encoded = {}
             labels = deepcopy(input_ids)
-        return InputFeature(
+        
+        input_feature = InputFeature(
             input_ids=np.array(input_ids),
             labels=np.array(labels),
             **encoded,
         )
+        trajectory.update(input_feature)
+        return trajectory
+
+    def encode(self, trajectory: Trajectory, add_generation_prompt: bool = False) -> InputFeature:
+        # Encode main messages
+        result = self._encode_messages(trajectory, add_generation_prompt)
+
+        # Encode extend_message (e.g., rejected messages in DPO)
+        if trajectory.get('extend_message'):
+            encoded_extend = []
+            for msgs in trajectory['extend_message']:
+                # Create a temporary trajectory with the extended messages
+                ext_trajectory = Trajectory(messages=msgs)
+                ext_feature = self._encode_messages(ext_trajectory, add_generation_prompt)
+                encoded_extend.append(ext_feature)
+            result['extend_message'] = encoded_extend
+
+        return result
 
     @staticmethod
     def map_col_to_row(trajectories: Dict[str, Any]):

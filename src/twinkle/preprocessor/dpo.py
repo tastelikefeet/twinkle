@@ -123,14 +123,15 @@ class DPOProcessor(Preprocessor):
         # Return Trajectory with rejected in extend_message
         return Trajectory(
             messages=chosen_messages,
-            extend_message=[('rejected_messages', rejected_messages)]
+            extend_message=[rejected_messages]
         )
 
     def __call__(self, rows: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
         """Process batched data into DPO trajectories."""
         rows = self.map_col_to_row(rows)
-        trajectories = [self.preprocess(row) for row in rows]
-        return {'messages': trajectories}
+        rows = [self.preprocess(row) for row in rows]
+        rows = self.map_row_to_col(rows)
+        return rows
 
 
 class HHRLHFProcessor(Preprocessor):
@@ -182,13 +183,14 @@ class HHRLHFProcessor(Preprocessor):
 
         return Trajectory(
             messages=chosen_messages,
-            extend_message=[('rejected_messages', rejected_messages)]
+            extend_message=[rejected_messages]
         )
 
     def __call__(self, rows: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
         rows = self.map_col_to_row(rows)
-        trajectories = [self.preprocess(row) for row in rows]
-        return {'messages': trajectories}
+        rows = [self.preprocess(row) for row in rows]
+        rows = self.map_row_to_col(rows)
+        return rows
 
 
 class UltraFeedbackProcessor(Preprocessor):
@@ -253,7 +255,7 @@ class UltraFeedbackProcessor(Preprocessor):
 
         return Trajectory(
             messages=chosen_messages,
-            extend_message=[('rejected_messages', rejected_messages)]
+            extend_message=[rejected_messages]
         )
 
     def __call__(self, rows: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
@@ -264,8 +266,9 @@ class UltraFeedbackProcessor(Preprocessor):
             if result is not None:
                 trajectories.append(result)
         if not trajectories:
-            return {'messages': []}
-        return {'messages': trajectories}
+            return {}
+        rows = self.map_row_to_col(trajectories)
+        return rows
 
 
 class ShareGPTDPOProcessor(Preprocessor):
@@ -335,13 +338,14 @@ class ShareGPTDPOProcessor(Preprocessor):
 
         return Trajectory(
             messages=chosen_messages,
-            extend_message=[('rejected_messages', rejected_messages)]
+            extend_message=[rejected_messages]
         )
 
     def __call__(self, rows: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
         rows = self.map_col_to_row(rows)
-        trajectories = [self.preprocess(row) for row in rows]
-        return {'messages': trajectories}
+        rows = [self.preprocess(row) for row in rows]
+        rows = self.map_row_to_col(rows)
+        return rows
 
 
 class IntelOrcaDPOProcessor(Preprocessor):
@@ -376,13 +380,14 @@ class IntelOrcaDPOProcessor(Preprocessor):
 
         return Trajectory(
             messages=chosen_messages,
-            extend_message=[('rejected_messages', rejected_messages)]
+            extend_message=[rejected_messages]
         )
 
     def __call__(self, rows: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
         rows = self.map_col_to_row(rows)
-        trajectories = [self.preprocess(row) for row in rows]
-        return {'messages': trajectories}
+        rows = [self.preprocess(row) for row in rows]
+        rows = self.map_row_to_col(rows)
+        return rows
 
 
 class EmojiDPOProcessor(Preprocessor):
@@ -434,13 +439,14 @@ class EmojiDPOProcessor(Preprocessor):
 
         return Trajectory(
             messages=chosen_messages,
-            extend_message=[('rejected_messages', rejected_messages)]
+            extend_message=[rejected_messages]
         )
 
     def __call__(self, rows: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
         rows = self.map_col_to_row(rows)
-        trajectories = [self.preprocess(row) for row in rows]
-        return {'messages': trajectories}
+        rows = [self.preprocess(row) for row in rows]
+        rows = self.map_row_to_col(rows)
+        return rows
 
 
 class UltraFeedbackKTOProcessor(Preprocessor):
@@ -482,5 +488,6 @@ class UltraFeedbackKTOProcessor(Preprocessor):
 
     def __call__(self, rows: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
         rows = self.map_col_to_row(rows)
-        trajectories = [self.preprocess(row) for row in rows]
-        return {'messages': trajectories}
+        rows = [self.preprocess(row) for row in rows]
+        rows = self.map_row_to_col(rows)
+        return rows

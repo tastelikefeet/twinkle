@@ -56,7 +56,7 @@ from peft import LoraConfig
 
 import twinkle
 from twinkle import DeviceGroup, DeviceMesh, get_device_placement, get_logger
-from twinkle.data_format import Message, Trajectory
+from twinkle.data_format import Trajectory
 from twinkle.dataloader import DataLoader
 from twinkle.dataset import Dataset, DatasetMeta
 from twinkle.loss import CPOLoss, DPOLoss, ORPOLoss, SimPOLoss
@@ -101,13 +101,15 @@ def create_dpo_dataset():
 
 
 def prepare_dpo_batch(
-    batch: List[Dict[str, Any]],
+    batch: List[Trajectory],
     template: Template,
 ) -> List[Dict[str, Any]]:
-    """Prepare DPO batch: build trajectories and encode both chosen and rejected.
+    """Prepare DPO batch: encode both chosen and rejected from preprocessed Trajectories.
 
     Args:
-        batch: List of raw data dicts from dataset (e.g., {prompt, answer_zh, answer_en})
+        batch: List of Trajectory objects with:
+            - messages: chosen response messages
+            - extend_message: [('rejected_messages', rejected_messages)]
 
     Returns:
         List organized as [chosen_1, ..., chosen_n, rejected_1, ..., rejected_n]
@@ -115,26 +117,12 @@ def prepare_dpo_batch(
     chosen_trajectories = []
     rejected_trajectories = []
 
-    for item in batch:
-        # Build messages from raw data
-        prompt = item.get(PROMPT_KEY, '')
-        chosen_response = item.get(CHOSEN_KEY, '')
-        rejected_response = item.get(REJECTED_KEY, '')
-
-        # Build prompt messages
-        prompt_messages = []
-        if SYSTEM_PROMPT:
-            prompt_messages.append(Message(role='system', content=SYSTEM_PROMPT))
-        prompt_messages.append(Message(role='user', content=prompt))
-
-        # Build chosen and rejected trajectories
-        chosen_messages = prompt_messages + [Message(role='assistant', content=chosen_response)]
-        rejected_messages = prompt_messages + [Message(role='assistant', content=rejected_response)]
-
-        chosen_trajectories.append(Trajectory(messages=chosen_messages))
+    for traj in batch:
+        chosen_trajectories.append(Trajectory(messages=traj.messages))
+        rejected_messages = [m[1] for m in traj['extend_messages'] if m[0] == 'rejected_messages'][0]
         rejected_trajectories.append(Trajectory(messages=rejected_messages))
 
-    # Batch encode all trajectories (properly handles multimodal preprocessing)
+    # Batch encode all trajectories
     chosen_encoded = template.batch_encode(chosen_trajectories)
     rejected_encoded = template.batch_encode(rejected_trajectories)
 
@@ -175,7 +163,16 @@ def main():
     ]
 
     policy_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, dp_size=MODEL_GPUS)
-    twinkle.initialize(mode='ray', nproc_per_node=NUM_GPUS, groups=device_groups, lazy_collect=False)
+    twinkle.initialize(mode='ray', nproc_per_node=NUM_GPUS, groups=device_groups)
+
+    # ── DataLoader Setup ──────────────────────────────────────────────────────
+    dataloader = DataLoader(
+        dataset=create_dpo_dataset,
+        batch_size=BATCH_SIZE,
+        min_batch_size=BATCH_SIZE,
+        device_mesh=policy_mesh,
+    )
+    length = len(dataloader)
 
     # ── Policy Model Setup ────────────────────────────────────────────────────
     lora_config = LoraConfig(
@@ -223,16 +220,6 @@ def main():
         logger.info('Reference model initialized for DPO training')
     else:
         logger.info(f'Training without reference model (loss_type={LOSS_TYPE})')
-
-    # ── DataLoader Setup ──────────────────────────────────────────────────────
-    GLOBAL_BATCH_SIZE = BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS
-    dataloader = DataLoader(
-        dataset=create_dpo_dataset,
-        batch_size=GLOBAL_BATCH_SIZE,
-        min_batch_size=GLOBAL_BATCH_SIZE,
-        device_mesh=policy_mesh,
-        remote_group='policy',
-    )
 
     optim_step = 0
     logger.info(get_device_placement())
