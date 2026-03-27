@@ -60,8 +60,10 @@ class LossMetric(Metric):
         num_tokens = sum(r['num_tokens'] for r in all_results)
         if num_tokens > 0:
             avg_loss = total_loss / num_tokens
-        else:
+        elif total_count > 0:
             avg_loss = total_loss / total_count
+        else:
+            avg_loss = 0.0
         self.reset()
         results = {}
         if avg_loss is not None:

@@ -121,6 +121,8 @@ class OptimizerGroup:
             metrics = self.train_metrics
         else:
             metrics = self.eval_metrics
+        # Get stored forward_kwargs from previous forward
+        forward_kwargs = getattr(self, 'forward_kwargs', None) or {}
         if len(metrics) > 0 and self.inputs is not None and self.outputs is not None:
             for metric in metrics:
                 metric.accumulate(
@@ -130,7 +132,8 @@ class OptimizerGroup:
                     step=self.cur_step - 1,
                     gradient_accumulation_steps=self.gradient_accumulation_steps,
                     grad_norm=self._last_grad_norm,
-                    loss_reduction=getattr(self.loss_instance, 'reduction', 'mean'))
+                    loss_reduction=getattr(self.loss_instance, 'reduction', 'mean'),
+                    **forward_kwargs)
 
     def calculate_metrics(self, is_training):
         self.accumulate_metrics(is_training)
@@ -405,6 +408,7 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
         inputs['labels'] = labels
         optimizer_config.inputs = inputs
         optimizer_config.outputs = outputs
+        optimizer_config.forward_kwargs = kwargs  # Store for next metric accumulation
         optimizer_config.loss_value = outputs.get('aux_loss', 0)
         if labels is not None:
             loss_mask = (labels != -100).bool()
@@ -1086,6 +1090,7 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
         grad_scaler_config.update(kwargs)
         optimizer_config.scaler = GradScaler(**grad_scaler_config)
 
+    @remote_function()
     def add_metric(self, metric_cls: Union[Metric, str], is_training: Optional[bool] = None, **kwargs):
         """Add an eval metric
 

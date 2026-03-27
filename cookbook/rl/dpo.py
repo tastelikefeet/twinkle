@@ -59,6 +59,7 @@ from twinkle.data_format import Trajectory
 from twinkle.dataloader import DataLoader
 from twinkle.dataset import Dataset, DatasetMeta
 from twinkle.loss import CPOLoss, DPOLoss, ORPOLoss, SimPOLoss
+from twinkle.metric import DPOMetric
 from twinkle.model import TransformersModel
 from twinkle.preprocessor import EmojiDPOProcessor
 from twinkle.processor import InputProcessor
@@ -66,7 +67,7 @@ from twinkle.processor import InputProcessor
 logger = get_logger()
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-MODEL_ID = os.environ.get('MODEL_ID', 'ms://Qwen/Qwen3.5-4B')
+MODEL_ID = os.environ.get('MODEL_ID', 'ms://Qwen/Qwen2.5-7B-Instruct')
 DATASET_ID = os.environ.get('DATASET_ID', 'ms://hjh0119/shareAI-Llama3-DPO-zh-en-emoji')
 
 MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 4))
@@ -75,12 +76,13 @@ NUM_GPUS = MODEL_GPUS + REF_MODEL_GPUS
 
 BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 4))  # Number of preference pairs
 MICRO_BATCH_SIZE = int(os.environ.get('MICRO_BATCH_SIZE', 4))
-GRADIENT_ACCUMULATION_STEPS = int(os.environ.get('GRADIENT_ACCUMULATION_STEPS', 1))
+GRADIENT_ACCUMULATION_STEPS = int(os.environ.get('GRADIENT_ACCUMULATION_STEPS', 8))
 MAX_STEPS = int(os.environ.get('MAX_STEPS', 1000))
-LEARNING_RATE = float(os.environ.get('LR', 5e-6))
+LEARNING_RATE = float(os.environ.get('LR', 5e-5))
 DPO_BETA = float(os.environ.get('DPO_BETA', 0.1))
+SFT_WEIGHT = float(os.environ.get('SFT_WEIGHT', 0.1))  # SFT loss weight for regularization
 LOSS_TYPE = os.environ.get('LOSS_TYPE', 'sigmoid')  # sigmoid, hinge, ipo, simpo, orpo, cpo
-SAVE_STEPS = int(os.environ.get('SAVE_STEPS', 100))
+SAVE_STEPS = int(os.environ.get('SAVE_STEPS', 200))
 MAX_LENGTH = int(os.environ.get('MAX_LENGTH', 2048))
 ADAPTER_NAME = 'default'
 SYSTEM_PROMPT = os.environ.get('SYSTEM_PROMPT', 'You are a helpful assistant.')
@@ -88,7 +90,7 @@ SYSTEM_PROMPT = os.environ.get('SYSTEM_PROMPT', 'You are a helpful assistant.')
 
 def create_dpo_dataset():
     """Create DPO dataset with positive/negative format."""
-    dataset = Dataset(DatasetMeta(DATASET_ID))
+    dataset = Dataset(DatasetMeta(DATASET_ID, data_slice=range(15000)))
     dataset.set_template('Template', model_id=MODEL_ID, max_length=MAX_LENGTH)
     dataset.map(
         EmojiDPOProcessor,
@@ -134,7 +136,7 @@ def prepare_dpo_batch(batch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 # ── Loss Factory ──────────────────────────────────────────────────────────────
 
-def create_loss(loss_type: str, beta: float, reference_free: bool = False):
+def create_loss(loss_type: str, beta: float, sft_weight: float = 0.0, reference_free: bool = False):
     """Create the appropriate loss function based on configuration."""
     if loss_type == 'simpo':
         return SimPOLoss(beta=beta, gamma=0.5)
@@ -148,6 +150,7 @@ def create_loss(loss_type: str, beta: float, reference_free: bool = False):
             beta=beta,
             loss_type=loss_type,
             reference_free=reference_free,
+            sft_weight=sft_weight,
         )
 
 
@@ -174,10 +177,7 @@ def main():
 
     # ── Policy Model Setup ────────────────────────────────────────────────────
     lora_config = LoraConfig(
-        target_modules=[
-            'q_proj', 'k_proj', 'v_proj', 'o_proj',
-            'gate_proj', 'up_proj', 'down_proj',
-        ],
+        target_modules='all-linear',
         r=16,
         lora_alpha=32,
         lora_dropout=0.05,
@@ -195,9 +195,10 @@ def main():
     # Determine if we need reference model based on loss type
     reference_free = LOSS_TYPE in ['simpo', 'orpo', 'cpo']
 
-    # Set up loss function
-    loss_fn = create_loss(LOSS_TYPE, DPO_BETA, reference_free=False)
+    # Set up loss function and metrics
+    loss_fn = create_loss(LOSS_TYPE, DPO_BETA, sft_weight=SFT_WEIGHT, reference_free=False)
     policy_model.set_loss(loss_fn)
+    policy_model.add_metric(DPOMetric, beta=DPO_BETA)
     policy_model.set_processor(InputProcessor)
     policy_model.set_template('Template', model_id=MODEL_ID)
 

@@ -118,6 +118,7 @@ class DPOLoss(PreferenceLossBase):
         ignore_index: Index to ignore in labels (default: -100).
         loss_type: Type of DPO loss variant ('sigmoid', 'hinge', 'ipo', 'kto_pair') (default: 'sigmoid').
         reference_free: Whether to use reference-free DPO (default: False).
+        sft_weight: Weight for SFT loss on chosen responses to prevent likelihood displacement (default: 0.0).
     """
 
     def __init__(
@@ -127,6 +128,7 @@ class DPOLoss(PreferenceLossBase):
         ignore_index: int = -100,
         loss_type: str = 'sigmoid',
         reference_free: bool = False,
+        sft_weight: float = 0.0,
         **kwargs,
     ):
         super().__init__(ignore_index=ignore_index)
@@ -134,6 +136,7 @@ class DPOLoss(PreferenceLossBase):
         self.label_smoothing = label_smoothing
         self.loss_type = loss_type
         self.reference_free = reference_free
+        self.sft_weight = sft_weight
 
     def _align_logps(
         self,
@@ -329,14 +332,26 @@ class DPOLoss(PreferenceLossBase):
             )
 
         # Compute DPO loss
-        loss = self._compute_dpo_loss(
+        dpo_loss = self._compute_dpo_loss(
             policy_chosen_logps,
             policy_rejected_logps,
             reference_chosen_logps,
             reference_rejected_logps,
         )
 
-        return LossOutput(loss=loss, num_tokens=0)
+        # Add SFT loss on chosen responses to prevent likelihood displacement
+        if self.sft_weight > 0:
+            sft_loss = self._compute_nll_loss(chosen_logps, chosen_labels)
+            loss = dpo_loss + self.sft_weight * sft_loss
+        else:
+            loss = dpo_loss
+
+        # Return sample count for gradient normalization (not token count)
+        # DPO loss is already per-sample mean, so we just count samples for accumulation
+        import torch
+        num_samples = torch.tensor(chosen_labels.shape[0], device=loss.device)
+
+        return LossOutput(loss=loss, num_tokens=num_samples)
 
 
 class SimPOLoss(PreferenceLossBase):
