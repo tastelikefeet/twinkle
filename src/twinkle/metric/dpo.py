@@ -80,27 +80,18 @@ class DPOMetric(Metric):
             - kwargs['ref_outputs']: Optional reference model outputs with 'logps'
         """
         import torch
-
         logps = outputs.get('logps')
         if logps is None:
             return
 
         # Get labels from inputs
         if isinstance(inputs, list):
-            # Stack labels from list of inputs
-            labels_list = [torch.as_tensor(inp['labels']) for inp in inputs]
-            max_len = max(l.shape[0] for l in labels_list)
-            padded = []
-            for l in labels_list:
-                if l.shape[0] < max_len:
-                    pad = torch.full((max_len - l.shape[0],), self.ignore_index, dtype=l.dtype)
-                    l = torch.cat([pad, l])
-                padded.append(l)
-            labels = torch.stack(padded)
-        else:
-            labels = torch.as_tensor(inputs['labels'])
-            if labels.dim() == 1:
-                labels = labels.unsqueeze(0)
+            assert len(inputs) == 1
+            inputs = inputs[0]
+
+        labels = torch.as_tensor(inputs['labels'])
+        if labels.dim() == 1:
+            labels = labels.unsqueeze(0)
 
         # Ensure logps and labels have same device
         if logps.device != labels.device:
@@ -129,7 +120,6 @@ class DPOMetric(Metric):
             ref_logps = ref_outputs.get('logps')
             if ref_logps is not None:
                 # Align ref_logps to match labels shape (handles different seq lengths)
-                # breakpoint()
                 ref_logps = self._align_logps(
                     ref_logps, labels.shape, labels.device, logps.dtype
                 )

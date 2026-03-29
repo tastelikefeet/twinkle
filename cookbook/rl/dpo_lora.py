@@ -58,7 +58,7 @@ from twinkle.dataloader import DataLoader
 from twinkle.dataset import Dataset, DatasetMeta
 from twinkle.loss import DPOLoss
 from twinkle.metric import DPOMetric
-from twinkle.model import TransformersModel
+from twinkle.model import MegatronModel
 from twinkle.preprocessor import EmojiDPOProcessor
 from twinkle.processor import InputProcessor
 
@@ -157,15 +157,15 @@ def main():
         lora_dropout=0.05,
     )
 
-    policy_model = TransformersModel(
+    policy_model = MegatronModel(
         model_id=MODEL_ID,
         device_mesh=policy_mesh,
         remote_group='policy',
     )
     MAX_STEPS = len(dataloader)
     policy_model.add_adapter_to_model(ADAPTER_NAME, lora_config, gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS)
-    policy_model.set_optimizer('AdamW', lr=LEARNING_RATE, weight_decay=0.01)
-    policy_model.set_lr_scheduler('CosineAnnealingLR', T_max=MAX_STEPS, eta_min=LEARNING_RATE * 0.1)
+    policy_model.set_optimizer('default', lr=LEARNING_RATE, weight_decay=0.01)
+    policy_model.set_lr_scheduler('default', lr_decay_steps=MAX_STEPS)
 
     # Set up loss function and metrics
     loss_fn = DPOLoss(
@@ -191,13 +191,14 @@ def main():
 
         # Get reference outputs using base model (without LoRA adapter)
         # disable_lora=True tells the model to skip LoRA and use base weights
-        ref_outputs = policy_model.forward_only(inputs=dpo_batch, disable_lora=True)
+        ref_outputs = policy_model.forward_only(inputs=dpo_batch, micro_batch_size=2, disable_lora=True)
 
         # Forward-backward pass with DPO loss (using LoRA adapter)
         # ref_outputs is passed to loss which extracts logps internally
         policy_model.forward_backward(
             inputs=dpo_batch,
             ref_outputs=ref_outputs,
+            micro_batch_size=2,
         )
 
         # Gradient clipping and optimizer step

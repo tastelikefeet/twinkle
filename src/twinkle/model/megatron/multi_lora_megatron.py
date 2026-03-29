@@ -264,6 +264,7 @@ class MultiLoraMegatronModel(MegatronModel):
         self._check_adapter_valid(kwargs.get('adapter_name'))
         super().set_processor(processor_cls, **kwargs)
 
+    @remote_function()
     def add_metric(self, metric_cls: Union[Metric, str], is_training: Optional[bool] = None, **kwargs):
         self._check_adapter_valid(kwargs.get('adapter_name'))
         super().add_metric(metric_cls, is_training, **kwargs)

@@ -326,10 +326,7 @@ class DPOLoss(PreferenceLossBase):
             reference_chosen_logps = torch.zeros_like(policy_chosen_logps)
             reference_rejected_logps = torch.zeros_like(policy_rejected_logps)
         else:
-            raise ValueError(
-                "ref_logps or (ref_chosen_logps, ref_rejected_logps) must be provided "
-                "unless reference_free=True"
-            )
+            return LossOutput(loss=torch.tensor(0.0, device=chosen_logps.device), num_tokens=0)
 
         # Compute DPO loss
         dpo_loss = self._compute_dpo_loss(

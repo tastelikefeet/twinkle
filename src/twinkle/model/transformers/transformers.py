@@ -188,7 +188,6 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
         }
         self.optimizer_group[_default_adapter_name].adapter_name = _default_adapter_name
         self.active_group = _default_adapter_name
-        # breakpoint()
 
     def _decide_strategy(self, strategy: Literal['accelerate', 'native_fsdp']):
         self._expert_parallel_config = self._fsdp_config.pop('expert_parallel', None)

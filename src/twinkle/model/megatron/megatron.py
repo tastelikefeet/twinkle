@@ -447,7 +447,13 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         def forward_step_func(data_iterator, model):
             batch = next(data_iterator)
             labels = batch.pop('labels', None)
-            output_tensor = model(**batch)
+            # Handle disable_lora for base model inference (e.g., reference in DPO)
+            unwrapped_model = self.strategy.unwrap_model([model])[0]
+            if disable_lora and isinstance(unwrapped_model, PeftModel):
+                with unwrapped_model.disable_adapter():
+                    output_tensor = model(**batch)
+            else:
+                output_tensor = model(**batch)
             batch['labels'] = labels
             logps = None
             if labels is not None and mpu.is_pipeline_last_stage():
@@ -475,34 +481,17 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
 
         self._accumulate_metric(optimizer_config, is_training=not forward_only)
 
-        # Handle disable_lora for base model inference (e.g., reference in DPO)
-        def _set_disable_adapters(model, value: bool):
-            model = self.strategy.unwrap_model(model)
-            if isinstance(model, list):
-                for m in model:
-                    if isinstance(m, PeftModel):
-                        m.disable_adapters = value
-            elif isinstance(model, PeftModel):
-                model.disable_adapters = value
-
-        if disable_lora:
-            _set_disable_adapters(self.model, True)
-
-        try:
-            # Run forward-backward with Megatron's scheduler
-            # Megatron handles all communication internally using proper process groups
-            losses = forward_backward_func(
-                forward_step_func=forward_step_func,
-                data_iterator=data_iter,
-                model=self.model,
-                num_microbatches=len(inputs),
-                seq_length=seq_length,
-                micro_batch_size=micro_batch_size,
-                forward_only=forward_only,
-            )
-        finally:
-            if disable_lora:
-                _set_disable_adapters(self.model, False)
+        # Run forward-backward with Megatron's scheduler
+        # Megatron handles all communication internally using proper process groups
+        losses = forward_backward_func(
+            forward_step_func=forward_step_func,
+            data_iterator=data_iter,
+            model=self.model,
+            num_microbatches=len(inputs),
+            seq_length=seq_length,
+            micro_batch_size=micro_batch_size,
+            forward_only=forward_only,
+        )
 
         # Extract loss from results (only last PP stage returns non-empty)
         loss = torch.tensor(0.0).to(Platform.get_local_device())
@@ -559,9 +548,11 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         if forward_only:
             optimizer_config.eval_status.inputs = inputs
             optimizer_config.eval_status.outputs = ModelOutput(logits=logits, loss=loss, logps=logps)
+            optimizer_config.eval_status.forward_kwargs = kwargs
         else:
             optimizer_config.train_status.inputs = inputs
             optimizer_config.train_status.outputs = ModelOutput(logits=logits, loss=loss, logps=logps)
+            optimizer_config.train_status.forward_kwargs = kwargs
         return ModelOutput(logits=logits, loss=loss, logps=logps)
 
     @remote_function(dispatch='all')
@@ -692,6 +683,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         optimizer_config = self.optimizer_group[adapter_name]
         optimizer_config.loss_instance = construct_class(loss_cls, Loss, twinkle.loss, **kwargs)
 
+    @remote_function()
     def add_metric(self, metric_cls: Union[Metric, str], is_training: Optional[bool] = None, **kwargs):
         """Add an eval metric
 
@@ -773,16 +765,16 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         opt_config = OptimizerConfig(
             optimizer='adam',
             lr=lr,
-            min_lr=kwargs.get('min_lr', 0.0),
-            weight_decay=kwargs.get('weight_decay', 0.01),
-            adam_beta1=kwargs.get('adam_beta1', 0.9),
-            adam_beta2=kwargs.get('adam_beta2', 0.999),
-            adam_eps=kwargs.get('adam_eps', 1e-8),
-            clip_grad=kwargs.get('clip_grad', 1.0),
-            bf16=kwargs.get('bf16', True),
+            min_lr=kwargs.pop('min_lr', 0.0),
+            weight_decay=kwargs.pop('weight_decay', 0.01),
+            adam_beta1=kwargs.pop('adam_beta1', 0.9),
+            adam_beta2=kwargs.pop('adam_beta2', 0.999),
+            adam_eps=kwargs.pop('adam_eps', 1e-8),
+            clip_grad=kwargs.pop('clip_grad', 1.0),
+            bf16=kwargs.pop('bf16', True),
             use_distributed_optimizer=use_distributed_optimizer,
-            overlap_param_gather=kwargs.get('overlap_param_gather', False),
-            log_num_zeros_in_grad=kwargs.get('log_num_zeros_in_grad', False),
+            overlap_param_gather=kwargs.pop('overlap_param_gather', False),
+            log_num_zeros_in_grad=kwargs.pop('log_num_zeros_in_grad', False),
             **kwargs,
         )
 
