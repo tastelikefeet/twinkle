@@ -147,9 +147,10 @@ def main():
         policy_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, dp_size=4, pp_size=2)
         ModelClass = MegatronModel
     else:
-        # Transformers: fsdp=4, dp=2
+        # Transformers: dp_size=8
+        # FSDP2 forward_only & forward has problems with `with unwrapped_model.disable_adapter()`
         from twinkle.model import TransformersModel
-        policy_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, dp_size=4, fsdp_size=2)
+        policy_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, dp_size=8)
         ModelClass = TransformersModel
 
     twinkle.initialize(mode='ray', nproc_per_node=MODEL_GPUS, groups=device_groups)

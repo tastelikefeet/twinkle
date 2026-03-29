@@ -67,7 +67,7 @@ from twinkle.processor import InputProcessor
 logger = get_logger()
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-USE_MEGATRON = int(os.environ.get('USE_MEGATRON', 1))
+USE_MEGATRON = int(os.environ.get('USE_MEGATRON', 0))
 MODEL_ID = os.environ.get('MODEL_ID', 'ms://Qwen/Qwen3-4B')
 DATASET_ID = os.environ.get('DATASET_ID', 'ms://hjh0119/shareAI-Llama3-DPO-zh-en-emoji')
 
