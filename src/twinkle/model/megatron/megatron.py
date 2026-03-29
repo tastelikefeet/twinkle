@@ -64,6 +64,8 @@ class MegatronOptimizerGroup(BaseOptimizerGroup):
 
     def _get_lr(self):
         _lrs = []
+        if self.optimizer is None:
+            return _lrs
         _default_lr = self.optimizer.chained_optimizers[0].config.lr
         for param_group in self.optimizer.param_groups:
             _lrs.append(param_group.get('lr', _default_lr))

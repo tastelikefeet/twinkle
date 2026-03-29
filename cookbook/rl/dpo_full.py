@@ -67,7 +67,7 @@ from twinkle.processor import InputProcessor
 logger = get_logger()
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-USE_MEGATRON = int(os.environ.get('USE_MEGATRON', 0))
+USE_MEGATRON = int(os.environ.get('USE_MEGATRON', 1))
 MODEL_ID = os.environ.get('MODEL_ID', 'ms://Qwen/Qwen3-4B')
 DATASET_ID = os.environ.get('DATASET_ID', 'ms://hjh0119/shareAI-Llama3-DPO-zh-en-emoji')
 
@@ -89,7 +89,7 @@ SYSTEM_PROMPT = os.environ.get('SYSTEM_PROMPT', 'You are a helpful assistant.')
 
 def create_dpo_dataset():
     """Create DPO dataset with positive/negative format."""
-    dataset = Dataset(DatasetMeta(DATASET_ID, data_slice=range(30000)))
+    dataset = Dataset(DatasetMeta(DATASET_ID, data_slice=range(6000)))
     dataset.set_template('Template', model_id=MODEL_ID, max_length=MAX_LENGTH)
     dataset.map(
         EmojiDPOProcessor,
@@ -167,13 +167,13 @@ def main():
         # Megatron: dp=2, pp=2 for each model
         from twinkle.model import MegatronModel
         policy_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, dp_size=2, pp_size=2)
-        ref_mesh = DeviceMesh.from_sizes(world_size=REF_MODEL_GPUS, dp_size=2, pp_size=2)
+        ref_mesh = DeviceMesh.from_sizes(world_size=REF_MODEL_GPUS, dp_size=4)
         ModelClass = MegatronModel
     else:
         # Transformers: fsdp=2, dp=2 for each model
         from twinkle.model import TransformersModel
         policy_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, fsdp_size=2, dp_size=2)
-        ref_mesh = DeviceMesh.from_sizes(world_size=REF_MODEL_GPUS, fsdp_size=2, dp_size=2)
+        ref_mesh = DeviceMesh.from_sizes(world_size=REF_MODEL_GPUS, dp_size=4)
         ModelClass = TransformersModel
 
     twinkle.initialize(mode='ray', nproc_per_node=NUM_GPUS, groups=device_groups)
