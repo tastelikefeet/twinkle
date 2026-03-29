@@ -42,15 +42,25 @@ from twinkle.utils.grad_clip import normalize_and_clip_grad_norm
 
 
 @dataclass
+class TrainStatus:
+    inputs: List[InputFeature] = None
+    outputs: ModelOutput = None
+    loss_value: Any = None
+    num_tokens: int = 0
+    metrics: List[Metric] = field(default_factory=list)
+
+
+@dataclass
 class OptimizerGroup:
     adapter_name: str = None
     adapter_config: PeftConfig = None
     optimizer: Optimizer = None
     lr_scheduler: LRScheduler = None
-    inputs: List[InputFeature] = None
-    outputs: ModelOutput = None
+
+    eval_inputs: List[InputFeature] = None
+    eval_outputs: ModelOutput = None
+    eval_loss_value: Any = None
     loss_instance: Loss = CrossEntropyLoss
-    loss_value: Any = None
     template: Template = None
     processor: InputProcessor = None
     scaler: GradScaler = None
@@ -58,8 +68,8 @@ class OptimizerGroup:
     scaler_has_nan: bool = False
     gradient_accumulation_steps: int = 1
     cur_step: int = 0
-    num_tokens: int = 0
-    train_metrics: List[Metric] = field(default_factory=list)
+    
+    train_
     eval_metrics: List[Metric] = field(default_factory=list)
     checkpoint_engine: CheckpointEngine = None
     _dp_group = None
@@ -119,15 +129,19 @@ class OptimizerGroup:
         self._ensure_dp_group()
         if is_training:
             metrics = self.train_metrics
+            inputs = self.inputs
+            outputs = self.outputs
         else:
             metrics = self.eval_metrics
+            inputs = self.eval_inputs
+            outputs = self.eval_outputs
         # Get stored forward_kwargs from previous forward
         forward_kwargs = getattr(self, 'forward_kwargs', None) or {}
-        if len(metrics) > 0 and self.inputs is not None and self.outputs is not None:
+        if len(metrics) > 0 and inputs is not None and outputs is not None:
             for metric in metrics:
                 metric.accumulate(
-                    self.inputs,
-                    self.outputs,
+                    inputs,
+                    outputs,
                     lr=self._get_lr(),
                     step=self.cur_step - 1,
                     gradient_accumulation_steps=self.gradient_accumulation_steps,
@@ -281,7 +295,7 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
         )
 
     def _get_default_group(self):
-        """Get the only group has optimizer, else return the default one"""
+        """Get the only group, else return the default one"""
         if len(self.optimizer_group) == 1:
             return next(iter(self.optimizer_group))
         return self.active_group
@@ -431,10 +445,12 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
             inputs: The model inputs. Can be an encoded batch, or a list of `Trajectory`
             **kwargs:
                 adapter_name: Lora adapter name.
+                disable_lora: If True, disable LoRA and use base model for inference.
         Returns:
             The output of the model forward.
         """
         adapter_name = kwargs.pop('adapter_name', self._get_default_group())
+        disable_lora = kwargs.pop('disable_lora', False)
         temperature = float(kwargs.pop('temperature', 1.0))
         return_logits = kwargs.pop('return_logits', False)
         optimizer_config = self.optimizer_group[adapter_name]
@@ -450,6 +466,7 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
             if isinstance(inputs, dict):
                 inputs = [inputs]
             inputs = optimizer_config.template.batch_encode(inputs)  # noqa
+        breakpoint()
         with torch.no_grad():
             processor: InputProcessor = optimizer_config.processor
             assert isinstance(processor, InputProcessor), 'Set InputProcessor correctly before forwarding'
@@ -458,13 +475,17 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
                 inputs = self.sp_strategy.preprocess_inputs(inputs)
             labels = inputs.pop('labels', None)
             optimizer_config.accumulate_metrics(False)
-            outputs = self.model(**inputs)
+            if disable_lora and isinstance(self.model, PeftModel):
+                with self.model.disable_adapter():
+                    outputs = self.model(**inputs)
+            else:
+                outputs = self.model(**inputs)
             if self.sp_strategy is not None and labels is None:
                 outputs = self.sp_strategy.postprocess_outputs(outputs)
             inputs['labels'] = labels
-        optimizer_config.inputs = inputs
-        optimizer_config.outputs = outputs
-        optimizer_config.loss_value = outputs.get('aux_loss', 0)
+        optimizer_config.eval_inputs = inputs
+        optimizer_config.eval_outputs = outputs
+        optimizer_config.eval_loss_value = outputs.get('aux_loss', 0)
         if labels is not None:
             loss_mask = (labels != -100).bool()
             masked_labels = labels.clone()
@@ -1031,8 +1052,7 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
             else:
                 unwrapped_model.add_adapter(adapter_name, config)
 
-        self.optimizer_group[adapter_name] = self.optimizer_group.pop(_default_adapter_name,
-                                                                      self._construct_default_optimizer_group())
+        self.optimizer_group[adapter_name] = self._construct_default_optimizer_group()
         self.optimizer_group[adapter_name].adapter_name = adapter_name
         self.optimizer_group[adapter_name].adapter_config = config
         _gas_default = kwargs.get('gradient_accumulation_steps', 1)

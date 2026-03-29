@@ -45,17 +45,21 @@ class MultiLora:
     def _count_available_loras(self):
         return len([_lora for _lora in self.loras if _lora.tenant_adapter_name is None])
 
-    def activate_adapter(self, tenant_adapter_name: str):
+    def activate_adapter(self, tenant_adapter_name: str, call_enable=False):
         if not self.has_lora(tenant_adapter_name):
             raise ValueError(f'Adapter {tenant_adapter_name} does not exist')
         adapter_name = self.find_lora_by_tenant(tenant_adapter_name).adapter_name
         if isinstance(self.module, list):
             for _module in self.module:
-                # _module.enable_adapter_layers()
+                if call_enable:
+                    # This will cost time
+                    _module.enable_adapter_layers()
                 if _module.active_adapter != adapter_name:
                     _module.set_adapter(adapter_name)
         else:
-            # self.module.enable_adapter_layers()
+            if call_enable:
+                # This will cost time
+                self.module.enable_adapter_layers()
             if self.module.active_adapter != adapter_name:
                 self.module.set_adapter(adapter_name)
 
@@ -67,10 +71,20 @@ class MultiLora:
             self.module.disable_adapter_layers()
 
     @contextmanager
-    def adapter(self, tenant_adapter_name: str):
+    def adapter(self, tenant_adapter_name: str, disable_lora: bool = False):
         self.activate_adapter(tenant_adapter_name)
-        yield self.find_lora_by_tenant(tenant_adapter_name).adapter_name
-        # self.deactivate_adapter()
+        if disable_lora:
+            # Temporarily disable all adapters while keeping optimizer_group active
+            with self._disable_lora_context(tenant_adapter_name):
+                yield self.find_lora_by_tenant(tenant_adapter_name).adapter_name
+        else:
+            yield self.find_lora_by_tenant(tenant_adapter_name).adapter_name
+
+    @contextmanager
+    def _disable_lora_context(self, tenant_adapter_name):
+        self.deactivate_adapter()
+        yield
+        self.activate_adapter(tenant_adapter_name, call_enable=True)
 
     @contextmanager
     def save_context(self, tenant_adapter_name: str):

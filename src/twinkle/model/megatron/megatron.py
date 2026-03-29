@@ -51,6 +51,9 @@ class MegatronOptimizerGroup:
     outputs: ModelOutput = None
     loss_instance: Loss = None
     loss_value: Any = None
+    eval_inputs: List[InputFeature] = None
+    eval_outputs: ModelOutput = None
+    eval_loss_value: Any = None
     template: Template = None
     processor: InputProcessor = None
     gradient_accumulation_steps: int = 1
@@ -93,13 +96,17 @@ class MegatronOptimizerGroup:
     def accumulate_metrics(self, is_training):
         if is_training:
             metrics = self.train_metrics
+            inputs = self.inputs
+            outputs = self.outputs
         else:
             metrics = self.eval_metrics
-        if len(metrics) > 0 and self.inputs is not None and self.outputs is not None:
+            inputs = self.eval_inputs
+            outputs = self.eval_outputs
+        if len(metrics) > 0 and inputs is not None and outputs is not None:
             for metric in metrics:
                 metric.accumulate(
-                    self.inputs,
-                    self.outputs,
+                    inputs,
+                    outputs,
                     lr=self._get_lr(),
                     step=self.cur_step - 1,
                     gradient_accumulation_steps=self.gradient_accumulation_steps,
@@ -405,6 +412,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         from megatron.core.pipeline_parallel import get_forward_backward_func
 
         adapter_name = kwargs.pop('adapter_name', self._get_default_group())
+        disable_lora = kwargs.pop('disable_lora', False)
         temperature = float(kwargs.pop('temperature', 1.0))
         forward_only = kwargs.pop('forward_only', False)
         return_logits = kwargs.pop('return_logits', False)
@@ -521,17 +529,33 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
 
         self._accumulate_metric(optimizer_config, is_training=not forward_only)
 
-        # Run forward-backward with Megatron's scheduler
-        # Megatron handles all communication internally using proper process groups
-        losses = forward_backward_func(
-            forward_step_func=forward_step_func,
-            data_iterator=data_iter,
-            model=self.model,
-            num_microbatches=len(inputs),
-            seq_length=seq_length,
-            micro_batch_size=micro_batch_size,
-            forward_only=forward_only,
-        )
+        # Handle disable_lora for base model inference (e.g., reference in DPO)
+        def _set_disable_adapters(model, value: bool):
+            if isinstance(model, list):
+                for m in model:
+                    if isinstance(m, PeftModel):
+                        m.disable_adapters = value
+            elif isinstance(model, PeftModel):
+                model.disable_adapters = value
+
+        if disable_lora:
+            _set_disable_adapters(self.model, True)
+
+        try:
+            # Run forward-backward with Megatron's scheduler
+            # Megatron handles all communication internally using proper process groups
+            losses = forward_backward_func(
+                forward_step_func=forward_step_func,
+                data_iterator=data_iter,
+                model=self.model,
+                num_microbatches=len(inputs),
+                seq_length=seq_length,
+                micro_batch_size=micro_batch_size,
+                forward_only=forward_only,
+            )
+        finally:
+            if disable_lora:
+                _set_disable_adapters(self.model, False)
 
         # Extract loss from results (only last PP stage returns non-empty)
         loss = torch.tensor(0.0).to(Platform.get_local_device())
@@ -577,7 +601,6 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
             dp_cp_group = mpu.get_data_parallel_group(with_context_parallel=True)
             torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG, group=dp_cp_group)
 
-        optimizer_config.inputs = inputs
         if logps and len({_logps.shape[1] for _logps in logps}) == 1:
             logps = torch.cat(logps, dim=0)
         if logits and len({_logits.shape[1] for _logits in logits}) == 1:
@@ -586,7 +609,11 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
             loss = loss.detach().cpu().float().numpy()
         if not return_logits:
             logits = None
-        if not forward_only:
+        if forward_only:
+            optimizer_config.eval_inputs = inputs
+            optimizer_config.eval_outputs = ModelOutput(logits=logits, loss=loss, logps=logps)
+        else:
+            optimizer_config.inputs = inputs
             optimizer_config.outputs = ModelOutput(logits=logits, loss=loss, logps=logps)
         return ModelOutput(logits=logits, loss=loss, logps=logps)
 

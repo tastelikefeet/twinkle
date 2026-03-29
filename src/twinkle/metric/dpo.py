@@ -36,6 +36,34 @@ class DPOMetric(Metric):
         loss_mask = (labels != self.ignore_index).float()
         return (per_token_logps * loss_mask).sum(dim=-1)
 
+    def _align_logps(self, logps, target_shape, device, dtype):
+        """Align per-token logps to target shape by padding or truncating.
+
+        Args:
+            logps: [batch, seq_len] tensor to align
+            target_shape: Target shape (batch, target_seq_len)
+            device: Target device
+            dtype: Target dtype
+
+        Returns:
+            Aligned tensor with shape matching target_shape
+        """
+        import torch
+        logps = logps.to(device=device, dtype=dtype)
+        batch_size, src_len = logps.shape
+        _, target_len = target_shape
+
+        if src_len == target_len:
+            return logps
+        elif src_len < target_len:
+            breakpoint()
+            raise ValueError(
+                f'ref_logps seq_len ({src_len}) < target seq_len ({target_len}). '
+                f'This should not happen when both models process the same batch.'
+            )
+        else:
+            return logps[:, :target_len]
+
     def _split_chosen_rejected(self, tensor):
         """Split interleaved tensor into chosen and rejected.
 
@@ -101,12 +129,11 @@ class DPOMetric(Metric):
         if ref_outputs is not None:
             ref_logps = ref_outputs.get('logps')
             if ref_logps is not None:
-                # Align ref_logps
-                if ref_logps.device != labels.device:
-                    ref_logps = ref_logps.to(labels.device)
-                if ref_logps.shape[1] != labels.shape[1]:
-                    min_len = min(ref_logps.shape[1], labels.shape[1])
-                    ref_logps = ref_logps[:, :min_len]
+                # Align ref_logps to match labels shape (handles different seq lengths)
+                # breakpoint()
+                ref_logps = self._align_logps(
+                    ref_logps, labels.shape, labels.device, logps.dtype
+                )
 
                 ref_seq_logps = self._compute_sequence_logps(ref_logps, labels)
                 ref_chosen_logps, ref_rejected_logps = self._split_chosen_rejected(ref_seq_logps)

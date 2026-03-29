@@ -118,13 +118,15 @@ class MultiLoraMegatronModel(MegatronModel):
 
         Args:
             inputs: Model inputs.
-            **kwargs: Additional arguments.
+            **kwargs: Additional arguments including disable_lora.
 
         Returns:
             Model outputs.
         """
-        self._check_adapter_valid(kwargs.get('adapter_name'))
-        with self.multi_adapter.adapter(kwargs.get('adapter_name')):
+        adapter_name = kwargs.get('adapter_name')
+        disable_lora = kwargs.get('disable_lora', False)
+        self._check_adapter_valid(adapter_name)
+        with self.multi_adapter.adapter(adapter_name, disable_lora=disable_lora):
             return super().forward_only(inputs=inputs, **kwargs)
 
     @remote_function(dispatch='slice_dp', collect='mean', sync=True)

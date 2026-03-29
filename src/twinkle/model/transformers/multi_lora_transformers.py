@@ -106,8 +106,10 @@ class MultiLoraTransformersModel(TransformersModel, PreTrainedModel):
 
     @remote_function(dispatch='slice_dp', collect='flatten')
     def forward_only(self, *, inputs: Union[InputFeature, List[InputFeature], List[Trajectory]], **kwargs):
-        self._check_adapter_valid(kwargs.get('adapter_name'))
-        optimizer_config = self.optimizer_group[kwargs.get('adapter_name')]
+        adapter_name = kwargs.get('adapter_name')
+        disable_lora = kwargs.get('disable_lora', False)
+        self._check_adapter_valid(adapter_name)
+        optimizer_config = self.optimizer_group[adapter_name]
         if (isinstance(inputs, dict) and self._not_encoded(inputs)) or (isinstance(inputs, list)
                                                                         and self._not_encoded(inputs[0])):
             # Trajectory or List[Trajectory]
@@ -117,7 +119,7 @@ class MultiLoraTransformersModel(TransformersModel, PreTrainedModel):
                 inputs = [inputs]
             inputs = optimizer_config.template.batch_encode(inputs)  # noqa
         self.multi_adapter.check_length(inputs)
-        with self.multi_adapter.adapter(kwargs.get('adapter_name')):
+        with self.multi_adapter.adapter(adapter_name, disable_lora=disable_lora):
             return super().forward_only(inputs=inputs, **kwargs)
 
     @remote_function()
