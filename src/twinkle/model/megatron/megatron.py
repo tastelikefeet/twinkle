@@ -25,12 +25,12 @@ import twinkle.patch
 from twinkle import DeviceMesh, Platform, remote_class, remote_function, requires, torch_util
 from twinkle.checkpoint_engine.mixin import CheckpointEngineMixin
 from twinkle.data_format import InputFeature, ModelOutput, Trajectory
-from twinkle.model.optimizer_group import BaseOptimizerGroup, TrainStatus
 from twinkle.hub import HubOperation
 from twinkle.infra import collect_tensor_dict
 from twinkle.loss import CrossEntropyLoss, Loss
 from twinkle.metric import LossMetric, Metric, TrainMetric
 from twinkle.model.base import TwinkleModel
+from twinkle.model.optimizer_group import BaseOptimizerGroup, TrainStatus
 from twinkle.patch import Patch, apply_patch
 from twinkle.processor import InputProcessor
 from twinkle.template import Template
@@ -435,7 +435,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
                 seq_length = original_seq_length + (divisor - original_seq_length % divisor)
             else:
                 seq_length = original_seq_length
-        
+
         num_microbatches = len(inputs)
         loss_extra_kwargs_per_mb = []
         if num_microbatches <= 1:
@@ -463,10 +463,12 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
             if not counts:
                 # Later will gather this value, so it becomes:
                 # 1. SUM loss: gather_sum(local_num_tokens) = global_num_tokens
-                # 2. PER TOKEN MEAN loss: gather_sum(1 * gradient_accumulation_steps ) = gradient_accumulation_steps * world_size
+                # 2. PER TOKEN MEAN loss: gather_sum(1 * gradient_accumulation_steps )
+                #       = gradient_accumulation_steps * world_size
                 # Then, grad will divided by this value:
                 # 1. SUM loss: (global_sum_grad) / (global_num_tokens) = global_sum_grad/global_num_tokens
-                # 2. PER TOKEN MEAN loss: (gather_sum(per_token_grad * gradient_accumulation_steps)) / (gradient_accumulation_steps  * world_size ) = avg_per_token_grad
+                # 2. PER TOKEN MEAN loss: (gather_sum(per_token_grad * gradient_accumulation_steps))
+                #       / (gradient_accumulation_steps  * world_size ) = avg_per_token_grad
                 counts = torch.tensor(1, device=losses.device)
             return self.strategy.reduce_loss(losses, counts, output_tensor, logps)
 

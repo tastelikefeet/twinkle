@@ -8,9 +8,9 @@ from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from typing import Any, Callable, Dict, List, Literal, Optional, Type, Union
 
 from twinkle import DeviceMesh, remote_class, remote_function, template
-from twinkle.infra import collect_tensor_dict
 from twinkle.data_format import InputFeature, Trajectory
 from twinkle.hub import HubOperation
+from twinkle.infra import collect_tensor_dict
 from twinkle.loss import Loss
 from twinkle.metric import Metric
 from twinkle.processor import InputProcessor

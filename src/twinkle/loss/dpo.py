@@ -9,8 +9,8 @@ Reference:
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 from twinkle.data_format import LossOutput
-from twinkle.utils.torch_utils import selective_log_softmax
 from twinkle.loss.base import Loss
+from twinkle.utils.torch_utils import selective_log_softmax
 
 if TYPE_CHECKING:
     import torch
@@ -176,14 +176,10 @@ class DPOLoss(PreferenceLossBase):
                 # Truncate right (keep left part) - may happen in Ray result merging
                 return logps[:, :target_seq_len]
             else:
-                raise ValueError(
-                    f'ref_logps seq_len ({src_seq_len}) < target seq_len ({target_seq_len}). '
-                    f'This should not happen when both models process the same batch.'
-                )
+                raise ValueError(f'ref_logps seq_len ({src_seq_len}) < target seq_len ({target_seq_len}). '
+                                 f'This should not happen when both models process the same batch.')
 
-        raise ValueError(
-            f'Cannot align ref_logps shape {logps.shape} to target shape {target_shape}'
-        )
+        raise ValueError(f'Cannot align ref_logps shape {logps.shape} to target shape {target_shape}')
 
     def _compute_dpo_loss(
         self,
@@ -227,7 +223,7 @@ class DPOLoss(PreferenceLossBase):
         elif self.loss_type == 'ipo':
             # IPO (Identity Preference Optimization) loss
             # Reference: "A General Theoretical Paradigm to Understand Learning from Human Feedback"
-            losses = (logits - 1 / (2 * self.beta)) ** 2
+            losses = (logits - 1 / (2 * self.beta))**2
         elif self.loss_type == 'kto_pair':
             # KTO pair loss (simplified version)
             chosen_logratios_scaled = self.beta * chosen_logratios
@@ -236,7 +232,7 @@ class DPOLoss(PreferenceLossBase):
             rejected_losses = F.sigmoid(rejected_logratios_scaled)
             losses = chosen_losses + rejected_losses
         else:
-            raise ValueError(f"Unknown loss_type: {self.loss_type}")
+            raise ValueError(f'Unknown loss_type: {self.loss_type}')
 
         # Apply label smoothing if specified
         if self.label_smoothing > 0:
@@ -292,7 +288,7 @@ class DPOLoss(PreferenceLossBase):
             labels = labels.unsqueeze(0)
 
         batch_size = labels.shape[0]
-        assert batch_size % 2 == 0, "Batch size must be even (chosen + rejected pairs)"
+        assert batch_size % 2 == 0, 'Batch size must be even (chosen + rejected pairs)'
 
         # Get log probabilities from outputs
         logps = self._get_logps_from_outputs(outputs, labels)
@@ -314,9 +310,7 @@ class DPOLoss(PreferenceLossBase):
             reference_rejected_logps = ref_rejected_logps.to(device=device, dtype=dtype)
         elif ref_logps is not None:
             # Per-token reference log probs provided, need to align and sum
-            ref_logps_aligned = self._align_logps(
-                ref_logps, labels.shape, device, dtype
-            )
+            ref_logps_aligned = self._align_logps(ref_logps, labels.shape, device, dtype)
             ref_chosen, ref_rejected = self._split_chosen_rejected(ref_logps_aligned)
             reference_chosen_logps = self._compute_sequence_logps(ref_chosen, chosen_labels)
             reference_rejected_logps = self._compute_sequence_logps(ref_rejected, rejected_labels)
@@ -392,7 +386,7 @@ class SimPOLoss(PreferenceLossBase):
         if labels.dim() == 1:
             labels = labels.unsqueeze(0)
 
-        assert labels.shape[0] % 2 == 0, "Batch size must be even (chosen + rejected pairs)"
+        assert labels.shape[0] % 2 == 0, 'Batch size must be even (chosen + rejected pairs)'
 
         # Get log probabilities
         logps = self._get_logps_from_outputs(outputs, labels)
@@ -455,7 +449,7 @@ class CPOLoss(PreferenceLossBase):
         if labels.dim() == 1:
             labels = labels.unsqueeze(0)
 
-        assert labels.shape[0] % 2 == 0, "Batch size must be even"
+        assert labels.shape[0] % 2 == 0, 'Batch size must be even'
 
         # Get log probabilities
         logps = self._get_logps_from_outputs(outputs, labels)
@@ -521,7 +515,7 @@ class ORPOLoss(PreferenceLossBase):
         if labels.dim() == 1:
             labels = labels.unsqueeze(0)
 
-        assert labels.shape[0] % 2 == 0, "Batch size must be even"
+        assert labels.shape[0] % 2 == 0, 'Batch size must be even'
 
         # Get log probabilities
         logps = self._get_logps_from_outputs(outputs, labels)
@@ -540,8 +534,8 @@ class ORPOLoss(PreferenceLossBase):
         # Odds ratio: log(odds_chosen / odds_rejected)
         # log_odds = log(p/(1-p)) = log(p) - log(1-p)
         # Use numerically stable computation
-        prob_chosen = torch.exp(chosen_avg_logps).clamp(min=1e-7, max=1-1e-7)
-        prob_rejected = torch.exp(rejected_avg_logps).clamp(min=1e-7, max=1-1e-7)
+        prob_chosen = torch.exp(chosen_avg_logps).clamp(min=1e-7, max=1 - 1e-7)
+        prob_rejected = torch.exp(rejected_avg_logps).clamp(min=1e-7, max=1 - 1e-7)
         log_odds_chosen = torch.log(prob_chosen) - torch.log(1 - prob_chosen)
         log_odds_rejected = torch.log(prob_rejected) - torch.log(1 - prob_rejected)
 

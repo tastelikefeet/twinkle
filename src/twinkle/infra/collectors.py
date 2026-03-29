@@ -1,11 +1,8 @@
 import numpy as np
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import Any, Dict, List
 
 from twinkle import DeviceMesh
 from twinkle.utils import pad_and_stack_tensors
-
-if TYPE_CHECKING:
-    import torch
 
 
 def collect_tensor_dict(outputs: List[Dict[str, Any]], device_mesh: DeviceMesh) -> Dict[str, Any]:

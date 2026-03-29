@@ -478,8 +478,7 @@ class DeviceMesh:
         for data_rank in range(data_ws):
             # Find all global ranks that map to this data_rank
             candidates = [
-                r for r in self.mesh.flatten().tolist()
-                if self.get_data_rank_from_global_rank(r) == data_rank
+                r for r in self.mesh.flatten().tolist() if self.get_data_rank_from_global_rank(r) == data_rank
             ]
             if not candidates:
                 continue

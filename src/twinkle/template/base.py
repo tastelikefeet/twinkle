@@ -320,7 +320,7 @@ class Template:
             input_ids = self.tokenizer.encode(text)
             encoded = {}
             labels = deepcopy(input_ids)
-        
+
         input_feature = InputFeature(
             input_ids=np.array(input_ids),
             labels=np.array(labels),
@@ -398,9 +398,7 @@ class Template:
                 for key in trajectories:
                     if key in traj_keys:
                         # Encode this trajectory list
-                        result[key] = self.batch_encode(
-                            trajectories[key], add_generation_prompt=add_generation_prompt
-                        )
+                        result[key] = self.batch_encode(trajectories[key], add_generation_prompt=add_generation_prompt)
                     else:
                         # Keep non-trajectory columns as-is
                         result[key] = trajectories[key]

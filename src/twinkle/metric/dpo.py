@@ -57,10 +57,8 @@ class DPOMetric(Metric):
         if src_len == target_len:
             return logps
         elif src_len < target_len:
-            raise ValueError(
-                f'ref_logps seq_len ({src_len}) < target seq_len ({target_len}). '
-                f'This should not happen when both models process the same batch.'
-            )
+            raise ValueError(f'ref_logps seq_len ({src_len}) < target seq_len ({target_len}). '
+                             f'This should not happen when both models process the same batch.')
         else:
             return logps[:, :target_len]
 
@@ -84,7 +82,7 @@ class DPOMetric(Metric):
         logps = outputs.get('logps')
         if logps is None or len(logps) == 0:
             return
-        
+
         if isinstance(logps, list) and logps:
             logps = pad_and_stack_tensors(logps)
 
@@ -128,9 +126,7 @@ class DPOMetric(Metric):
             ref_logps = ref_outputs.get('logps')
             if ref_logps is not None:
                 # Align ref_logps to match labels shape (handles different seq lengths)
-                ref_logps = self._align_logps(
-                    ref_logps, labels.shape, labels.device, logps.dtype
-                )
+                ref_logps = self._align_logps(ref_logps, labels.shape, labels.device, logps.dtype)
 
                 ref_seq_logps = self._compute_sequence_logps(ref_logps, labels)
                 ref_chosen_logps, ref_rejected_logps = self._split_chosen_rejected(ref_seq_logps)
