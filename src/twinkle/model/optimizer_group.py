@@ -52,7 +52,8 @@ class BaseOptimizerGroup:
             gradient_accumulation_steps = self.gradient_accumulation_steps
         else:
             self.gradient_accumulation_steps = gradient_accumulation_steps
-        return (self.cur_step - 1) % gradient_accumulation_steps == 0 and self.cur_step > 1
+        return gradient_accumulation_steps == 1 or ((self.cur_step - 1) % gradient_accumulation_steps == 0
+                                                    and self.cur_step > 1)
 
     def _get_lr(self):
         """Get learning rates from optimizer. Override in subclass."""
