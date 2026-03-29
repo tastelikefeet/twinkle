@@ -149,7 +149,7 @@ def main():
     else:
         # Transformers: fsdp=4, dp=2
         from twinkle.model import TransformersModel
-        policy_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, fsdp_size=4, dp_size=2)
+        policy_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, dp_size=4, fsdp_size=2)
         ModelClass = TransformersModel
 
     twinkle.initialize(mode='ray', nproc_per_node=MODEL_GPUS, groups=device_groups)

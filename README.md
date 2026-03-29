@@ -101,6 +101,7 @@ Or use ModelScope's [official image](https://www.modelscope.cn/docs/intro/enviro
 
 ## Changelog
 
+- 🎉2026-03-28 Support DPO training with both Transformers and Megatron backends. See [dpo_full.py](cookbook/rl/dpo_full.py) and [dpo_lora.py](cookbook/rl/dpo_lora.py).
 - 🎉2026-03-24 Twinkle Web site is now live at https://modelscope.github.io/twinkle-web/
 - 🎉2026-03-19 Support GKD training ，please refer to this [cookbook](cookbook/rl/gkd_on_policy.py).
 - 🎉2026-02-13 Initial version of Twinkle✨ released, including SFT/PT/RL support for text models.
