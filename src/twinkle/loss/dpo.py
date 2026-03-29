@@ -284,7 +284,6 @@ class DPOLoss(PreferenceLossBase):
         # Extract ref_logps from ref_outputs if provided
         if ref_outputs is not None and ref_logps is None:
             ref_logps = ref_outputs.get('logps')
-
         labels = inputs.get('labels')
         assert labels is not None, "inputs must contain 'labels'"
         if not torch.is_tensor(labels):

@@ -250,6 +250,38 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         assert isinstance(inputs, dict)
         return 'input_ids' not in inputs and 'input_embedding' not in inputs
 
+    @staticmethod
+    def _slice_value_for_microbatch(value, mb_start: int, mb_end: int, micro_batch_size: int):
+        """Recursively slice a value for microbatch processing.
+
+        Handles nested dicts (e.g., ref_outputs: {"logps": tensor}) by recursively
+        slicing internal tensors.
+
+        Args:
+            value: The value to slice (tensor, ndarray, list, dict, or scalar)
+            mb_start: Start index of the microbatch
+            mb_end: End index of the microbatch
+            micro_batch_size: Size of each microbatch
+
+        Returns:
+            Sliced value with the same structure
+        """
+        if isinstance(value, torch.Tensor) and value.dim() >= 1 and value.shape[0] > micro_batch_size:
+            return value[mb_start:mb_end]
+        elif isinstance(value, np.ndarray) and value.ndim >= 1 and value.shape[0] > micro_batch_size:
+            return value[mb_start:mb_end]
+        elif isinstance(value, (list, tuple)) and len(value) > micro_batch_size:
+            return value[mb_start:mb_end]
+        elif isinstance(value, dict):
+            # Recursively slice dict values (e.g., ref_outputs: {"logps": tensor})
+            return {
+                k: MegatronModel._slice_value_for_microbatch(v, mb_start, mb_end, micro_batch_size)
+                for k, v in value.items()
+            }
+        else:
+            # Scalars, small tensors, or non-sliceable values pass through as-is
+            return value
+
     def _postprocess_tensor_cp(self, tensor):
         """All-gather and reconstruct full sequence from CP-split tensor.
 
@@ -401,8 +433,6 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
             else:
                 seq_length = original_seq_length
         
-        if 'ref_outputs' in kwargs:
-            breakpoint()
         num_microbatches = len(inputs)
         loss_extra_kwargs_per_mb = []
         if num_microbatches <= 1:
@@ -411,17 +441,10 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
             for mb_idx in range(num_microbatches):
                 mb_start = mb_idx * micro_batch_size
                 mb_end = mb_start + micro_batch_size
-                mb_kwargs = {}
-                for key, value in kwargs.items():
-                    if isinstance(value, torch.Tensor) and value.dim() >= 1 and value.shape[0] > micro_batch_size:
-                        mb_kwargs[key] = value[mb_start:mb_end]
-                    elif isinstance(value, np.ndarray) and value.ndim >= 1 and value.shape[0] > micro_batch_size:
-                        mb_kwargs[key] = value[mb_start:mb_end]
-                    elif isinstance(value, (list, tuple)) and len(value) > micro_batch_size:
-                        mb_kwargs[key] = value[mb_start:mb_end]
-                    else:
-                        # Scalars, small tensors, or non-sliceable values pass through as-is
-                        mb_kwargs[key] = value
+                mb_kwargs = {
+                    key: self._slice_value_for_microbatch(value, mb_start, mb_end, micro_batch_size)
+                    for key, value in kwargs.items()
+                }
                 loss_extra_kwargs_per_mb.append(mb_kwargs)
 
         _mb_counter = [0]  # mutable counter for closure

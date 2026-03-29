@@ -3,6 +3,7 @@
 from typing import List, Union
 
 from twinkle.data_format import InputFeature, ModelOutput
+from twinkle.utils import pad_and_stack_tensors
 from .base import Metric
 
 
@@ -81,13 +82,20 @@ class DPOMetric(Metric):
         """
         import torch
         logps = outputs.get('logps')
-        if logps is None:
+        if logps is None or len(logps) == 0:
             return
+        
+        if isinstance(logps, list) and logps:
+            logps = pad_and_stack_tensors(logps)
 
         # Get labels from inputs
         if isinstance(inputs, list):
-            assert len(inputs) == 1
-            inputs = inputs[0]
+            labels = [input['labels'] for input in inputs]
+            if len(labels) == 1:
+                labels = labels[0]
+            else:
+                labels = pad_and_stack_tensors(labels)
+            inputs = {'labels': labels}
 
         labels = torch.as_tensor(inputs['labels'])
         if labels.dim() == 1:
