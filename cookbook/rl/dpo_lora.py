@@ -58,20 +58,20 @@ from twinkle.dataloader import DataLoader
 from twinkle.dataset import Dataset, DatasetMeta
 from twinkle.loss import DPOLoss
 from twinkle.metric import DPOMetric
-from twinkle.model import MultiLoraMegatronModel
+from twinkle.model import MegatronModel
 from twinkle.preprocessor import EmojiDPOProcessor
 from twinkle.processor import InputProcessor
 
 logger = get_logger()
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-MODEL_ID = os.environ.get('MODEL_ID', 'ms://Qwen/Qwen2.5-7B-Instruct')
+MODEL_ID = os.environ.get('MODEL_ID', 'ms://Qwen/Qwen3-4B')
 DATASET_ID = os.environ.get('DATASET_ID', 'ms://hjh0119/shareAI-Llama3-DPO-zh-en-emoji')
 
 MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 8))
 
-BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 2))  # Number of preference pairs
-MICRO_BATCH_SIZE = int(os.environ.get('MICRO_BATCH_SIZE', 2))
+BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 8))  # Number of preference pairs
+MICRO_BATCH_SIZE = int(os.environ.get('MICRO_BATCH_SIZE', 8))
 GRADIENT_ACCUMULATION_STEPS = int(os.environ.get('GRADIENT_ACCUMULATION_STEPS', 2))
 LEARNING_RATE = float(os.environ.get('LR', 1e-4))  # LoRA DPO requires higher LR (1e-4 to 3e-4)
 DPO_BETA = float(os.environ.get('DPO_BETA', 0.1))
@@ -85,7 +85,7 @@ SYSTEM_PROMPT = os.environ.get('SYSTEM_PROMPT', 'You are a helpful assistant.')
 
 def create_dpo_dataset():
     """Create DPO dataset with positive/negative format."""
-    dataset = Dataset(DatasetMeta(DATASET_ID, data_slice=range(30000)))
+    dataset = Dataset(DatasetMeta(DATASET_ID, data_slice=range(6000)))
     dataset.set_template('Template', model_id=MODEL_ID, max_length=MAX_LENGTH)
     dataset.map(
         EmojiDPOProcessor,
@@ -137,7 +137,7 @@ def main():
         DeviceGroup(name='policy', ranks=list(range(MODEL_GPUS)), device_type='GPU'),
     ]
 
-    policy_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, dp_size=1, pp_size=2, cp_size=2, tp_size=2)
+    policy_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, dp_size=4, pp_size=2)
     twinkle.initialize(mode='ray', nproc_per_node=8, groups=device_groups)
 
     # ── DataLoader Setup ──────────────────────────────────────────────────────
@@ -152,20 +152,18 @@ def main():
     # ── Policy Model Setup with LoRA ──────────────────────────────────────────
     lora_config = LoraConfig(
         target_modules='all-linear',
-        r=16,
+        r=8,
         lora_alpha=32,
         lora_dropout=0.05,
     )
 
-    policy_model = MultiLoraMegatronModel(
+    policy_model = MegatronModel(
         model_id=MODEL_ID,
         device_mesh=policy_mesh,
         remote_group='policy',
     )
     MAX_STEPS = len(dataloader)
     policy_model.add_adapter_to_model(ADAPTER_NAME, lora_config, gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS)
-    # policy_model.set_optimizer('AdamW', lr=LEARNING_RATE, weight_decay=0.01, adapter_name=ADAPTER_NAME)
-    # policy_model.set_lr_scheduler('CosineAnnealingLR', T_max=MAX_STEPS, adapter_name=ADAPTER_NAME)
     policy_model.set_optimizer('default', lr=LEARNING_RATE, weight_decay=0.01, adapter_name=ADAPTER_NAME)
     policy_model.set_lr_scheduler('default', lr_decay_steps=MAX_STEPS, adapter_name=ADAPTER_NAME)
 
@@ -205,16 +203,17 @@ def main():
 
         # Gradient clipping and optimizer step
         policy_model.clip_grad_and_step(adapter_name=ADAPTER_NAME)
-        optim_step += 1
 
         # Logging
-        if optim_step % 1 == 0:
+        if optim_step % 16 == 0:
             metrics = policy_model.calculate_metric(is_training=True, adapter_name=ADAPTER_NAME)
-            logger.info(f'[Step {optim_step}/{MAX_STEPS}] {metrics}')
+            logger.info(f'[Step {optim_step // GRADIENT_ACCUMULATION_STEPS}/{MAX_STEPS}] {metrics}')
 
         # Checkpointing
         if optim_step % SAVE_STEPS == 0:
             policy_model.save(f'dpo-lora-checkpoint-{optim_step}', adapter_name=ADAPTER_NAME)
+        
+        optim_step += 1
 
     # ── Save Final Checkpoint ─────────────────────────────────────────────────
     logger.info(f'Training completed. Total steps: {optim_step}')

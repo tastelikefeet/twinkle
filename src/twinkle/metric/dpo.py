@@ -209,5 +209,5 @@ class DPOMetric(Metric):
             results['rewards/rejected'] = f'{total_rejected_rewards / total_count:.4f}'
             results['rewards/margins'] = f'{total_reward_margin / total_count:.4f}'
             results['rewards/accuracies'] = f'{total_reward_correct / total_count * 100:.1f}%'
-
+        self.reset()
         return results
