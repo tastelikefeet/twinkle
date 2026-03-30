@@ -42,7 +42,6 @@ class MegatronStrategy:
             'expert_tensor_parallel_size': self.device_mesh.etp_world_size or 1,
             'virtual_pipeline_model_parallel_size': self.device_mesh.vpp_size or 1,
         }
-        self._initialized = True
         mpu.initialize_model_parallel(
             order=self.device_mesh.order,
             **parallel_kwargs,
@@ -53,6 +52,26 @@ class MegatronStrategy:
     def sequence_parallel(self) -> bool:
         """Read from device_mesh so auto-enable in args.py is visible."""
         return getattr(self.device_mesh, 'sequence_parallel', False)
+
+    @property
+    def bridge(self):
+        return self.config.bridge
+
+    @property
+    def params_type(self) -> torch.dtype:
+        if self._params_dtype is not None:
+            dtype_map = {
+                'fp32': torch.float32,
+                'fp16': torch.float16,
+                'bf16': torch.bfloat16,
+            }
+            return dtype_map.get(self._params_dtype, torch.bfloat16)
+
+        if self.mixed_precision == 'bf16':
+            return torch.bfloat16
+        elif self.mixed_precision == 'fp16':
+            return torch.float16
+        return torch.float32
 
     def _check_device_mesh(self):
         from megatron.core import parallel_state as mpu
@@ -77,22 +96,6 @@ class MegatronStrategy:
 
         if self.device_mesh.vpp_size is not None and self.device_mesh.vpp_size > 1:
             assert self.device_mesh.vpp_size == mpu.get_virtual_pipeline_model_parallel_world_size()
-
-    @property
-    def params_type(self) -> torch.dtype:
-        if self._params_dtype is not None:
-            dtype_map = {
-                'fp32': torch.float32,
-                'fp16': torch.float16,
-                'bf16': torch.bfloat16,
-            }
-            return dtype_map.get(self._params_dtype, torch.bfloat16)
-
-        if self.mixed_precision == 'bf16':
-            return torch.bfloat16
-        elif self.mixed_precision == 'fp16':
-            return torch.float16
-        return torch.float32
 
     def wrap_model(
         self,

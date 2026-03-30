@@ -13,6 +13,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from Cython.Compiler.Code import contextmanager
 from peft import LoraConfig, PeftConfig, PeftModel, get_peft_model
 from peft.tuners.lora import Linear as LoraLinear
 from torch.optim import Optimizer
@@ -73,32 +74,6 @@ class MegatronOptimizerGroup(BaseOptimizerGroup):
 
 
 _default_adapter_name = ''
-
-
-def _add_base_layer_suffix(params):
-    """Insert ``.base_layer.`` before the final attribute for LoRA-target modules.
-
-    Converts plain HF names exported by the Megatron bridge into the format
-    expected by vLLM when ``enable_lora=True``::
-
-        model.layers.0.self_attn.q_proj.weight
-        -> model.layers.0.self_attn.q_proj.base_layer.weight
-
-    Non-matching names are yielded unchanged.
-
-    Args:
-        params: Iterable of ``(name, tensor)`` pairs.
-
-    Yields:
-        ``(name, tensor)`` with ``.base_layer.`` inserted where needed.
-    """
-    for name, param in params:
-        for suffix in _BASE_LAYER_SUFFIXES:
-            if name.endswith(suffix):
-                attr = suffix.rsplit('.', 1)[-1]  # 'weight' or 'bias'
-                name = f'{name[:-len(attr)]}base_layer.{attr}'
-                break
-        yield name, param
 
 
 @remote_class(execute='all')
@@ -1299,7 +1274,6 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         )
 
     def _patch_adapter(self, adapter_name: str, config_or_dir: Union[PeftConfig, str, Dict[str, Any]], **kwargs):
-        from .tuners.utils import get_target_modules, patch_deepcopy, set_linear_is_expert
         assert adapter_name, 'Use a non-empty adapter_name'
         model = self.strategy.unwrap_model(self.model)
         if isinstance(config_or_dir, str):
@@ -1328,8 +1302,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
                     expanded_modules = get_target_modules(_model, target_modules)
                     config.target_modules = expanded_modules
 
-                with patch_deepcopy():
-                    _model = get_peft_model(_model, config, adapter_name=adapter_name)
+                _model = get_peft_model(_model, config, adapter_name=adapter_name)
                 # setting average_gradients_across_tp_domain
                 for m in _model.modules():
                     if isinstance(m, LoraLinear):
@@ -1437,10 +1410,6 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
 
         return expr
 
-    @property
-    def _bridge(self) -> 'GPTBridge':
-        return self.strategy.config.bridge
-
     # ── Checkpoint Engine (from CheckpointEngineMixin) ──────────────────
     # prepare_checkpoint_engine, init_checkpoint_process_group, and
     # finalize_checkpoint_engine are inherited from CheckpointEngineMixin.
@@ -1453,54 +1422,52 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
     # via NCCL; others consume the generator silently (rank=-1).
 
     @remote_function(dispatch='all', lazy_collect=True)
-    def send_weights(
+    async def send_weights(
         self,
         adapter_name: str = None,
         base_sync_done: bool = False,
         merge_and_sync: bool = False,
+        add_base_layer_path: bool = True,
     ):
         if adapter_name is None:
             adapter_name = self._get_default_group()
         engine = self._get_or_create_checkpoint_engine()
 
+        @contextmanager
+        def merge_lora():
+            for _model in self.strategy.unwrap_model(self.model):
+                if isinstance(_model, PeftModel):
+                    _model.merge_adapter()
+            yield
+            for _model in self.strategy.unwrap_model(self.model):
+                if isinstance(_model, PeftModel):
+                    _model.unmerge_adapter()
+
+        def _add_base_layer_suffix(params):
+            _BASE_LAYER_SUFFIXES = ['weight', 'bias']
+            for name, param in params:
+                for suffix in _BASE_LAYER_SUFFIXES:
+                    if name.endswith(suffix):
+                        attr = suffix.rsplit('.', 1)[-1]  # 'weight' or 'bias'
+                        name = f'{name[:-len(attr)]}base_layer.{attr}'
+                        break
+                yield name, param
+
         is_peft_format = (adapter_name != _default_adapter_name)
-
-        # Megatron uses padded_vocab_size for TP alignment (rounded up to
-        # TP * 128).  vLLM creates its embedding / lm_head from the original
-        # HF vocab_size, so weight_loader asserts shape[0] == org_vocab_size.
-        # Trim any tensor whose dim-0 equals padded_vocab_size back to
-        # org_vocab_size — this is shape-based, not name-based, so it works
-        # regardless of the model architecture's naming convention.
-        org_vocab_size = getattr(self.hf_config, 'vocab_size', self.strategy.config.padded_vocab_size)
-        _padded_vocab_size = args.padded_vocab_size
-
-        def _trim_vocab(name, tensor):
-            if _padded_vocab_size != org_vocab_size and tensor.shape[0] == _padded_vocab_size:
-                tensor = tensor[:org_vocab_size]
-            return name, tensor
-
         if base_sync_done and adapter_name:
+            # The first base model synchronization finished, and is lora training
             if merge_and_sync:
-                # LoRA Training and sync full model(merge_adapter)
                 def weight_generator():
-                    for _model in self.strategy.unwrap_model(self.model):
-                        if isinstance(_model, PeftModel):
-                            _model.merge_adapter()
-                    for name, tensor in self.get_hf_state_dict(adapter_name=''):
-                        if name is None or tensor is None:
-                            continue
-                        # Skip LoRA-specific weights for base model sync
-                        if 'lora_A' in name or 'lora_B' in name or 'lora_embedding' in name:
-                            continue
-                        yield _trim_vocab(name, tensor)
-                    for _model in self.strategy.unwrap_model(self.model):
-                        if isinstance(_model, PeftModel):
-                            _model.unmerge_adapter()
+                    with merge_lora():
+                        for name, tensor in self.get_hf_state_dict(adapter_name=''):
+                            if name is None or tensor is None:
+                                continue
+                            # Skip LoRA-specific weights for base model sync
+                            if 'lora_A' in name or 'lora_B' in name or 'lora_embedding' in name:
+                                continue
+                            yield name, tensor
+
             else:
-                # ── LoRA-only mode ────────────────────────────────────────────
-                # Export only LoRA adapter weights via the bridge.
-                # The bridge may also yield non-LoRA weights (e.g. embed_tokens
-                # for modules_to_save), filter to only lora_A/lora_B tensors.
                 def weight_generator():
                     for name, tensor in self.get_hf_state_dict(adapter_name=adapter_name):
                         if name is None or tensor is None:
@@ -1508,8 +1475,8 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
                         if 'lora' not in name:
                             continue
                         yield name, tensor
-
         else:
+            # Need to synchronize the base model
             # First full base-model sync.
             def _raw_weights():
                 for name, tensor in self.get_hf_state_dict(adapter_name=''):
@@ -1518,10 +1485,10 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
                     # Skip LoRA-specific weights for base model sync
                     if 'lora_A' in name or 'lora_B' in name or 'lora_embedding' in name:
                         continue
-                    yield _trim_vocab(name, tensor)
+                    yield name, tensor
 
             def weight_generator():
-                if is_peft_format and not merge_and_sync:
+                if is_peft_format and (not merge_and_sync) and add_base_layer_path:
                     yield from _add_base_layer_suffix(_raw_weights())
                 else:
                     yield from _raw_weights()
@@ -1533,30 +1500,10 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
                 pass
             return
 
-        async def _send():
-            await engine.send_weights(weight_generator())
-
-        result_container = {'error': None}
-
-        def _run():
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    loop.run_until_complete(_send())
-                finally:
-                    loop.close()
-            except Exception as e:
-                result_container['error'] = e
-
-        thread = threading.Thread(target=_run)
-        thread.start()
-        thread.join()
-        if result_container['error'] is not None:
-            raise result_container['error']
+        await engine.send_weights(weight_generator())
 
     @remote_function(collect='first')
-    def get_peft_config_dict(self, adapter_name: str = None) -> dict:
+    def get_peft_config_dict(self, adapter_name: str = None) -> Optional[Dict[str, Any]]:
         """Return the PEFT config as a dict for vLLM's PEFTHelper.
 
         Used by CheckpointEngineManager for LoRA-only weight sync.
