@@ -1281,8 +1281,6 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
 
         _models = []
         for _model in model:
-            # Mark expert layers for MoE models
-            set_linear_is_expert(_model)
             if isinstance(config_or_dir, str):
                 _model = PeftModel.from_pretrained(
                     _model, config_or_dir, adapter_name=adapter_name, is_trainable=kwargs.get('is_trainable', True))
