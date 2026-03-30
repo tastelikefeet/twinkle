@@ -413,7 +413,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
 
         if micro_batch_size is None:
             # Compatible with DPO
-            micro_batch_size = 2
+            micro_batch_size = min(2, len(inputs))
         inputs = processor(inputs, micro_batch_size=micro_batch_size, variable_seq_lengths=self.variable_seq_lengths)
 
         # Get parallelism settings for sequence padding and splitting
