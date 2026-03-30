@@ -114,6 +114,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
             'recompute_modules': recompute_modules,
             'recompute_method': recompute_method,
             'recompute_num_layers': recompute_num_layers,
+            'variable_seq_lengths': self.variable_seq_lengths,
         })
         seed = kwargs.pop('seed', None) or int(os.environ.get('TWINKLE_SEED', 42))
         self.strategy = MegatronStrategy(self._model_path, self.device_mesh, mixed_precision=mixed_precision,

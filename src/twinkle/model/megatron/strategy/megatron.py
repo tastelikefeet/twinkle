@@ -16,6 +16,7 @@ class MegatronStrategy:
         use_distributed_optimizer: bool = True,
         mixed_precision: Literal['no', 'fp16', 'bf16'] = 'bf16',
         seed: int = 42,
+        variable_seq_lengths: bool = False,
         **kwargs,
     ):
         from megatron.core import mpu
@@ -23,7 +24,8 @@ class MegatronStrategy:
         self.use_distributed_optimizer = use_distributed_optimizer
         self.mixed_precision = mixed_precision
         self.model_dir = model_dir
-        self._seed = seed
+        self.seed = seed
+        self.variable_seq_lengths = variable_seq_lengths
         # Determine params_dtype and activation checkpointing kwargs
         params_dtype = torch.bfloat16
         if self.mixed_precision == 'fp16':
@@ -48,7 +50,7 @@ class MegatronStrategy:
             **parallel_kwargs,
         )
         from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
-        model_parallel_cuda_manual_seed(self._seed)
+        model_parallel_cuda_manual_seed(self.seed)
         self.config = self.get_model_config(model_dir, parallel_kwargs, **kwargs)
 
     @property
@@ -183,14 +185,39 @@ class MegatronStrategy:
         **kwargs,
     ):
         from mcore_bridge import ModelConfig, hf_to_mcore_config
+        from megatron.core.distributed import finalize_model_grads as _native_finalize_model_grads
         from transformers import AutoConfig
         hf_config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
         config_kwargs = hf_to_mcore_config(hf_config)
         config_kwargs.update(kwargs)
+        if 'calculate_per_token_loss' not in config_kwargs:
+            config_kwargs['calculate_per_token_loss'] = True
+
+        if 'moe_token_dispatcher_type' not in config_kwargs:
+            config_kwargs['moe_token_dispatcher_type'] = 'alltoall' if self.variable_seq_lengths else 'allgather'
+
+        def finalize_model_grads_for_lora(model, *args, **kwargs):
+            from megatron.core.distributed import DistributedDataParallel as MegatronDDP
+            from peft import PeftModel as _PeftModel
+
+            # Check if model is DDP-wrapped (has ddp_config)
+            # Need to unwrap PeftModel to check the underlying model
+            def _get_base_model(m):
+                if isinstance(m, _PeftModel):
+                    return _get_base_model(m.base_model.model)
+                return m
+
+            base_model = _get_base_model(model[0])
+            if isinstance(base_model, MegatronDDP) or hasattr(base_model, 'ddp_config'):
+                # Use native implementation for DDP models
+                return _native_finalize_model_grads(model, *args, **kwargs)
+
         config = ModelConfig(
             use_cpu_initialization=True,
             params_dtype=self.params_type,
             sequence_parallel=self.sequence_parallel,
+            finalize_model_grads_func=finalize_model_grads_for_lora,
+            variable_seq_lengths=self.variable_seq_lengths,
             **parallel_kwargs,
             **config_kwargs,
         )
