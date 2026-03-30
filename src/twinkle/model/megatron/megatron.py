@@ -1,23 +1,23 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 import asyncio
-import inspect
 import json
 import logging
-import numpy as np
 import os
 import random
 import re
 import threading
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Generator, List, Literal, Optional, Tuple, Type, Union
+
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from dataclasses import dataclass, field
 from peft import LoraConfig, PeftConfig, PeftModel, get_peft_model
 from peft.tuners.lora import Linear as LoraLinear
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
-from transformers import AutoConfig, PretrainedConfig
-from typing import Any, Callable, Dict, Generator, List, Literal, Optional, Tuple, Type, Union
+from transformers import PretrainedConfig
 
 import twinkle
 import twinkle.metric
@@ -34,7 +34,7 @@ from twinkle.model.optimizer_group import BaseOptimizerGroup, TrainStatus
 from twinkle.patch import Patch, apply_patch
 from twinkle.processor import InputProcessor
 from twinkle.template import Template
-from twinkle.utils import construct_class, exists, selective_log_softmax
+from twinkle.utils import construct_class, selective_log_softmax
 from .strategy import MegatronStrategy
 
 
@@ -73,29 +73,6 @@ class MegatronOptimizerGroup(BaseOptimizerGroup):
 
 
 _default_adapter_name = ''
-
-_BASE_LAYER_SUFFIXES = [
-    '.q_proj.weight',
-    '.q_proj.bias',
-    '.k_proj.weight',
-    '.k_proj.bias',
-    '.v_proj.weight',
-    '.v_proj.bias',
-    '.o_proj.weight',
-    '.o_proj.bias',
-    '.gate_proj.weight',
-    '.up_proj.weight',
-    '.down_proj.weight',
-    '.mlp.gate.weight',
-    '.mlp.gate.bias',
-    '.mlp.gate.e_score_correction_bias',
-    '.in_proj_qkv.weight',
-    '.in_proj_z.weight',
-    '.in_proj_a.weight',
-    '.in_proj_b.weight',
-    '.out_proj.weight',
-    '.conv1d.weight',
-]
 
 
 def _add_base_layer_suffix(params):
@@ -141,7 +118,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         **kwargs,
     ):
         requires('megatron_core')
-        from .args import TwinkleMegatronArgs, get_args, set_args
+        requires('mcore_bridge')
         os.environ['TOKENIZERS_PARALLELISM'] = 'true'
         nn.Module.__init__(self)
         from twinkle.patch.megatron_peft import MegatronPeft
@@ -149,45 +126,24 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         self.model_id = model_id
         self.device_mesh = device_mesh
         self.mixed_precision = mixed_precision
-
         self._model_path = HubOperation.download_model(model_id)
-        self.hf_config = config or AutoConfig.from_pretrained(self._model_path)
         self.tokenizer_id = kwargs.get('tokenizer_id', self.model_id)
-
-        self._seed = kwargs.pop('seed', None) or int(os.environ.get('TWINKLE_SEED', 42))
         self._default_tokenizer = None
         self.use_distributed_optimizer = kwargs.get('use_distributed_optimizer', True)
         self.variable_seq_lengths = kwargs.get('variable_seq_lengths', False)
         torch_util.set_device()
+        self._try_init_process_group()
 
-        self.strategy = MegatronStrategy(self.device_mesh, mixed_precision=mixed_precision, **kwargs)
-
-        # Determine params_dtype and activation checkpointing kwargs
-        params_dtype = torch.bfloat16
-        if self.mixed_precision == 'fp16':
-            params_dtype = torch.float16
-        elif self.mixed_precision == 'no':
-            params_dtype = torch.float32
-
-        ac_kwargs = {
+        kwargs.update({
             'recompute_granularity': recompute_granularity,
             'recompute_modules': recompute_modules,
             'recompute_method': recompute_method,
             'recompute_num_layers': recompute_num_layers,
-        }
-
-        # Initialize TwinkleMegatronArgs BEFORE creating the model
-        args = TwinkleMegatronArgs.from_hf_config(
-            self.hf_config,
-            model_dir=self._model_path,
-            device_mesh=self.device_mesh,
-            params_dtype=params_dtype,
-            sequence_parallel=self.strategy.sequence_parallel,
-            **ac_kwargs,
-        )
-        set_args(args)
-        self._initialized = False
-        self.model: List[nn.Module] = self._create_megatron_model(load_weights, **kwargs)
+        })
+        seed = kwargs.pop('seed', None) or int(os.environ.get('TWINKLE_SEED', 42))
+        self.strategy = MegatronStrategy(self._model_path, self.device_mesh, mixed_precision=mixed_precision,
+                                         seed=seed, **kwargs)
+        self.model: List[nn.Module] = self.strategy.create_megatron_model(load_weights)
 
         self._model_wrapped = False
         # This correctly handles vocab sharding in Tensor Parallelism
@@ -205,30 +161,6 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
             processor=InputProcessor(self.device_mesh, framework='megatron'),
             _device_mesh=self.device_mesh,
         )
-
-    def _create_megatron_model(
-        self,
-        load_weights: bool = True,
-        **kwargs,
-    ) -> List[nn.Module]:
-        from .args import get_args
-        args = get_args()
-        self.initialize(**kwargs)
-
-        model = args.create_model()
-        if load_weights:
-            bridge = self._bridge
-            for _model in model:
-                bridge.load_weights(_model, args.model_dir)
-
-        if dist.is_initialized():
-            dist.barrier()
-
-        _models = []
-        for _model in model:
-            _model = self._move_model_to_gpu(_model)
-            _models.append(_model)
-        return _models
 
     @staticmethod
     def _move_model_to_gpu(model: nn.Module) -> nn.Module:
@@ -809,7 +741,6 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         )
 
         # Ensure each model chunk has ddp_config attached (required by Megatron optimizer)
-        from megatron.core.distributed import DistributedDataParallelConfig
         model_chunks = self.model
         for model_chunk in model_chunks:
             assert hasattr(model_chunk, 'ddp_config')
@@ -1241,7 +1172,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
 
     def _merge_lora_adapters(self, adapter_name: str = 'default'):
         """Merge LoRA adapters into base model weights."""
-        from .tuners.lora import LoraParallelLinear
+        from mcore_bridge import LoraParallelLinear
         with torch.no_grad():
             for model in self.strategy.unwrap_model(self.model):
                 for module in model.modules():
@@ -1250,7 +1181,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
 
     def _unmerge_lora_adapters(self):
         """Unmerge LoRA adapters to restore training state."""
-        from .tuners.lora import LoraParallelLinear
+        from mcore_bridge import LoraParallelLinear
         with torch.no_grad():
             for model in self.strategy.unwrap_model(self.model):
                 for module in model.modules():
@@ -1506,52 +1437,9 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
 
         return expr
 
-    def initialize(self, **kwargs) -> None:
-        if self._initialized:
-            return
-
-        from megatron.core import parallel_state
-        from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
-
-        from .args import get_args
-        self._try_init_process_group()
-        args = get_args()
-        init_kwargs = {
-            'tensor_model_parallel_size': args.tensor_model_parallel_size,
-            'pipeline_model_parallel_size': args.pipeline_model_parallel_size,
-            'context_parallel_size': args.context_parallel_size,
-            'virtual_pipeline_model_parallel_size': args.virtual_pipeline_model_parallel_size,
-            'expert_model_parallel_size': args.expert_model_parallel_size,
-        }
-
-        if args.order:
-            init_kwargs['order'] = args.order
-
-        if exists('megatron_core>=0.13'):
-            init_kwargs['expert_tensor_parallel_size'] = args.expert_tensor_parallel_size
-
-        # Filter out kwargs that are not valid for initialize_model_parallel
-        # Dynamically check the signature to exclude unsupported parameters
-        valid_params = set(inspect.signature(parallel_state.initialize_model_parallel).parameters.keys())
-        filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_params}
-        init_kwargs.update(filtered_kwargs)
-        parallel_state.initialize_model_parallel(**init_kwargs)
-        model_parallel_cuda_manual_seed(self._seed)
-
-        self._parallel_state = parallel_state
-        self._initialized = True
-
     @property
     def _bridge(self) -> 'GPTBridge':
-        if not hasattr(self, '_bridge_instance'):
-            from .args import get_args
-            from .model import get_megatron_model_meta
-            args = get_args()
-            megatron_model_meta = get_megatron_model_meta(args.hf_model_type)
-            assert megatron_model_meta is not None, f'Model: {args.hf_model_type} is not supported.'
-            self._bridge_instance = megatron_model_meta.bridge_cls()
-
-        return self._bridge_instance
+        return self.strategy.config.bridge
 
     # ── Checkpoint Engine (from CheckpointEngineMixin) ──────────────────
     # prepare_checkpoint_engine, init_checkpoint_process_group, and
@@ -1583,9 +1471,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         # Trim any tensor whose dim-0 equals padded_vocab_size back to
         # org_vocab_size — this is shape-based, not name-based, so it works
         # regardless of the model architecture's naming convention.
-        from .args import get_args
-        args = get_args()
-        org_vocab_size = getattr(self.hf_config, 'vocab_size', args.padded_vocab_size)
+        org_vocab_size = getattr(self.hf_config, 'vocab_size', self.strategy.config.padded_vocab_size)
         _padded_vocab_size = args.padded_vocab_size
 
         def _trim_vocab(name, tensor):

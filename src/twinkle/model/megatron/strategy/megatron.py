@@ -1,7 +1,8 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
+from typing import List, Literal, Optional, Dict, Any
+
 import torch
 import torch.nn as nn
-from typing import List, Literal, Optional
 
 from twinkle import DeviceMesh
 
@@ -10,16 +11,43 @@ class MegatronStrategy:
 
     def __init__(
         self,
+        model_dir,
         device_mesh: Optional[DeviceMesh] = None,
         use_distributed_optimizer: bool = True,
         mixed_precision: Literal['no', 'fp16', 'bf16'] = 'bf16',
-        params_dtype: Optional[str] = None,
+        seed: int = 42,
         **kwargs,
     ):
+        from megatron.core import mpu
         self.device_mesh = device_mesh
         self.use_distributed_optimizer = use_distributed_optimizer
         self.mixed_precision = mixed_precision
+        self.model_dir = model_dir
+        self._seed = seed
+        # Determine params_dtype and activation checkpointing kwargs
+        params_dtype = torch.bfloat16
+        if self.mixed_precision == 'fp16':
+            params_dtype = torch.float16
+        elif self.mixed_precision == 'no':
+            params_dtype = torch.float32
         self._params_dtype = params_dtype
+        from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
+        model_parallel_cuda_manual_seed(self._seed)
+
+        parallel_kwargs = {
+            'tensor_model_parallel_size': self.device_mesh.tp_world_size or 1,
+            'pipeline_model_parallel_size': self.device_mesh.pp_world_size or 1,
+            'context_parallel_size': self.device_mesh.cp_world_size or 1,
+            'expert_model_parallel_size': self.device_mesh.ep_size or 1,
+            'expert_tensor_parallel_size': self.device_mesh.etp_world_size or 1,
+            'virtual_pipeline_model_parallel_size': self.device_mesh.vpp_size or 1,
+        }
+        self._initialized = True
+        mpu.initialize_model_parallel(
+            order=self.device_mesh.order,
+            **parallel_kwargs,
+        )
+        self.config = self.get_model_config(model_dir, parallel_kwargs, **kwargs)
 
     @property
     def sequence_parallel(self) -> bool:
@@ -144,33 +172,32 @@ class MegatronStrategy:
 
     def get_model_config(
         self,
-        hidden_size: int,
-        num_attention_heads: int,
-        num_layers: int,
-        ffn_hidden_size: Optional[int] = None,
-        num_query_groups: Optional[int] = None,
-        num_experts: Optional[int] = None,
-        moe_router_topk: int = 2,
+        model_dir: str,
+        parallel_kwargs: Dict[str, Any],
         **kwargs,
     ):
-        from megatron.core.transformer import TransformerConfig
-
-        config = TransformerConfig(
-            num_layers=num_layers,
-            hidden_size=hidden_size,
-            num_attention_heads=num_attention_heads,
-            num_query_groups=num_query_groups or num_attention_heads,
-            ffn_hidden_size=ffn_hidden_size or 4 * hidden_size,
+        from mcore_bridge import ModelConfig, hf_to_mcore_config
+        from transformers import AutoConfig
+        hf_config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
+        config_kwargs = hf_to_mcore_config(hf_config)
+        config_kwargs.update(kwargs)
+        config = ModelConfig(
             use_cpu_initialization=True,
             params_dtype=self.params_type,
-            tensor_model_parallel_size=self.device_mesh.tp_world_size or 1,
-            pipeline_model_parallel_size=self.device_mesh.pp_world_size or 1,
-            context_parallel_size=self.device_mesh.cp_world_size or 1,
-            expert_model_parallel_size=self.device_mesh.ep_size or 1,
             sequence_parallel=self.sequence_parallel,
-            num_moe_experts=num_experts,
-            moe_router_topk=moe_router_topk,
-            **kwargs,
+            **parallel_kwargs,
+            **config_kwargs,
         )
-
         return config
+
+    def create_megatron_model(
+        self,
+        load_weights: bool = True,
+    ) -> List[nn.Module]:
+        from mcore_bridge import get_mcore_model
+        mg_models = get_mcore_model(self.config)
+        if load_weights:
+            # Load weights
+            bridge = self.config.bridge
+            bridge.load_weights(mg_models, self.model_dir)
+        return mg_models
