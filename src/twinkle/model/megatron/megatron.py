@@ -325,7 +325,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         if self.variable_seq_lengths:
             seq_length = 4096
         else:
-            original_seq_length = inputs[0]['input_ids'].shape[1] * cp_size
+            original_seq_length = inputs[0]['input_ids'].shape[1] * (cp_size or 1)
             if cp_size > 1:
                 divisor = 2 * cp_size
             elif self.strategy.sequence_parallel and self.device_mesh.tp_world_size > 1:
@@ -1403,7 +1403,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
     # via NCCL; others consume the generator silently (rank=-1).
 
     @remote_function(dispatch='all', lazy_collect=True)
-    async def send_weights(
+    def send_weights(
         self,
         adapter_name: str = None,
         base_sync_done: bool = False,
@@ -1474,6 +1474,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
                 else:
                     yield from _raw_weights()
 
+
         is_sender = (engine.rank is not None and engine.rank == 0)
 
         if not is_sender:
@@ -1481,7 +1482,27 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
                 pass
             return
 
-        await engine.send_weights(weight_generator())
+        async def _send():
+            await engine.send_weights(weight_generator())
+
+        result_container = {'error': None}
+
+        def _run():
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(_send())
+                finally:
+                    loop.close()
+            except Exception as e:
+                result_container['error'] = e
+
+        thread = threading.Thread(target=_run)
+        thread.start()
+        thread.join()
+        if result_container['error'] is not None:
+            raise result_container['error']
 
     @remote_function(collect='first')
     def get_peft_config_dict(self, adapter_name: str = None) -> Optional[Dict[str, Any]]:

@@ -376,7 +376,7 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
         self._run_in_loop(self.engine.reset_prefix_cache())
 
     @remote_function(dispatch='all', lazy_collect=True)
-    async def receive_weights(
+    def receive_weights(
         self,
         base_sync_done: bool = False,
         peft_config: dict = None,
@@ -423,7 +423,7 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
                 # Base-model sync invalidates any previously synced LoRA.
                 self.engine.invalidate_synced_lora()
 
-        await _receive_and_load()
+        self._run_in_loop(_receive_and_load())
 
     def shutdown(self):
         """Gracefully shutdown the vLLM engine and background event loop.
