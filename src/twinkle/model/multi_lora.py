@@ -406,8 +406,8 @@ class MultiLora:
                         else:
                             target_modules = list(_config.target_modules)
 
-                        from .base import TwinkleModel
-                        _config.target_modules = TwinkleModel.get_target_modules(_module, target_modules)
+                        from .megatron import MegatronModel
+                        _config.target_modules = MegatronModel.get_target_modules(_module, target_modules)
                     _module = get_peft_model(_module, _config, lora_tenant.adapter_name)
 
                 for name, submodule in _module.named_modules():
