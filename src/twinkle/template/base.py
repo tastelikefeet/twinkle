@@ -362,16 +362,16 @@ class Template:
         """Check if an object is a Trajectory (has 'messages' key)."""
         return isinstance(obj, Mapping) and 'messages' in obj
 
-    def _get_trajectory_keys(self, trajectories: Mapping, is_columar: bool) -> List[str]:
+    def _get_trajectory_keys(self, trajectories: Mapping, is_columnar: bool) -> List[str]:
         """Get keys whose values are lists of Trajectories."""
         keys = []
-        if is_columar:
+        if is_columnar:
             for k, v in trajectories.items():
                 if isinstance(v, list) and v and self._is_trajectory(v[0]):
                     keys.append(k)
         else:
             for k, v in trajectories.items():
-                if isinstance(v, dict) and v and self._is_trajectory(v):
+                if v and self._is_trajectory(v):
                     keys.append(k)
         return keys
 
