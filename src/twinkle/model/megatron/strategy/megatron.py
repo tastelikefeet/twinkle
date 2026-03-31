@@ -129,7 +129,6 @@ class MegatronStrategy:
     def wrap_model(
         self,
         model: List[nn.Module],
-        use_distributed_optimizer: bool = True,
     ) -> List[nn.Module]:
         if self.device_mesh.world_size <= 1:
             from megatron.core.distributed import DistributedDataParallelConfig
@@ -143,7 +142,7 @@ class MegatronStrategy:
             return model
 
         self._check_device_mesh()
-        return self._wrap_with_megatron_ddp(model, use_distributed_optimizer, self.ddp_config)
+        return self._wrap_with_megatron_ddp(model, self.use_distributed_optimizer, self.ddp_config)
 
     def unwrap_model(self, model: List[nn.Module]) -> List[nn.Module]:
         from megatron.core.distributed import DistributedDataParallel as MegatronDDP

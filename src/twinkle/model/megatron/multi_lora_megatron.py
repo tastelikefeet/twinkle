@@ -79,6 +79,7 @@ class MultiLoraMegatronModel(MegatronModel):
             config=self.hf_config,
             ddp_config=ddp_config or {},
             seed=seed,
+            use_distributed_optimizer=self.use_distributed_optimizer,
             **kwargs)
         self.model: List[nn.Module] = self.strategy.create_megatron_model(load_weights)
         MegatronPeft().__call__()
@@ -253,6 +254,11 @@ class MultiLoraMegatronModel(MegatronModel):
     def set_processor(self, processor_cls: Union[Type[InputProcessor], str, Callable], **kwargs):
         self._check_adapter_valid(kwargs.get('adapter_name'))
         super().set_processor(processor_cls, **kwargs)
+
+    @remote_function(dispatch='all')
+    def set_optimizer(self, optimizer_cls: Union[Optimizer, Type[Optimizer], str], **kwargs):
+        kwargs.pop('use_distributed_optimizer', None)
+        super().set_optimizer(optimizer_cls, **kwargs)
 
     @remote_function()
     def add_metric(self, metric_cls: Union[Metric, str], is_training: Optional[bool] = None, **kwargs):

@@ -130,6 +130,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
             config=self.hf_config,
             ddp_config=ddp_config or {},
             seed=seed,
+            use_distributed_optimizer=self.use_distributed_optimizer,
             **kwargs)
         self.model: List[nn.Module] = self.strategy.create_megatron_model(load_weights)
 
@@ -667,7 +668,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
 
         # Build optimizer config
         lr = kwargs.pop('lr', 1e-4)
-        use_distributed_optimizer: bool = kwargs.pop('use_distributed_optimizer', False)
+        self.use_distributed_optimizer: bool = kwargs.pop('use_distributed_optimizer', self.use_distributed_optimizer)
 
         opt_config = OptimizerConfig(
             optimizer='adam',
@@ -679,7 +680,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
             adam_eps=kwargs.pop('adam_eps', 1e-8),
             clip_grad=kwargs.pop('clip_grad', 1.0),
             bf16=kwargs.pop('bf16', True),
-            use_distributed_optimizer=use_distributed_optimizer,
+            use_distributed_optimizer=self.use_distributed_optimizer,
             overlap_param_gather=kwargs.pop('overlap_param_gather', False),
             log_num_zeros_in_grad=kwargs.pop('log_num_zeros_in_grad', False),
             **kwargs,
