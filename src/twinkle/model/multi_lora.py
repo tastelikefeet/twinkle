@@ -172,8 +172,11 @@ class MultiLora:
         if target_modules is None:
             return False
 
-        if isinstance(target_modules, list) and len(target_modules) == 0:
+        if isinstance(target_modules, (list, set)) and len(target_modules) == 0:
             return False
+
+        if isinstance(target_modules, (list, set)) and len(target_modules) == 1 and next(iter(target_modules)) == 'all-linear':
+            return True
 
         if target_modules == 'all-linear':
             return True
@@ -439,7 +442,7 @@ class MultiLora:
             else:
                 _store_weights(self.module)
 
-    def load_lora_converter(self, name, parameter):
+    def load_lora_converter(self, name, parameter, **kwargs):
 
         def convert_param(name, parameter):
             if 'embedding_A' in name:
@@ -490,6 +493,7 @@ class MultiLora:
             name = name.replace(f'.{_lora.adapter_name}.', '.')
             return name, _param
         else:
+            breakpoint()
             return None, None
 
     def set_state_dict(self, tenant_adapter_name, state_dict):

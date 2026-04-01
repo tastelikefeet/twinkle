@@ -201,15 +201,15 @@ class MultiLoraMegatronModel(MegatronModel):
             checkpoint_dir = HubOperation.download_model(name, token=token)
         else:
             checkpoint_dir = os.path.join(output_dir, name)
-        bridge = self._bridge
+        bridge = self.strategy.bridge
         with self.multi_adapter.save_context(kwargs.get('adapter_name')) as adapter_name:
-            for _model in self.strategy.unwrap_model(self.model):
-                bridge.load_weights(
-                    _model,
-                    checkpoint_dir,
-                    peft_format=True,
-                    adapter_name=adapter_name,
-                    lora_converter=self.multi_adapter.load_lora_converter)
+            model = self.strategy.unwrap_model(self.model)
+            bridge.load_weights(
+                model,
+                checkpoint_dir,
+                peft_format=True,
+                adapter_name=adapter_name,
+                converter=self.multi_adapter.load_lora_converter)
 
         if dist.is_initialized():
             dist.barrier()

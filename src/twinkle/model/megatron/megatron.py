@@ -1161,9 +1161,8 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
 
         # Get the model (unwrap if DDP wrapped)
         model = self.strategy.unwrap_model(self.model)
-
         self.strategy.bridge.save_weights(
-            model, output_dir, peft_format=is_peft_format, lora_converter=lora_converter)
+            model, output_dir, peft_format=is_peft_format, adapter_name=adapter_name, converter=lora_converter)
 
         # Save config on rank 0 only
         if dp_rank == 0:
@@ -1240,6 +1239,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
             target_device=None,  # Keep on current device for IPC transfer
             only_master_rank=False,  # All ranks participate in weight sync
             peft_format=bool(adapter_name),
+            adapter_name=adapter_name if adapter_name else None,
             tqdm_desc='Weight sync: ',
         )
 
@@ -1383,7 +1383,6 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         adapter_name: str = None,
         base_sync_done: bool = False,
         merge_and_sync: bool = False,
-        add_base_layer_path: bool = True,
         model_keys: List[str] = None,
     ):
         if adapter_name is None:
@@ -1435,6 +1434,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
                             continue
                         if 'lora' not in name:
                             continue
+                        name = name.replace('base_model.model.', '')
                         yield name, tensor
         else:
             # Need to synchronize the base model
@@ -1449,7 +1449,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
                     yield name, tensor
 
             def weight_generator():
-                if is_peft_format and (not merge_and_sync) and add_base_layer_path:
+                if is_peft_format and (not merge_and_sync):
                     yield from _add_base_layer_suffix(_raw_weights())
                 else:
                     yield from _raw_weights()
