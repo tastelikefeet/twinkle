@@ -373,6 +373,10 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
     @remote_function(dispatch='all', collect='first')
     def reset_prefix_cache(self):
         self._run_in_loop(self.engine.reset_prefix_cache())
+    
+    @remote_function(dispatch='all', collect='first')
+    def get_state_keys(self):
+        return self._run_in_loop(self.engine.get_state_keys())
 
     @remote_function(dispatch='all', lazy_collect=True)
     def receive_weights(

@@ -858,7 +858,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
                 bridge.load_weights(
                     _model,
                     checkpoint_dir,
-                    is_peft_format=(adapter_name != _default_adapter_name),
+                    peft_format=(adapter_name != _default_adapter_name),
                 )
 
         if dist.is_initialized():
@@ -1163,7 +1163,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         model = self.strategy.unwrap_model(self.model)
 
         self.strategy.bridge.save_weights(
-            model, output_dir, is_peft_format=is_peft_format, adapter_name=adapter_name, lora_converter=lora_converter)
+            model, output_dir, peft_format=is_peft_format, lora_converter=lora_converter)
 
         # Save config on rank 0 only
         if dp_rank == 0:
@@ -1384,6 +1384,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         base_sync_done: bool = False,
         merge_and_sync: bool = False,
         add_base_layer_path: bool = True,
+        model_keys: List[str] = None,
     ):
         if adapter_name is None:
             adapter_name = self._get_default_group()
@@ -1400,13 +1401,15 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
                     _model.unmerge_adapter()
 
         def _add_base_layer_suffix(params):
-            _BASE_LAYER_SUFFIXES = ['weight', 'bias']
             for name, param in params:
-                for suffix in _BASE_LAYER_SUFFIXES:
-                    if name.endswith(suffix):
-                        attr = suffix.rsplit('.', 1)[-1]  # 'weight' or 'bias'
-                        name = f'{name[:-len(attr)]}base_layer.{attr}'
-                        break
+                if name.endswith('.weight'):
+                    base_layer_name = f'{name[:-7]}.base_layer.weight'
+                    if base_layer_name in model_keys or not model_keys:
+                        name = base_layer_name
+                elif name.endswith('.bias'):
+                    base_layer_name = f'{name[:-5]}.base_layer.bias'
+                    if base_layer_name in model_keys or not model_keys:
+                        name = base_layer_name
                 yield name, param
 
         is_peft_format = (adapter_name != _default_adapter_name)

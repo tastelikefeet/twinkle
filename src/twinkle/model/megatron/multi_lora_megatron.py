@@ -207,7 +207,7 @@ class MultiLoraMegatronModel(MegatronModel):
                 bridge.load_weights(
                     _model,
                     checkpoint_dir,
-                    True,
+                    peft_format=True,
                     adapter_name=adapter_name,
                     lora_converter=self.multi_adapter.load_lora_converter)
 

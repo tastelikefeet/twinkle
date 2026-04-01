@@ -1,7 +1,7 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 # Adapted from https://github.com/volcengine/verl/blob/main/verl/checkpoint_engine/base.py
 import time
-from typing import Optional
+from typing import Optional, List
 
 from twinkle import Platform, get_logger
 from .base import CheckpointEngine
@@ -64,6 +64,7 @@ class CheckpointEngineManager:
         # Cached peft_config dict for LoRA-only sync.
         # Fetched lazily from the model on first LoRA sync.
         self._peft_config: dict | None = None
+        self._model_keys: Optional[List[str]] = None
 
     @staticmethod
     def decide_backend_engine(platform: Optional[str] = None) -> 'CheckpointEngine':
@@ -117,8 +118,26 @@ class CheckpointEngineManager:
             if self._peft_config is None:
                 self._peft_config = self.model.get_peft_config_dict()
             peft_config = self._peft_config
+        
+        if self._model_keys is None:
+            if hasattr(self.sampler, 'get_state_keys'):
+                self._model_keys = self.sampler.get_state_keys()
 
-        model_result = self.model.send_weights(base_sync_done=self.base_sync_done, merge_and_sync=merge_and_sync)
+            if self._model_keys is None:
+                self._model_keys = []
+
+            # vLLM may have grouped params
+            _STACKED_MAPPINGS = {
+                'qkv_proj': ('q_proj', 'k_proj', 'v_proj'),
+                'gate_up_proj': ('gate_proj', 'up_proj'),
+            }
+            for key in self._model_keys:
+                for merged, individuals in _STACKED_MAPPINGS.items():
+                    if merged in key:
+                        for ind in individuals:
+                            self._model_keys.append(key.replace(merged, ind))
+
+        model_result = self.model.send_weights(base_sync_done=self.base_sync_done, merge_and_sync=merge_and_sync, model_keys=self._model_keys)
         sampler_result = self.sampler.receive_weights(base_sync_done=self.base_sync_done, peft_config=peft_config)
         model_result()
         sampler_result()
