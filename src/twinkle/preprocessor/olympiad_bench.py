@@ -52,7 +52,11 @@ class OlympiadBenchProcessor(Preprocessor):
             self.system = self.system_prompt_zh if language == 'zh' else self.system_prompt_en
 
     def _collect_images(self, row: Dict[str, Any]) -> List[Any]:
-        """Collect all non-null images from row."""
+        """Collect all non-null images from row.
+
+        Note: Images are kept as-is (PIL or bytes) since preprocessing is lazy.
+        Conversion to bytes happens only when needed for serialization.
+        """
         images = []
         for i in range(1, 10):
             img = row.get(f'image_{i}')
@@ -129,9 +133,5 @@ class OlympiadBenchProcessor(Preprocessor):
             messages=messages,
             user_data=[
                 ('ground_truth', ground_truth),
-                ('solution', solution_text),
-                ('is_multiple_answer', is_multiple_answer),
-                ('subject', subject),
-                ('unit', unit),
             ],
         )
