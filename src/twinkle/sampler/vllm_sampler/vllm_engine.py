@@ -495,7 +495,6 @@ class VLLMEngine(BaseSamplerEngine):
 
             async def _dict_iter():
                 for item in weights.items():
-                    breakpoint()
                     yield item
 
             weight_aiter = _dict_iter()
@@ -505,7 +504,6 @@ class VLLMEngine(BaseSamplerEngine):
             # sync generator / iterable
             async def _sync_iter():
                 for item in weights:
-                    breakpoint()
                     yield item
 
             weight_aiter = _sync_iter()
@@ -584,8 +582,6 @@ class VLLMEngine(BaseSamplerEngine):
             """Re-inject the peeked first tensor, then yield the rest."""
             yield first_name, first_tensor
             async for item in weight_aiter:
-                if 'qkv_proj' in item[0]:
-                    breakpoint()
                 yield item
 
         offset = 0

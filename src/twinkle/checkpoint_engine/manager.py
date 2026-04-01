@@ -128,7 +128,7 @@ class CheckpointEngineManager:
 
             # vLLM may have grouped params
             _STACKED_MAPPINGS = {
-                'qkv_proj': ('q_proj', 'k_proj', 'v_proj'),
+                'qkv_proj': ('q_proj', 'k_proj', 'v_proj', 'q', 'k', 'v'),
                 'gate_up_proj': ('gate_proj', 'up_proj'),
             }
             for key in self._model_keys:
