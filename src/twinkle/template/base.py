@@ -457,7 +457,6 @@ class Template:
             add_generation_prompt=add_generation_prompt,
             return_tensors='pt',
             **kwargs)
-        breakpoint()
         return inputs
 
     def _encode_messages(self, trajectory: Trajectory, add_generation_prompt: bool = False, **kwargs) -> InputFeature:

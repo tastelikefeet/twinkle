@@ -22,7 +22,7 @@ from twinkle.processor import InputProcessor
 from twinkle.reward.olympiad_bench import (
     OlympiadBenchAccuracyReward,
     OlympiadBenchFormatReward,
-    OlympiadBenchReasoningReward,
+    OlympiadBenchQualityReward,
 )
 from twinkle.sampler import vLLMSampler
 from twinkle.template import Template
@@ -56,7 +56,7 @@ SAVE_STEPS = int(os.environ.get('SAVE_STEPS', 50))
 SUBSETS = [
     'OE_MM_maths_zh_CEE',
     'OE_MM_physics_zh_CEE',
-    'OE_TO_maths_zh_CEE',
+    # 'OE_TO_maths_zh_CEE',
 ]
 
 
@@ -90,29 +90,37 @@ def create_olympiad_dataset():
 
 def compute_rewards(
     trajectories: List[Dict[str, Any]],
-) -> Tuple[List[float], List[float], List[float], List[float]]:
+) -> Tuple[List[float], Dict[str, List[float]]]:
     """Compute rewards for trajectories.
 
+    Three core rewards, all normalized to [0, 1]:
+        - Accuracy: Answer correctness (weight: 2.0)
+        - Format: Answer formatting and consistency (weight: 1.0)
+        - Quality: Reasoning, length, repetition (weight: 1.0)
+
     Returns:
-        total_rewards: Sum of all reward components
-        accuracy_rewards: 1.0 if answer is correct
-        format_rewards: 1.0 if answer is in \\boxed{} format
-        reasoning_rewards: Score based on reasoning quality
+        total_rewards: Weighted sum normalized to [0, 1]
+        reward_dict: Individual reward components for logging
     """
-    accuracy_reward_fn = OlympiadBenchAccuracyReward()
-    format_reward_fn = OlympiadBenchFormatReward()
-    reasoning_reward_fn = OlympiadBenchReasoningReward()
+    accuracy_fn = OlympiadBenchAccuracyReward()
+    format_fn = OlympiadBenchFormatReward()
+    quality_fn = OlympiadBenchQualityReward()
 
-    accuracy_rewards = accuracy_reward_fn(trajectories)
-    format_rewards = format_reward_fn(trajectories)
-    reasoning_rewards = reasoning_reward_fn(trajectories)
+    accuracy = accuracy_fn(trajectories)
+    format_r = format_fn(trajectories)
+    quality = quality_fn(trajectories)
 
-    # Weighted sum: accuracy is most important
+    # Weights: accuracy most important, format and quality equal
     total_rewards = [
-        2.0 * a + 0.5 * f + 0.5 * r
-        for a, f, r in zip(accuracy_rewards, format_rewards, reasoning_rewards)
+        (2.0 * a + 1.0 * f + 1.0 * q) / 4.0
+        for a, f, q in zip(accuracy, format_r, quality)
     ]
-    return total_rewards, accuracy_rewards, format_rewards, reasoning_rewards
+
+    return total_rewards, {
+        'accuracy': accuracy,
+        'format': format_r,
+        'quality': quality,
+    }
 
 
 def main():
@@ -228,17 +236,13 @@ def main():
                 all_completion_lengths.append(len(sequence.tokens))
 
         # Compute rewards
-        total_rewards, accuracy_rewards, format_rewards, reasoning_rewards = compute_rewards(
-            all_input_data
-        )
+        total_rewards, reward_dict = compute_rewards(all_input_data)
 
         metrics.accumulate(
             completion_lengths=all_completion_lengths,
             rewards={
                 'total': total_rewards,
-                'accuracy': accuracy_rewards,
-                'format': format_rewards,
-                'reasoning': reasoning_rewards,
+                **{k: v for k, v in reward_dict.items()},
             },
         )
 

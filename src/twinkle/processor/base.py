@@ -80,10 +80,13 @@ class InputProcessor:
         if self.framework == 'transformers':
             return inputs[0]
         else:
+            for _input in inputs:
+                if 'position_ids' in _input and _input['position_ids'].dim() > 2:
+                    # megatron needs 3, 1, N
+                    _input['position_ids'] = _input['position_ids'][1:]
             return inputs
 
     def prepare_inputs(self, inputs: Union[List[InputFeature], InputFeature], **kwargs) -> List[InputFeature]:
-
         def to_tensor(_input):
             import torch
             for key in list(_input.keys()):
@@ -282,7 +285,6 @@ class InputProcessor:
             max_seqlen_q=max_length,
             max_seqlen_kv=max_length,
             qkv_format='thd')
-
         if torch_util.is_torch_npu_available():
             packed.cu_seqlens_q_padded = cu_seqlens
             packed.cu_seqlens_kv_padded = cu_seqlens
@@ -294,6 +296,8 @@ class InputProcessor:
         is_padding_free = False
         for _input in inputs:
             position_ids = _input['position_ids']
+            if position_ids.dim() > 2:
+                position_ids = position_ids[:1]
             if position_ids.dim() == 1:
                 position_ids = position_ids.unsqueeze(0)
             # Each row may contains multiple sequences
@@ -301,8 +305,8 @@ class InputProcessor:
                 _position_ids = position_ids[i]
                 # multiple 0/1, multiple sequences
                 zero_count = torch.sum(_position_ids == 0).item()
-                one_count = torch.sum(_position_ids == 1).item()
-                is_padding_free = is_padding_free or (zero_count > 1 and one_count > 1)
+                ten_count = torch.sum(_position_ids == 10).item()
+                is_padding_free = is_padding_free or (zero_count > 1 and ten_count > 1)
         return is_padding_free
 
     @staticmethod
@@ -348,6 +352,11 @@ class InputProcessor:
 
         result = {}
 
+        def is_mm_position_ids(position_ids):
+            if position_ids is None:
+                return False
+            return position_ids.dim() > 1 and position_ids.shape[0] > 1
+
         padding_free = self.padding_free or self._any_packing(inputs)
         if padding_free:
             for key in text_keys:
@@ -355,6 +364,9 @@ class InputProcessor:
                 if key == 'attention_mask':
                     # attention_mask is not needed
                     continue
+                if key == 'position_ids' and is_mm_position_ids(values[0]):
+                    # mrope needs to cat the sequence and unsequeeze the middle dim
+                    value = torch.cat(values, dim=2).unsqueeze(1)
                 if isinstance(values[0], torch.Tensor):
                     value = torch.cat(values, dim=0).unsqueeze(0)
                 else:
@@ -366,6 +378,9 @@ class InputProcessor:
                 values = [item[key] for item in text_inputs]
                 if self.framework == 'megatron' and key == 'attention_mask':
                     result[key] = self._create_4d_attention_mask(values)
+                elif key == 'position_ids' and is_mm_position_ids(values[0]):
+                    result[key] = InputProcessor._pad_sequence(values, self.padding_map[key], self.padding_side)
+                    result[key] = result[key].transpose(0, 1)
                 elif isinstance(values[0], torch.Tensor):
                     result[key] = InputProcessor._pad_sequence(values, self.padding_map[key], self.padding_side)
                 else:
@@ -405,7 +420,12 @@ class InputProcessor:
             for i in range(0, len(inputs), micro_batch_size):
                 output = {}
                 for key in keys:
-                    output[key] = res[key][i:i + micro_batch_size]
+                    if key == 'position_ids' and res[key].dim() > 2:
+                        output[key] = res[key]
+                    elif key in self.VLM_CONCAT_FIELDS:
+                        output[key] = res[key]
+                    else:
+                        output[key] = res[key][i:i + micro_batch_size]
                 outputs.append(output)
             return outputs
 

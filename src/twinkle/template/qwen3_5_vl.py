@@ -1,5 +1,7 @@
 import inspect
+from copy import copy
 
+import numpy as np
 import torch
 from PIL import Image
 from typing import Any, Dict, List, Optional, Union
@@ -96,10 +98,24 @@ class Qwen3_5Template(Template):
                                              model.config)
         return {'inputs_embeds': inputs_embeds}
 
+    @staticmethod
+    def to_tensor(_input):
+        import torch
+        for key in list(_input.keys()):
+            value = _input[key]
+            if isinstance(value, np.ndarray):
+                value = torch.from_numpy(value)
+            elif isinstance(value, list) and isinstance(value[0], (int, float, np.number)):
+                value = torch.tensor(value)
+            _input[key] = value
+        return _input
+
     def set_mm_position_ids(self, input_feature: InputFeature):
         kwargs = {}
-        attention_mask = input_feature.get('attention_mask')
-        input_ids = input_feature['input_ids']
+        input_feature = copy(input_feature)
+        input_feature = self.to_tensor(input_feature)
+        attention_mask = input_feature.get('attention_mask').unsqueeze(0)
+        input_ids = input_feature['input_ids'].unsqueeze(0)
         if 'mm_token_type_ids' in inspect.signature(self.rope_index_func).parameters:
             mm_token_type_ids = torch.zeros_like(input_ids)
             mm_token_type_ids[input_ids == self.processor.image_token_id] = 1
