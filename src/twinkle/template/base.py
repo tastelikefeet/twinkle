@@ -34,6 +34,7 @@ class Template:
                  max_length: Optional[int] = 8192,
                  truncation_strategy: Literal['raise', 'left', 'right', 'split'] = 'raise',
                  default_system: Optional[str] = None,
+                 enable_thinking: bool = True,
                  **kwargs):
         model_id = HubOperation.download_model(model_id, ignore_model=True)
         if os.path.exists(os.path.join(model_id, 'preprocessor_config.json')):
@@ -47,6 +48,7 @@ class Template:
 
         self.use_chat_template = use_chat_template
         self.max_length = max_length
+        self.enable_thinking = enable_thinking
         self.truncation_strategy = truncation_strategy
         self.default_system = default_system
         self._test_support_assistant_tokens_mask()
@@ -442,6 +444,8 @@ class Template:
         tools = [dict(tool) for tool in trajectory.get('tools', [])]
         if 'tokenize' not in kwargs:
             kwargs['tokenize'] = True
+        if 'enable_thinking' not in kwargs:
+            kwargs['enable_thinking'] = self.enable_thinking
         inputs = self.processor.apply_chat_template(
             messages,
             tools=tools,
@@ -450,6 +454,7 @@ class Template:
             add_generation_prompt=add_generation_prompt,
             return_tensors='pt',
             **kwargs)
+        breakpoint()
         return inputs
 
     def _encode_messages(self, trajectory: Trajectory, add_generation_prompt: bool = False, **kwargs) -> InputFeature:

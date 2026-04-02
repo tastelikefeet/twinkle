@@ -1,90 +1,86 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
-"""Reward functions for OlympiadBench math/physics problems."""
+"""Reward functions for OlympiadBench math/physics problems.
+
+Three core rewards, all normalized to [0, 1]:
+- Accuracy: Answer correctness with partial credit
+- Format: Answer formatting and consistency
+- Quality: Reasoning structure, length, and repetition
+"""
+import math
 import re
 from typing import Any, Dict, List
 
 from twinkle.reward.base import Reward
 
 
+def _get_completion(trajectory: Dict[str, Any]) -> str:
+    """Extract assistant completion from trajectory."""
+    messages = trajectory.get('messages', [])
+    for msg in reversed(messages):
+        if msg.get('role') == 'assistant':
+            content = msg.get('content', '')
+            if isinstance(content, list):
+                return ''.join(
+                    block.get('text', '') for block in content
+                    if isinstance(block, dict) and block.get('type') == 'text'
+                )
+            return content
+    return ''
+
+
+def _extract_boxed_answers(text: str) -> List[str]:
+    """Extract all answers from \\boxed{} in text."""
+    matches = re.findall(r'\\boxed\{([^}]+)\}', text)
+    return [m.replace(' ', '').strip() for m in matches]
+
+
+def _normalize_answer(answer: str) -> str:
+    """Normalize answer string for comparison."""
+    answer = re.sub(r'\s+', '', answer)
+    answer = re.sub(r'(cm|mm|m|kg|g|s|°|度|米|千克|克|秒)', '', answer, flags=re.IGNORECASE)
+    return answer.strip()
+
+
+def _is_numeric_match(pred: str, gt: str, tolerance: float = 0.01) -> bool:
+    """Check if two values match numerically."""
+    try:
+        pred_val = float(pred)
+        gt_val = float(gt)
+        if gt_val == 0:
+            return abs(pred_val) < tolerance
+        return abs(pred_val - gt_val) / abs(gt_val) < tolerance
+    except (ValueError, OverflowError):
+        return False
+
+
+def _numeric_similarity(pred: str, gt: str) -> float:
+    """Return similarity score [0, 1] for numeric values."""
+    try:
+        pred_val = float(pred)
+        gt_val = float(gt)
+        if gt_val == 0:
+            return 1.0 if abs(pred_val) < 0.01 else 0.0
+        relative_error = abs(pred_val - gt_val) / abs(gt_val)
+        return math.exp(-5 * relative_error)
+    except (ValueError, OverflowError):
+        return 0.0
+
+
 class OlympiadBenchAccuracyReward(Reward):
-    """Accuracy reward for OlympiadBench: checks if model's answer matches ground truth.
+    """Accuracy reward with partial credit for close answers.
 
-    Extracts the answer from \\boxed{} format.
-    Handles multiple answers and numeric comparison with tolerance.
-    Returns 1.0 for correct, 0.0 for incorrect.
+    Returns:
+        1.0: Exact match
+        0.5-0.99: Close numeric match (partial credit)
+        0.0: Wrong answer
     """
-
-    @staticmethod
-    def extract_boxed_answers(text: str) -> List[str]:
-        """Extract all answers from \\boxed{} in text."""
-        # Look in the last 1000 chars for efficiency
-        text = text[-1000:] if len(text) > 1000 else text
-        # Find all boxed answers
-        matches = re.findall(r'\\boxed\{([^}]+)\}', text)
-        if matches:
-            # Clean and return all matches
-            return [m.replace(',', '').replace(' ', '').strip() for m in matches]
-        return []
-
-    @staticmethod
-    def normalize_answer(answer: str) -> str:
-        """Normalize answer string for comparison."""
-        # Remove common units and whitespace
-        answer = re.sub(r'\s+', '', answer)
-        answer = re.sub(r'(cm|mm|m|kg|g|s|°|度|米|千克|克|秒)', '', answer, flags=re.IGNORECASE)
-        return answer.strip()
-
-    @staticmethod
-    def is_numeric_match(pred: str, gt: str, tolerance: float = 1e-5) -> bool:
-        """Check if two values match numerically."""
-        try:
-            pred_val = float(pred)
-            gt_val = float(gt)
-            return abs(pred_val - gt_val) < tolerance * max(abs(gt_val), 1.0)
-        except (ValueError, OverflowError):
-            return False
-
-    def compare_answers(self, predicted: List[str], ground_truth: str, is_multiple: bool = False) -> bool:
-        """Compare predicted answers with ground truth."""
-        if not predicted or not ground_truth:
-            return False
-
-        # Parse ground truth (may have multiple answers separated by comma)
-        gt_parts = [self.normalize_answer(g.strip()) for g in ground_truth.split(',')]
-
-        # For single answer, just check the last predicted
-        if not is_multiple:
-            pred = self.normalize_answer(predicted[-1])
-            gt = gt_parts[0] if gt_parts else ''
-            # Try numeric comparison first
-            if self.is_numeric_match(pred, gt):
-                return True
-            return pred == gt
-
-        # For multiple answers, check if all gt answers are found
-        pred_normalized = [self.normalize_answer(p) for p in predicted]
-        for gt in gt_parts:
-            found = False
-            for pred in pred_normalized:
-                if self.is_numeric_match(pred, gt) or pred == gt:
-                    found = True
-                    break
-            if not found:
-                return False
-        return True
 
     def __call__(self, trajectories: List[Dict[str, Any]], **kwargs) -> List[float]:
         rewards = []
         for trajectory in trajectories:
-            messages = trajectory.get('messages', [])
-            # Get model completion (last assistant message)
-            completion = ''
-            for msg in reversed(messages):
-                if msg.get('role') == 'assistant':
-                    completion = msg.get('content', '')
-                    break
+            completion = _get_completion(trajectory)
+            predicted = _extract_boxed_answers(completion)
 
-            # Get ground truth and metadata from user_data
             user_data = trajectory.get('user_data', [])
             gt = ''
             is_multiple = False
@@ -94,85 +90,159 @@ class OlympiadBenchAccuracyReward(Reward):
                 elif item[0] == 'is_multiple_answer':
                     is_multiple = item[1]
 
-            # Extract predicted answers
-            predicted = self.extract_boxed_answers(completion)
+            if not predicted or not gt:
+                rewards.append(0.0)
+                continue
 
-            # Compare
-            correct = self.compare_answers(predicted, gt, is_multiple)
-            rewards.append(1.0 if correct else 0.0)
+            gt_parts = [_normalize_answer(g.strip()) for g in gt.split(',')]
+
+            if not is_multiple:
+                pred = _normalize_answer(predicted[-1])
+                gt_val = gt_parts[0] if gt_parts else ''
+
+                if pred == gt_val or _is_numeric_match(pred, gt_val):
+                    rewards.append(1.0)
+                else:
+                    sim = _numeric_similarity(pred, gt_val)
+                    rewards.append(sim * 0.5)
+            else:
+                pred_normalized = [_normalize_answer(p) for p in predicted]
+                correct_count = 0
+                for gt_val in gt_parts:
+                    for pred in pred_normalized:
+                        if pred == gt_val or _is_numeric_match(pred, gt_val):
+                            correct_count += 1
+                            break
+                rewards.append(correct_count / len(gt_parts) if gt_parts else 0.0)
 
         return rewards
 
 
 class OlympiadBenchFormatReward(Reward):
-    """Format reward: checks if output contains \\boxed{} answer format.
+    """Format reward: answer formatting and consistency.
 
-    Returns 1.0 if a valid boxed answer is present, 0.0 otherwise.
+    Combines:
+        - Has \\boxed{} answer (0.4)
+        - Answer at/near end (0.3)
+        - Single consistent answer (0.3)
+        - Penalize multiple conflicting answers
     """
 
     def __call__(self, trajectories: List[Dict[str, Any]], **kwargs) -> List[float]:
         rewards = []
         for trajectory in trajectories:
-            messages = trajectory.get('messages', [])
-            completion = ''
-            for msg in reversed(messages):
-                if msg.get('role') == 'assistant':
-                    completion = msg.get('content', '')
-                    break
-            has_boxed = bool(re.search(r'\\boxed\{[^}]+\}', completion))
-            rewards.append(1.0 if has_boxed else 0.0)
+            completion = _get_completion(trajectory)
+            score = 0.0
+
+            boxed_answers = _extract_boxed_answers(completion)
+
+            if boxed_answers:
+                score += 0.4
+
+                # Answer near end
+                last_boxed_pos = completion.rfind('\\boxed{')
+                if last_boxed_pos >= 0 and len(completion) - last_boxed_pos < 200:
+                    score += 0.3
+
+                # Answer consistency
+                unique_answers = set(_normalize_answer(a) for a in boxed_answers)
+                if len(unique_answers) == 1:
+                    score += 0.3
+                elif len(unique_answers) > 2:
+                    score -= 0.3
+
+            rewards.append(max(0.0, min(1.0, score)))
+
         return rewards
 
 
-class OlympiadBenchReasoningReward(Reward):
-    """Reasoning reward: checks if output contains step-by-step reasoning.
+class OlympiadBenchQualityReward(Reward):
+    """Quality reward: reasoning, length, and repetition combined.
 
-    Returns a score based on:
-    - Presence of multiple reasoning steps
-    - Use of mathematical notation
-    - Logical structure (因为/所以, therefore/because, etc.)
+    Three components (each ~0.33):
+        - Reasoning: equation chains, logical structure (0.4)
+        - Length: smooth curve favoring 300-1500 chars (0.3)
+        - Repetition: penalize repeated content (0.3)
     """
+
+    def _reasoning_score(self, completion: str) -> float:
+        """Score reasoning quality (0-1)."""
+        score = 0.0
+
+        # Equation chains
+        if len(re.findall(r'=', completion)) >= 3:
+            score += 0.25
+
+        # Mathematical operators
+        if len(re.findall(r'[+\-*/^]|\\frac|\\sqrt', completion)) >= 5:
+            score += 0.25
+
+        # Logical structure
+        logic_patterns = [
+            r'第[一二三四五六七八九十\d]+步',
+            r'Step\s*\d+',
+            r'首先|其次|然后|最后|因此|所以',
+            r'First|Then|Finally|Therefore|Hence',
+        ]
+        if any(re.search(p, completion, re.IGNORECASE) for p in logic_patterns):
+            score += 0.25
+
+        # Conclusion derivation
+        last_500 = completion[-500:] if len(completion) > 500 else completion
+        if re.search(r'(所以|因此|答案|故|得|Thus|Therefore|Answer).*\\boxed', last_500, re.IGNORECASE | re.DOTALL):
+            score += 0.25
+
+        return min(1.0, score)
+
+    def _length_score(self, length: int) -> float:
+        """Smooth length score (0-1)."""
+        if length < 100:
+            return length / 100 * 0.3
+        elif length < 300:
+            return 0.3 + (length - 100) / 200 * 0.7
+        elif length <= 1500:
+            return 1.0
+        elif length <= 3000:
+            t = (length - 1500) / 1500
+            return 0.5 + 0.5 * math.cos(t * math.pi / 2)
+        else:
+            t = min((length - 3000) / 3000, 1.0)
+            return 0.5 * (1 - t * 0.5)
+
+    def _repetition_score(self, completion: str) -> float:
+        """Score based on content uniqueness (0-1, higher is better)."""
+        if len(completion) < 100:
+            return 1.0
+
+        # Check chunk uniqueness
+        chunk_size = 50
+        chunks = [completion[i:i+chunk_size] for i in range(0, len(completion) - chunk_size, chunk_size // 2)]
+        if not chunks:
+            return 1.0
+
+        unique_ratio = len(set(chunks)) / len(chunks)
+
+        # Check n-gram uniqueness
+        words = completion.split()
+        if len(words) >= 4:
+            ngrams = [' '.join(words[i:i+4]) for i in range(len(words) - 3)]
+            ngram_ratio = len(set(ngrams)) / len(ngrams) if ngrams else 1.0
+        else:
+            ngram_ratio = 1.0
+
+        return (unique_ratio + ngram_ratio) / 2
 
     def __call__(self, trajectories: List[Dict[str, Any]], **kwargs) -> List[float]:
         rewards = []
         for trajectory in trajectories:
-            messages = trajectory.get('messages', [])
-            completion = ''
-            for msg in reversed(messages):
-                if msg.get('role') == 'assistant':
-                    completion = msg.get('content', '')
-                    break
+            completion = _get_completion(trajectory)
 
-            score = 0.0
+            reasoning = self._reasoning_score(completion)
+            length = self._length_score(len(completion))
+            repetition = self._repetition_score(completion)
 
-            # Check for step indicators
-            step_patterns = [
-                r'第[一二三四五六七八九十\d]+步',  # Chinese steps
-                r'Step\s*\d+',  # English steps
-                r'\d+\.',  # Numbered list
-                r'首先|然后|最后|因此|所以',  # Chinese connectors
-                r'First|Then|Finally|Therefore|Hence',  # English connectors
-            ]
-            for pattern in step_patterns:
-                if re.search(pattern, completion, re.IGNORECASE):
-                    score += 0.2
-                    break
-
-            # Check for mathematical notation
-            math_patterns = [r'=', r'\+', r'-', r'\*', r'/', r'\^', r'\\frac', r'\\sqrt']
-            math_count = sum(1 for p in math_patterns if re.search(p, completion))
-            score += min(0.3, math_count * 0.1)
-
-            # Check completion length (longer usually means more reasoning)
-            if len(completion) > 200:
-                score += 0.2
-            if len(completion) > 500:
-                score += 0.1
-
-            # Check for boxed answer at the end
-            if re.search(r'\\boxed\{[^}]+\}\s*$', completion):
-                score += 0.2
-
-            rewards.append(min(1.0, score))
+            # Weighted combination
+            score = 0.4 * reasoning + 0.3 * length + 0.3 * repetition
+            rewards.append(score)
 
         return rewards

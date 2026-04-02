@@ -127,15 +127,18 @@ class CheckpointEngineManager:
                 self._model_keys = []
 
             # vLLM may have grouped params
-            _STACKED_MAPPINGS = {
-                'qkv_proj': ('q_proj', 'k_proj', 'v_proj', 'q', 'k', 'v'),
-                'gate_up_proj': ('gate_proj', 'up_proj'),
-            }
+            import re
+            _STACKED_MAPPINGS = [
+                (re.compile(r'qkv_proj'), ('q_proj', 'k_proj', 'v_proj', 'q', 'k', 'v')),
+                (re.compile(r'gate_up_proj'), ('gate_proj', 'up_proj')),
+                (re.compile(r'language_model\.model'), ('model.language_model',)),
+                (re.compile(r'^visual\.'), ('model.visual.',)),
+            ]
             for key in self._model_keys:
-                for merged, individuals in _STACKED_MAPPINGS.items():
-                    if merged in key:
+                for pattern, individuals in _STACKED_MAPPINGS:
+                    if pattern.search(key):
                         for ind in individuals:
-                            self._model_keys.append(key.replace(merged, ind))
+                            self._model_keys.append(pattern.sub(ind, key))
 
         model_result = self.model.send_weights(base_sync_done=self.base_sync_done, merge_and_sync=merge_and_sync, model_keys=self._model_keys)
         sampler_result = self.sampler.receive_weights(base_sync_done=self.base_sync_done, peft_config=peft_config)
