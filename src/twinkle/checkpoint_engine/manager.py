@@ -131,6 +131,7 @@ class CheckpointEngineManager:
             _STACKED_MAPPINGS = [
                 (re.compile(r'qkv_proj'), ('q_proj', 'k_proj', 'v_proj', 'q', 'k', 'v')),
                 (re.compile(r'gate_up_proj'), ('gate_proj', 'up_proj')),
+                (re.compile(r'in_proj_ba'), ('in_proj_b', 'in_proj_a')),
                 (re.compile(r'language_model\.model'), ('model.language_model', )),
                 (re.compile(r'^visual\.'), ('model.visual.', )),
             ]
