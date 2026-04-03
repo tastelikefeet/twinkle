@@ -126,22 +126,29 @@ class CheckpointEngineManager:
             if self._model_keys is None:
                 self._model_keys = []
 
-            # vLLM may have grouped params
+            # vLLM may have grouped params - use word boundaries to avoid substring matches
             import re
             _STACKED_MAPPINGS = [
-                (re.compile(r'qkv_proj'), ('q_proj', 'k_proj', 'v_proj', 'q', 'k', 'v')),
-                (re.compile(r'gate_up_proj'), ('gate_proj', 'up_proj')),
-                (re.compile(r'in_proj_ba'), ('in_proj_b', 'in_proj_a')),
-                (re.compile(r'language_model\.model'), ('model.language_model', )),
+                (re.compile(r'\bqkv_proj\b'), ('q_proj', 'k_proj', 'v_proj', 'q', 'k', 'v')),
+                (re.compile(r'\bgate_up_proj\b'), ('gate_proj', 'up_proj')),
+                (re.compile(r'\bin_proj_ba\b'), ('in_proj_b', 'in_proj_a')),
+                (re.compile(r'\blanguage_model\.model\b'), ('model.language_model', )),
                 (re.compile(r'^visual\.'), ('model.visual.', )),
             ]
-            expanded_keys = list(self._model_keys)
-            for key in self._model_keys:
-                for pattern, individuals in _STACKED_MAPPINGS:
-                    if pattern.search(key):
-                        for ind in individuals:
-                            expanded_keys.append(pattern.sub(ind, key))
-            self._model_keys = expanded_keys
+
+            def _expand_keys(keys):
+                result = set(keys)
+                for key in keys:
+                    for pattern, individuals in _STACKED_MAPPINGS:
+                        if pattern.search(key):
+                            for ind in individuals:
+                                result.add(pattern.sub(ind, key))
+                return result
+
+            # Two passes for chain expansion (e.g., language_model.model + qkv_proj)
+            expanded = _expand_keys(self._model_keys)
+            expanded = _expand_keys(expanded)
+            self._model_keys = list(expanded)
 
         model_result = self.model.send_weights(
             base_sync_done=self.base_sync_done, merge_and_sync=merge_and_sync, model_keys=self._model_keys)
