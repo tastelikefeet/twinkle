@@ -238,8 +238,8 @@ class InputProcessor:
     @staticmethod
     def _pad_sequence(sequences, padding_value, padding_side):
         if padding_side == 'right':
-            from torch.nn.utils.rnn import pad_sequence
-            return pad_sequence(sequences, batch_first=True, padding_value=padding_value)
+            from twinkle.utils import pad_and_stack_tensors
+            return pad_and_stack_tensors(sequences, pad_value=padding_value, concat=sequences[0].dim() >= 2)
         else:
             # left padding
             import torch
@@ -297,8 +297,8 @@ class InputProcessor:
         is_padding_free = False
         for _input in inputs:
             position_ids = _input['position_ids']
-            if position_ids.dim() > 2:
-                position_ids = position_ids[:1]
+            if position_ids.dim() == 3:
+                position_ids = position_ids[0]
             if position_ids.dim() == 1:
                 position_ids = position_ids.unsqueeze(0)
             # Each row may contains multiple sequences
@@ -381,19 +381,23 @@ class InputProcessor:
                     result[key] = self._create_4d_attention_mask(values)
                 elif key == 'position_ids' and is_mm_position_ids(values[0]):
                     result[key] = InputProcessor._pad_sequence(values, self.padding_map[key], self.padding_side)
-                    result[key] = result[key].transpose(0, 1)
+                    result[key] = result[key].reshape(values[0].shape[0], len(values), -1)
                 elif isinstance(values[0], torch.Tensor):
                     result[key] = InputProcessor._pad_sequence(values, self.padding_map[key], self.padding_side)
+                    if result[key].dim() == 1:
+                        result[key] = result[key].unsqueeze(0)
                 else:
                     result[key] = values
             result = InputFeature(**result)
         for field, values in vlm_fields.items():
             if values:
-                if values[0].dim() == 1:
-                    # image_thw may be squeezed
-                    values = [value.unsqueeze(0) for value in values]
-                result[field] = torch.cat(values, dim=0)
-
+                _values = []
+                for value in values:
+                    if value.dim() == 1:
+                        # image_thw may be squeezed
+                        value = value.unsqueeze(0)
+                    _values.append(value)
+                result[field] = _values
         return result
 
     def collate_fn(self,
@@ -405,28 +409,38 @@ class InputProcessor:
             return inputs
         if micro_batch_size is None:
             # normal collate
-            return [self._collate_macro_batch(inputs)]
+            outputs = self._collate_macro_batch(inputs)
+            for key in outputs:
+                if key in self.VLM_CONCAT_FIELDS:
+                    outputs[key] = torch.cat(outputs[key], dim=0)
+            return [outputs]
         elif variable_seq_lengths:
             # each macro batch has its own length
             assert len(inputs) >= micro_batch_size
             outputs = []
             for i in range(0, len(inputs), micro_batch_size):
-                outputs.append(self._collate_macro_batch(inputs[i:i + micro_batch_size]))
+                _output = self._collate_macro_batch(inputs[i:i + micro_batch_size])
+                for key in _output:
+                    if key in self.VLM_CONCAT_FIELDS:
+                        _output[key] = torch.cat(_output[key], dim=0)
+                outputs.append(_output)
             return outputs
         else:
             # each macro batch shares the same length
+            breakpoint()
             res = self._collate_macro_batch(inputs)
             keys = list(res.keys())
             outputs = []
             for i in range(0, len(inputs), micro_batch_size):
+                end = i + micro_batch_size
                 output = {}
                 for key in keys:
                     if key == 'position_ids' and res[key].dim() > 2:
-                        output[key] = res[key]
+                        output[key] = res[key][:, i:end, :]
                     elif key in self.VLM_CONCAT_FIELDS:
-                        output[key] = res[key]
+                        output[key] = torch.cat(res[key][i:end], dim=0)
                     else:
-                        output[key] = res[key][i:i + micro_batch_size]
+                        output[key] = res[key][i:end]
                 outputs.append(output)
             return outputs
 

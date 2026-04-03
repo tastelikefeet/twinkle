@@ -192,7 +192,7 @@ def stateless_init_process_group(
     return communicator
 
 
-def pad_and_stack_tensors(tensors: List['torch.Tensor'], pad_value: float = -200) -> 'torch.Tensor':
+def pad_and_stack_tensors(tensors: List['torch.Tensor'], pad_value: float = -200, concat=True) -> 'torch.Tensor':
     import torch
     if not tensors:
         raise ValueError('Empty tensor list')
@@ -222,7 +222,10 @@ def pad_and_stack_tensors(tensors: List['torch.Tensor'], pad_value: float = -200
             padded = torch.nn.functional.pad(t, pad_params, value=pad_value)
             padded_tensors.append(padded)
 
-    return torch.cat(padded_tensors, dim=0)
+    if concat:
+        return torch.cat(padded_tensors, dim=0)
+    else:
+        return torch.stack(padded_tensors, dim=0)
 
 
 def split_cp_inputs(inputs: 'torch.Tensor', cu_seqlens: Optional['torch.Tensor'], dim: int):

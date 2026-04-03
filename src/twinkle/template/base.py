@@ -158,6 +158,7 @@ class Template:
 
     def concat_input_feature(self, prompt_input_feature: InputFeature, new_tokens: List[int]) -> InputFeature:
         import copy
+        import torch
         assert self.truncation_strategy != 'split', 'concat_input_feature does not support `truncation_strategy=split`'
         result = copy.deepcopy(prompt_input_feature)
         prompt_ids = result['input_ids']
@@ -165,6 +166,11 @@ class Template:
         labels = [-100] * len(prompt_ids) + new_tokens
         result['input_ids'] = input_ids
         result['labels'] = labels
+        if 'mm_token_type_ids' in result:
+            token_ids_shape = result['mm_token_type_ids'].shape
+            device = result['mm_token_type_ids'].device
+            padded_tokens = torch.zeros((token_ids_shape[0], len(new_tokens))).to(device)
+            result['mm_token_type_ids'] = torch.cat((result['mm_token_type_ids'], padded_tokens), dim=1)
         new_input_feature = self._invoke_post_pipeline([result])[0]
         result.update(new_input_feature)
         messages: List[Message] = result.get('messages')
