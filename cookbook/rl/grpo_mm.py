@@ -28,7 +28,11 @@ from twinkle.sampler import vLLMSampler
 from twinkle.template import Template
 from twinkle.metric import CompletionRewardMetric
 from twinkle.preprocessor.olympiad_bench import OlympiadBenchProcessor
+import swanlab
 
+run = swanlab.init(
+    project="twinkle",
+)
 logger = get_logger()
 
 # Model configuration
@@ -42,7 +46,7 @@ NUM_GPUS = MODEL_GPUS + SAMPLER_GPUS
 
 # Training hyperparameters
 NUM_GENERATIONS = int(os.environ.get('NUM_GENERATIONS', 8))
-MAX_NEW_TOKENS = int(os.environ.get('MAX_NEW_TOKENS', 2048))
+MAX_NEW_TOKENS = int(os.environ.get('MAX_NEW_TOKENS', 4096))
 LEARNING_RATE = float(os.environ.get('LR', 1e-5))
 MAX_STEPS = int(os.environ.get('MAX_STEPS', 1000))
 BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 4))
@@ -126,8 +130,8 @@ def compute_rewards(
 def main():
     # Device groups: model and sampler on separate GPUs
     device_groups = [
-        DeviceGroup(name='model', ranks=list(range(MODEL_GPUS)), device_type='GPU'),
-        DeviceGroup(name='sampler', ranks=list(range(MODEL_GPUS, NUM_GPUS)), device_type='GPU'),
+        DeviceGroup(name='model', ranks=MODEL_GPUS, device_type='GPU'),
+        DeviceGroup(name='sampler', ranks=SAMPLER_GPUS, device_type='GPU'),
     ]
 
     model_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, dp_size=MODEL_GPUS)
@@ -169,7 +173,6 @@ def main():
         model.set_lr_scheduler('CosineAnnealingLR', T_max=MAX_STEPS, eta_min=0)
 
     model.set_loss('GRPOLoss', epsilon=0.2, adapter_name=ADAPTER_NAME)
-    model.set_processor(InputProcessor, adapter_name=ADAPTER_NAME)
     model.set_template('Qwen3_5Template', model_id=MODEL_ID, adapter_name=ADAPTER_NAME, enable_thinking=False)
 
     # Sampler setup
@@ -177,7 +180,7 @@ def main():
         model_id=MODEL_ID,
         engine_args={
             'gpu_memory_utilization': 0.8,
-            'max_model_len': 4096,
+            'max_model_len': 32000,
             'max_lora_rank': 32,
             'enable_lora': True,
             'limit_mm_per_prompt': {'image': 9},  # OlympiadBench has up to 9 images
@@ -273,10 +276,11 @@ def main():
             if optim_step % SAVE_STEPS == 0:
                 model.save(f'olympiad-grpo-mixed-checkpoint-{optim_step}', adapter_name=ADAPTER_NAME)
 
-            log_dict = metrics.calculate()
-            log_dict.update(model.calculate_metric(is_training=True, adapter_name=ADAPTER_NAME))
-            metrics.reset()
-            logger.info(f'[Step {optim_step}/{MAX_STEPS}] {log_dict}')
+        log_dict = metrics.calculate()
+        log_dict.update(model.calculate_metric(is_training=True, adapter_name=ADAPTER_NAME))
+        metrics.reset()
+        logger.info(f'[Step {optim_step}/{MAX_STEPS}] {log_dict}')
+        swanlab.log(log_dict)
 
     logger.info(f'Training completed. optim_steps={optim_step}')
     model.save('olympiad-grpo-mixed-final', adapter_name=ADAPTER_NAME)

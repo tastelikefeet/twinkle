@@ -9,8 +9,10 @@ Three core rewards, all normalized to [0, 1]:
 import math
 import re
 from typing import Any, Dict, List
-
+from twinkle.utils import get_logger
 from twinkle.reward.base import Reward
+
+logger = get_logger()
 
 
 def _get_completion(trajectory: Dict[str, Any]) -> str:
@@ -29,16 +31,160 @@ def _get_completion(trajectory: Dict[str, Any]) -> str:
 
 
 def _extract_boxed_answers(text: str) -> List[str]:
-    """Extract all answers from \\boxed{} in text."""
-    matches = re.findall(r'\\boxed\{([^}]+)\}', text)
-    return [m.replace(' ', '').strip() for m in matches]
+    """Extract all answers from \\boxed{} in text, handling nested braces."""
+    answers = []
+    i = 0
+    while i < len(text):
+        # Find \boxed{
+        idx = text.find('\\boxed{', i)
+        if idx == -1:
+            break
+        # Find matching closing brace
+        start = idx + 7  # len('\\boxed{')
+        depth = 1
+        j = start
+        while j < len(text) and depth > 0:
+            if text[j] == '{':
+                depth += 1
+            elif text[j] == '}':
+                depth -= 1
+            j += 1
+        if depth == 0:
+            answers.append(text[start:j-1])
+        i = j
+    return answers
 
 
 def _normalize_answer(answer: str) -> str:
-    """Normalize answer string for comparison."""
+    """Normalize answer string for comparison.
+
+    Order of operations:
+    1. Handle LaTeX commands (with backslash)
+    2. Remove backslashes
+    3. Post-backslash normalizations
+    4. Unit removal (with word boundaries)
+    5. Cleanup
+    """
+    # === Phase 1: Handle LaTeX commands BEFORE removing backslash ===
+    # Full-width numbers/letters → half-width
+    answer = answer.translate(str.maketrans(
+        '０１２３４５６７８９ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ',
+        '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+    ))
+    # Chinese punctuation → English
+    answer = answer.replace('，', ',').replace('。', '.')
+    answer = answer.replace('（', '(').replace('）', ')')
+    answer = answer.replace('：', ':').replace('；', ';')
+
+    # Remove LaTeX delimiters: $, $$
+    answer = answer.replace('$', '')
+
+    # LaTeX brackets: \left, \right → remove entirely
+    answer = re.sub(r'\\left\s*', '', answer)
+    answer = re.sub(r'\\right\s*', '', answer)
+
+    # LaTeX comparisons: \leq, \le, \geq, \ge, \neq → remove
+    answer = re.sub(r'\\(?:leq|le|geq|ge|neq|leqslant|geqslant)\s*', '', answer)
+
+    # LaTeX set notation: \in, \cup, \cap → keep as text
+    answer = re.sub(r'\\in\b', 'in', answer)
+    answer = re.sub(r'\\cup\b', 'cup', answer)
+    answer = re.sub(r'\\cap\b', 'cap', answer)
+
+    # LaTeX spacing: \quad, \qquad, \;, \, → remove
+    answer = re.sub(r'\\(?:quad|qquad|,|;|!)\s*', '', answer)
+
+    # LaTeX infinity: normalize +\infty to \infty
+    answer = answer.replace('+\\infty', '\\infty')
+
+    # LaTeX fractions: \frac{a}{b}, \dfrac{a}{b} → (a)/(b)
+    answer = re.sub(r'\\d?frac\{([^}]*)\}\{([^}]*)\}', r'(\1)/(\2)', answer)
+
+    # LaTeX sqrt: \sqrt{x} → sqrt(x)
+    answer = re.sub(r'\\sqrt\{([^}]*)\}', r'sqrt(\1)', answer)
+
+    # LaTeX text commands: \text{}, \mathrm{}, etc. → content only
+    answer = re.sub(r'\\(?:text|mathrm|mathbf|mathit)\{([^}]*)\}', r'\1', answer)
+
+    # === Phase 2: Remove remaining backslashes ===
+    answer = answer.replace('\\', '')
+
+    # === Phase 3: Post-backslash normalizations ===
+    # Normalize dfrac → frac (in case backslash was already removed)
+    answer = answer.replace('dfrac', 'frac')
+
+    # Handle frac{a}{b} without backslash → (a)/(b)
+    answer = re.sub(r'\bfrac\{([^}]*)\}\{([^}]*)\}', r'(\1)/(\2)', answer)
+
+    # Handle sqrt{x} without backslash → sqrt(x)
+    answer = re.sub(r'\bsqrt\{([^}]*)\}', r'sqrt(\1)', answer)
+
+    # Remove Greek letters when used as prefixes (e.g., DeltaE_p → E_p)
+    # Only remove when followed by uppercase letter or underscore (variable prefix pattern)
+    answer = re.sub(r'\b(Delta|Omega|Gamma|Theta|Lambda|Sigma|Phi)(?=[A-Z_])', '', answer)
+
+    # Normalize +infty → infty (after backslash removal)
+    answer = answer.replace('+infty', 'infty')
+
+    # Subscript/superscript braces: _{x} → _x, ^{x} → ^x
+    answer = re.sub(r'_\{([^}]*)\}', r'_\1', answer)
+    answer = re.sub(r'\^\{([^}]*)\}', r'^\1', answer)
+
+    # Remove remaining comparison operators without backslash
+    answer = re.sub(r'\b(?:leq|le|geq|ge|neq|leqslant|geqslant)\b', '', answer)
+
+    # Remove \in without backslash if standalone
+    answer = re.sub(r'\bin\b(?=\[|\()', '', answer)  # "in" before [ or (
+
+    # Remove quad/qquad without backslash
+    answer = re.sub(r'\b(?:quad|qquad)\b', '', answer)
+
+    # === Phase 4: Unit removal with word boundaries ===
+    # Units: only match standalone units, not parts of words
+    answer = re.sub(r'\b(cm|mm|kg|J)\b', '', answer)  # Common units with word boundary
+    # m/g/s after numbers, brackets, or at end of string
+    answer = re.sub(r'(?<=[0-9\])])([mgs])\b', '', answer)
+    # Also remove trailing m/g/s after comma+number pattern (e.g., "3,7m" → "3,7")
+    answer = re.sub(r'([0-9])([mgs])$', r'\1', answer)
+    answer = re.sub(r'(°|度|米|千克|克|秒)', '', answer)  # Chinese units always remove
+
+    # === Phase 5: Cleanup ===
+    # Remove whitespace
     answer = re.sub(r'\s+', '', answer)
-    answer = re.sub(r'(cm|mm|m|kg|g|s|°|度|米|千克|克|秒)', '', answer, flags=re.IGNORECASE)
+
+    # Remove consecutive commas: ,, → ,
+    answer = re.sub(r',+', ',', answer)
+
+    # Remove leading/trailing commas
+    answer = answer.strip(',')
+
     return answer.strip()
+
+
+def _split_answers(gt: str) -> List[str]:
+    """Split multiple answers by comma, respecting parentheses/brackets.
+
+    Example: "(1,2),(3,4)" → ["(1,2)", "(3,4)"]
+    """
+    answers = []
+    current = []
+    depth = 0
+    for char in gt:
+        if char in '([{':
+            depth += 1
+            current.append(char)
+        elif char in ')]}':
+            depth -= 1
+            current.append(char)
+        elif char == ',' and depth == 0:
+            if current:
+                answers.append(''.join(current).strip())
+                current = []
+        else:
+            current.append(char)
+    if current:
+        answers.append(''.join(current).strip())
+    return answers
 
 
 def _is_numeric_match(pred: str, gt: str, tolerance: float = 0.01) -> bool:
@@ -80,7 +226,6 @@ class OlympiadBenchAccuracyReward(Reward):
         for trajectory in trajectories:
             completion = _get_completion(trajectory)
             predicted = _extract_boxed_answers(completion)
-
             user_data = trajectory.get('user_data', [])
             gt = ''
             is_multiple = False
@@ -94,12 +239,12 @@ class OlympiadBenchAccuracyReward(Reward):
                 rewards.append(0.0)
                 continue
 
-            gt_parts = [_normalize_answer(g.strip()) for g in gt.split(',')]
+            gt_parts = [_normalize_answer(g) for g in _split_answers(gt)]
 
             if not is_multiple:
                 pred = _normalize_answer(predicted[-1])
                 gt_val = gt_parts[0] if gt_parts else ''
-
+                logger.info(f'pred: {pred}, gt_val: {gt_val}')
                 if pred == gt_val or _is_numeric_match(pred, gt_val):
                     rewards.append(1.0)
                 else:
@@ -169,8 +314,9 @@ class OlympiadBenchQualityReward(Reward):
         """Score reasoning quality (0-1)."""
         score = 0.0
 
-        # Equation chains
-        if len(re.findall(r'=', completion)) >= 3:
+        # Equation chains: single = (not == or ===)
+        eq_count = len(re.findall(r'(?<![=!<>])=(?!=)', completion))
+        if eq_count >= 3:
             score += 0.25
 
         # Mathematical operators
