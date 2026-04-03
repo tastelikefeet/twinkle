@@ -427,7 +427,6 @@ class InputProcessor:
             return outputs
         else:
             # each macro batch shares the same length
-            breakpoint()
             res = self._collate_macro_batch(inputs)
             keys = list(res.keys())
             outputs = []
