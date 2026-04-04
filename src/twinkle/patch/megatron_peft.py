@@ -14,6 +14,11 @@ class MegatronPeft(Patch):
 
         if MegatronPeft._peft_patched:
             return
+        
+        def _check_merge_allowed(*args, **kwargs):
+            pass
+
+        BaseTuner._check_merge_allowed = _check_merge_allowed
 
         _origin_get_tied_target_modules = BaseTuner._get_tied_target_modules
 
