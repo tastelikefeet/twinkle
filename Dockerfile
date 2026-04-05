@@ -8,11 +8,13 @@ ENV PATH="/opt/conda/bin:${PATH}"
 RUN conda create -n twinkle python=3.12 -y --override-channels -c conda-forge
 SHELL ["conda", "run", "-n", "twinkle", "/bin/bash", "-c"]
 
-# Clone and install twinkle
+# Clone and install twinkle, checkout to latest v-tag
 RUN git clone https://github.com/modelscope/twinkle.git
 WORKDIR /twinkle
-
-git checkout release/0.2
+RUN echo "Available v-tags:" && git tag -l 'v*' --sort=-v:refname && \
+    LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -n 1) && \
+    echo "Checking out: $LATEST_TAG" && \
+    git checkout "$LATEST_TAG"
 
 RUN sh INSTALL_MEGATRON.sh
 
