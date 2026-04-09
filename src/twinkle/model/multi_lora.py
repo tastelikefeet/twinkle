@@ -478,12 +478,19 @@ class MultiLora:
 
     def save_lora_converter(self, name, parameter, adapter_name):
         _lora = self.find_lora(adapter_name)
+        # Negative filter: skip weights belonging to OTHER adapters
+        negative_pattern = re.compile(r'\.lora_\w+\.(?!weight$)(\w+)\.')
+        neg_match = negative_pattern.search(name)
+        if neg_match and neg_match.group(1) != adapter_name:
+            return None
         pattern = re.compile(rf'\.lora_\w+\.{adapter_name}\.')
         pattern_no_adapter = re.compile(r'\.lora_\w+\.weight')
         if (pattern.search(name) or pattern_no_adapter.search(name)) and self.match_target_modules(
                 name, _lora.tenant_config.target_modules):
             _param = torch_util.to_local_tensor(parameter)
-            if 'embedding_A' in name:
+            if _param is None:
+                pass
+            elif 'embedding_A' in name:
                 _param = _param[:, :_lora.tenant_config.r]
             elif 'embedding_B' in name:
                 _param = _param[:_lora.tenant_config.r, :]
