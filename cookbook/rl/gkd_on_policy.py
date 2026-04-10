@@ -62,7 +62,7 @@ STUDENT_MODEL_ID = os.environ.get('STUDENT_MODEL_ID', 'ms://Qwen/Qwen3-0.6B')
 TEACHER_MODEL_ID = os.environ.get('TEACHER_MODEL_ID', 'ms://Qwen/Qwen3-8B')
 
 MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 4))
-SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS', 4))
+SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS', 2))
 NUM_GPUS = MODEL_GPUS + 2*SAMPLER_GPUS
 
 MAX_NEW_TOKENS = int(os.environ.get('MAX_NEW_TOKENS', 2048))

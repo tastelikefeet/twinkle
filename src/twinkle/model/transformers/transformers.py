@@ -476,8 +476,12 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
         optimizer_config = self.optimizer_group[adapter_name]
         loss_instance: Loss = optimizer_config.loss_instance
         assert isinstance(loss_instance, Loss), 'Set a loss_instance before calculating loss'
-        inputs = optimizer_config.train_status.inputs
-        outputs = optimizer_config.train_status.outputs
+        if self.model.training:
+            status = optimizer_config.train_status
+        else:
+            status = optimizer_config.eval_status
+        inputs = status.inputs
+        outputs = status.outputs
         assert inputs is not None and outputs is not None, 'Cannot calculate loss of empty inputs and outputs'
         result = loss_instance(inputs, outputs, **kwargs)
         loss_value = result['loss']
@@ -505,9 +509,9 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
             if reduction is not None:
                 self.sp_strategy.sp_config['loss_reduction'] = str(reduction)
             loss_value = self.sp_strategy.reduce_loss(loss_value, inputs['labels'])
-        optimizer_config.train_status.loss_value += loss_value
-        outputs['loss'] = optimizer_config.train_status.loss_value
-        return optimizer_config.train_status.loss_value.item()
+        status.loss_value += loss_value
+        outputs['loss'] = status.loss_value
+        return status.loss_value.item()
 
     @remote_function()
     def backward(self, **kwargs):

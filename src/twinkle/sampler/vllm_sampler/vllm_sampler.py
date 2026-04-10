@@ -166,6 +166,9 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
             add_generation_prompt=add_generation_prompt,
         )[0]
         encoded['prompt'] = prompt['prompt']
+        for key in encoded:
+            if isinstance(encoded[key], np.ndarray):
+                encoded[key] = encoded[key].tolist()
         return encoded
 
     def apply_patch(self, patch_cls: Union[Patch, Type[Patch], str], **kwargs) -> None:
@@ -235,7 +238,9 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
         """
         multi_modal_data = self._extract_multi_modal_data(feat)
         response = await self.engine.sample(
-            prompt=feat['prompt'] if 'prompt' in feat else feat['input_ids'],
+            # pick input_ids because prompt may not contain response
+            # if vLLM are used sequentially
+            prompt=feat['input_ids'] if 'input_ids' in feat else feat['prompt'],
             sampling_params=sampling_params,
             lora_request=lora_request,
             multi_modal_data=multi_modal_data,

@@ -26,9 +26,11 @@ class Qwen3_5Template(Template):
         self._patch_size: Optional[int] = None
         self._merge_size: Optional[int] = None
         self._init_vision_config()
-        from transformers.models.qwen3_vl import Qwen3VLModel
         with torch.device('meta'):
-            self.dummy_model = Qwen3VLModel(self.config)
+            import transformers
+            model_cls = self.config.architectures[0]
+            model_cls = getattr(transformers, model_cls)
+            self.dummy_model = model_cls(self.config)
             self.rope_index_func = self.get_rope_index()
 
     def get_rope_index(self):
