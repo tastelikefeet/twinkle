@@ -221,6 +221,7 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
         sampling_params: SamplingParams,
         lora_request: Optional[Any] = None,
         *,
+        multi_modal_data: Optional[Dict[str, Any]] = None,
         logprobs_only: bool = False,
     ) -> SampleResponse:
         """Sample a single input asynchronously.
@@ -231,23 +232,23 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
             adapter_path: Optional LoRA adapter path (legacy, prefer lora_request).
             lora_request: Pre-built LoRARequest to attach to the sampling request.
                 Avoids repeated ``_get_or_load_lora`` calls per input.
+            multi_modal_data: The multi modal data dict.
             logprobs_only: Only return logprobs (no generated tokens).
 
         Returns:
             A SampleResponse object
         """
-        multi_modal_data = self._extract_multi_modal_data(feat)
         response = await self.engine.sample(
-            # pick input_ids because prompt may not contain response
+            # Pick input_ids first because prompt may not contain response
             # if vLLM are used sequentially
             # multi-modal does not support input_ids
-            prompt=feat['input_ids'] if 'input_ids' in feat and len(multi_modal_data) == 0 else feat['prompt'],
+            prompt=feat['input_ids'] if 'input_ids' in feat and multi_modal_data else feat['prompt'],
             sampling_params=sampling_params,
             lora_request=lora_request,
             multi_modal_data=multi_modal_data,
             mm_processor_kwargs=feat.get('mm_processor_kwargs'),
         )
-        if 'input_ids' not in feat:
+        if 'input_ids' not in feat or multi_modal_data:
             feat['input_ids'] = response.prompt_token_ids
             feat['labels'] = [-100] * len(response.prompt_token_ids)
         if not logprobs_only:
@@ -331,7 +332,11 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
             sampling_params.max_tokens = 1
             logprobs_only = True
 
-        if is_trajectory:
+        multi_modal_data_list = []
+        for feat in inputs_list:
+            multi_modal_data_list.append(self._extract_multi_modal_data(feat))
+
+        if is_trajectory or any(multi_modal_data_list):
             template = self.template
             assert template is not None, \
                 'Use set_template to add a template when trying to input Trajectory'
@@ -355,8 +360,9 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
                     feat,
                     sampling_params,
                     lora_request=lora_request,
+                    multi_modal_data=multi_modal_data,
                     logprobs_only=logprobs_only,
-                ) for feat in encoded_inputs
+                ) for feat, multi_modal_data in zip(encoded_inputs, multi_modal_data_list)
             ]
             return await asyncio.gather(*tasks)
 
