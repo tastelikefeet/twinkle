@@ -503,7 +503,7 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
         #                         = global_per_token_grad / dp_world_size = avg_per_token_grad
         counts = counts / self.device_mesh.data_world_size
         optimizer_config = self.optimizer_group[adapter_name]
-        optimizer_config.train_status.num_tokens += counts.item()
+        status.num_tokens += counts.item()
         if self.sp_strategy is not None and 'labels' in inputs:
             reduction = getattr(loss_instance, 'reduction', None)
             if reduction is not None:

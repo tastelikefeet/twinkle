@@ -240,7 +240,8 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
         response = await self.engine.sample(
             # pick input_ids because prompt may not contain response
             # if vLLM are used sequentially
-            prompt=feat['input_ids'] if 'input_ids' in feat else feat['prompt'],
+            # multi-modal does not support input_ids
+            prompt=feat['input_ids'] if 'input_ids' in feat and len(multi_modal_data) == 0 else feat['prompt'],
             sampling_params=sampling_params,
             lora_request=lora_request,
             multi_modal_data=multi_modal_data,
