@@ -1167,6 +1167,7 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
         adapter_name: str = None,
         base_sync_done: bool = False,
         merge_and_sync: bool = False,
+        model_keys: List[str] = None,
         **kwargs,
     ):
         if adapter_name is None:
@@ -1179,6 +1180,10 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
             name = name.replace('base_model.model.', '')
             if not keep_base_layer:
                 name = name.replace('.base_layer', '')
+            else:
+                if 'conv1d.weight' in name:
+                    if any('conv1d.base_layer.weight' in name for name in model_keys):
+                        name = name.replace('conv1d.weight', 'conv1d.base_layer.weight')
             return name
 
         def _print_weight_example(names):

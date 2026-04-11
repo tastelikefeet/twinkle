@@ -55,7 +55,7 @@ from twinkle.data_format import SamplingParams
 from twinkle.dataloader import DataLoader
 from twinkle.dataset import DatasetMeta, LazyDataset
 from twinkle.loss import GKDLoss
-from twinkle.model import MegatronModel
+from twinkle.model import TransformersModel
 from twinkle.preprocessor.olympiad_bench import OlympiadBenchProcessor
 from twinkle.sampler import vLLMSampler
 
@@ -64,6 +64,7 @@ logger = get_logger()
 # ── Configuration ─────────────────────────────────────────────────────────────
 STUDENT_MODEL_ID = os.environ.get('STUDENT_MODEL_ID', 'ms://Qwen/Qwen3.5-4B')
 TEACHER_MODEL_ID = os.environ.get('TEACHER_MODEL_ID', 'ms://Qwen/Qwen3.5-9B')
+USE_MEGATRON = bool(int(os.environ.get('USE_MEGATRON', '0')))
 
 MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 4))
 SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS', 2))
@@ -172,20 +173,35 @@ def main():
     )
 
     # ── Student model (trainable) ──────────────────────────────────────────────
-    student_model = MegatronModel(
-        model_id=STUDENT_MODEL_ID,
-        device_mesh=model_mesh,
-        remote_group='student_model',
-    )
-    student_model.add_adapter_to_model(
-        ADAPTER_NAME,
-        LoraConfig(r=16, lora_alpha=32, lora_dropout=0.05, target_modules='all-linear'),
-        gradient_accumulation_steps=1,
-    )
-    student_model.set_optimizer('default', lr=LEARNING_RATE)
-    student_model.set_lr_scheduler('default', lr_decay_steps=MAX_STEPS)
-    student_model.set_loss(GKDLoss(beta=GKD_BETA, temperature=GKD_TEMPERATURE))
-    student_model.set_template('Qwen3_5Template', model_id=STUDENT_MODEL_ID, enable_thinking=False)
+    lora_config = LoraConfig(r=16, lora_alpha=32, lora_dropout=0.05, target_modules='all-linear')
+
+    if USE_MEGATRON:
+        from twinkle.model.megatron import MegatronModel
+        student_model = MegatronModel(
+            model_id=STUDENT_MODEL_ID,
+            device_mesh=model_mesh,
+            remote_group='student_model',
+        )
+    else:
+        from transformers import Qwen3_5ForConditionalGeneration
+        student_model = TransformersModel(
+            model_id=STUDENT_MODEL_ID,
+            model_cls=Qwen3_5ForConditionalGeneration,
+            device_mesh=model_mesh,
+            remote_group='student_model',
+        )
+
+    student_model.add_adapter_to_model(ADAPTER_NAME, lora_config, gradient_accumulation_steps=1)
+
+    if USE_MEGATRON:
+        student_model.set_optimizer('default', lr=LEARNING_RATE, adapter_name=ADAPTER_NAME)
+        student_model.set_lr_scheduler('default', lr_decay_steps=MAX_STEPS, max_lr=LEARNING_RATE, adapter_name=ADAPTER_NAME)
+    else:
+        student_model.set_optimizer('AdamW', lr=LEARNING_RATE)
+        student_model.set_lr_scheduler('CosineAnnealingLR', T_max=MAX_STEPS, eta_min=0)
+
+    student_model.set_loss(GKDLoss(beta=GKD_BETA, temperature=GKD_TEMPERATURE), adapter_name=ADAPTER_NAME)
+    student_model.set_template('Qwen3_5Template', model_id=STUDENT_MODEL_ID, adapter_name=ADAPTER_NAME, enable_thinking=False)
 
     # ── Student vLLM sampler (for on-policy generation) ────────────────────────
     student_sampler = vLLMSampler(
@@ -266,19 +282,19 @@ def main():
         )
 
         # 5. Student forward + GKD backward
-        student_model.forward_backward(inputs=input_data, **teacher_output)
-        student_model.clip_grad_and_step()
+        student_model.forward_backward(inputs=input_data, adapter_name=ADAPTER_NAME, **teacher_output)
+        student_model.clip_grad_and_step(adapter_name=ADAPTER_NAME)
 
         if optim_step > 0 and optim_step % 1 == 0:
-            metric = student_model.calculate_metric(is_training=True)
+            metric = student_model.calculate_metric(is_training=True, adapter_name=ADAPTER_NAME)
             logger.info(f'[Step {optim_step}/{MAX_STEPS}] {metric}')
 
         if optim_step > 0 and optim_step % 50 == 0:
-            student_model.save(f'gkd-onpolicy-ckpt-{optim_step}')
+            student_model.save(f'gkd-onpolicy-ckpt-{optim_step}', adapter_name=ADAPTER_NAME)
 
         optim_step += 1
 
-    student_model.save('gkd-onpolicy-final')
+    student_model.save('gkd-onpolicy-final', adapter_name=ADAPTER_NAME)
     logger.info('GKD on-policy training completed.')
 
 
