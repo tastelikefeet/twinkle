@@ -242,7 +242,7 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
             # Pick input_ids first because prompt may not contain response
             # if vLLM are used sequentially
             # multi-modal does not support input_ids
-            prompt=feat['input_ids'] if 'input_ids' in feat and multi_modal_data else feat['prompt'],
+            prompt=feat['input_ids'] if 'input_ids' in feat and not multi_modal_data else feat['prompt'],
             sampling_params=sampling_params,
             lora_request=lora_request,
             multi_modal_data=multi_modal_data,
