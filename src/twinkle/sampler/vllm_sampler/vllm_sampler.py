@@ -155,17 +155,10 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
         template = self.template
         if template is None:
             raise ValueError(f"Template not set for adapter '{adapter_name}'. Use set_template() first.")
-
-        prompt = template.batch_encode(
-            [trajectory],
-            add_generation_prompt=add_generation_prompt,
-            tokenize=False,
-        )[0]
         encoded = template.batch_encode(
             [trajectory],
             add_generation_prompt=add_generation_prompt,
         )[0]
-        encoded['prompt'] = prompt['prompt']
         for key in encoded:
             if isinstance(encoded[key], np.ndarray):
                 encoded[key] = encoded[key].tolist()
@@ -239,10 +232,7 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
             A SampleResponse object
         """
         response = await self.engine.sample(
-            # Pick input_ids first because prompt may not contain response
-            # if vLLM are used sequentially
-            # multi-modal does not support input_ids
-            prompt=feat['input_ids'] if 'input_ids' in feat and not multi_modal_data else feat['prompt'],
+            prompt=self.template.get_vllm_input_ids(feat['input_ids']),
             sampling_params=sampling_params,
             lora_request=lora_request,
             multi_modal_data=multi_modal_data,
@@ -252,8 +242,8 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
         if 'input_ids' not in feat or multi_modal_data:
             if 'input_ids' in feat:
                 if len(feat['input_ids']) != len(response.prompt_token_ids):
-                    breakpoint()
-                    raise RuntimeError(f'Input ids length {len(feat["input_ids"])} does not match prompt_token_ids length {len(response.prompt_token_ids)}')
+                    raise RuntimeError(f'Input ids length {len(feat["input_ids"])} does not'
+                                       f'match prompt_token_ids length {len(response.prompt_token_ids)}')
             else:
                 feat['input_ids'] = response.prompt_token_ids
                 feat['labels'] = [-100] * len(response.prompt_token_ids)
@@ -332,7 +322,7 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
         inputs_list = self._normalize_inputs(inputs)
 
         # Check if inputs are Trajectory (not encoded) - aligned with Model.forward logic
-        is_trajectory = 'prompt' not in inputs_list[0] and 'input_ids' not in inputs_list[0]
+        is_trajectory = 'input_ids' not in inputs_list[0]
         logprobs_only = False
         if sampling_params.max_tokens == 0:
             sampling_params.max_tokens = 1
@@ -343,7 +333,7 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
         for feat in inputs_list:
             multi_modal_data_list.append(self._extract_multi_modal_data(feat))
 
-        if is_trajectory or any(multi_modal_data_list) and not logprobs_only:
+        if is_trajectory and not logprobs_only:
             template = self.template
             assert template is not None, \
                 'Use set_template to add a template when trying to input Trajectory'

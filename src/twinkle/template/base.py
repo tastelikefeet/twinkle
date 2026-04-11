@@ -164,9 +164,9 @@ class Template:
         prompt_ids = result['input_ids']
         labels = result['labels']
         input_ids = list(prompt_ids) + new_tokens
-        labels = labels[-1:] + labels[:-1] # roll to input order
+        labels = labels[-1:] + labels[:-1]  # roll to input order
         labels = labels + new_tokens
-        labels = labels[1:] + labels[:1] # roll to input-1 order
+        labels = labels[1:] + labels[:1]  # roll to input-1 order
         result['input_ids'] = input_ids
         result['labels'] = labels
         if 'mm_token_type_ids' in result:
@@ -184,23 +184,6 @@ class Template:
             response_text = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
             messages.append(Message(role='assistant', content=response_text))
             result['messages'] = messages
-            prompt = self.batch_encode(
-                [result],
-                add_generation_prompt=False,
-                tokenize=False,
-            )[0] # regenerate prompt
-            
-            decoded = self.decode(input_ids[-10])
-            suffix = ['\n']
-            # Models like qwen3 may end with <im_end>\n, this will mismatch
-            # with the vLLM output, which endwith <im_end>
-            if self.tokenizer.eos_token:
-                suffix += [self.tokenizer.eos_token]
-            _prompt = prompt['prompt']
-            for token in suffix:
-                if _prompt.endswith(token) and not decoded.endswith(token):
-                    _prompt = _prompt[:-len(token)]
-            result['prompt'] = _prompt
         return result
 
     def _add_default_system(self, trajectory: Trajectory) -> List[Trajectory]:
@@ -253,6 +236,9 @@ class Template:
 
     def set_mm_position_ids(self, input_feature: InputFeature):
         return np.arange(len(input_feature['input_ids']))
+
+    def get_vllm_input_ids(input_ids):
+        return input_ids
 
     def _check_max_length(self, input_feature: InputFeature) -> List[InputFeature]:
         if not self.max_length or 'input_ids' not in input_feature:

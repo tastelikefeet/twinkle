@@ -130,6 +130,35 @@ class Qwen3_5Template(Template):
             **kwargs)
         return self._concat_text_position_ids(position_ids)
 
+    def get_vllm_input_ids(self, input_ids):
+        """Collapse each <vision_start> <image_pad>... <vision_end> group
+        into <vision_start> <image_pad> <vision_end> (single pad token)."""
+        image_token_id = self.config.image_token_id
+        vision_start_id = self.config.vision_start_token_id
+        vision_end_id = self.config.vision_end_token_id
+
+        result = []
+        i = 0
+        while i < len(input_ids):
+            if input_ids[i] == vision_start_id:
+                result.append(vision_start_id)
+                i += 1
+                # Skip all consecutive image_pad tokens, keep only one
+                found_pad = False
+                while i < len(input_ids) and input_ids[i] == image_token_id:
+                    if not found_pad:
+                        result.append(image_token_id)
+                        found_pad = True
+                    i += 1
+                # Append vision_end if present
+                if i < len(input_ids) and input_ids[i] == vision_end_id:
+                    result.append(vision_end_id)
+                    i += 1
+            else:
+                result.append(input_ids[i])
+                i += 1
+        return result
+
     @staticmethod
     def _concat_text_position_ids(position_ids):
         seq_len = position_ids.shape[-1]

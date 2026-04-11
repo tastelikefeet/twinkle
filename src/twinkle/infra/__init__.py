@@ -371,7 +371,7 @@ def _dispatch_args(workers, dispatch, execute, device_mesh: Optional[DeviceMesh]
         # Raise early if some ranks got data and others didn't (causes hangs).
         def _check_uniform(slices):
             lens = [len(s) if s is not None and isinstance(s, (list, tuple)) else 0 for s in slices]
-            return not lens or all(l > 0 for l in lens) or all(l == 0 for l in lens)
+            return not lens or all(length > 0 for length in lens) or all(length == 0 for length in lens)
 
         for arg in args:
             if not _check_uniform(arg):
