@@ -548,7 +548,7 @@ class Template:
         trajectory.update(input_feature)
         return trajectory
 
-    def encode(self, trajectory: Trajectory, add_generation_prompt: bool = False, **kwargs) -> InputFeature:
+    def _encode(self, trajectory: Trajectory, add_generation_prompt: bool = False, **kwargs) -> InputFeature:
         return self._encode_messages(trajectory, add_generation_prompt, **kwargs)
 
     @staticmethod
@@ -645,7 +645,7 @@ class Template:
         from concurrent.futures import ThreadPoolExecutor
         from functools import partial
         encode_fn = partial(
-            self.encode,
+            self._encode,
             add_generation_prompt=add_generation_prompt,
             **kwargs,
         )
