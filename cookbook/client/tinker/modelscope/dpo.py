@@ -20,8 +20,6 @@ import torch
 from tqdm import tqdm
 from typing import Any, Dict, List
 
-import swanlab
-
 from tinker import types
 from twinkle import init_tinker_client, get_logger
 from twinkle.dataset import Dataset, DatasetMeta, LazyDataset
@@ -51,7 +49,6 @@ sft_weight = 1.0
 max_length = 2048
 lora_rank = 8
 system_prompt = 'You are a helpful assistant.'
-use_swanlab = True
 
 
 # ---------------------------------------------------------------------------
@@ -96,24 +93,6 @@ def prepare_dpo_batch(batch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def train():
-    # Step 0: Initialize SwanLab if enabled
-    if use_swanlab:
-        swanlab.login(api_key=os.environ['SWANLAB_API_KEY'])
-        swanlab.init(
-            project='twinkle-dpo',
-            experiment_name='dpo-lora-training',
-            config={
-                'base_model': base_model,
-                'batch_size': batch_size,
-                'learning_rate': learning_rate,
-                'dpo_beta': dpo_beta,
-                'sft_weight': sft_weight,
-                'max_length': max_length,
-                'lora_rank': lora_rank,
-            },
-        )
-        logger.info('SwanLab initialized')
-
     # Step 1: Prepare dataset & dataloader
     logger.info('Loading DPO dataset...')
     dataset = create_dpo_dataset()
@@ -187,10 +166,6 @@ def train():
         ).result()
 
         logger.info(f'[Step {step}] metrics={optim_result.metrics}')
-
-        # Log metrics to SwanLab
-        if use_swanlab and optim_result.metrics:
-            swanlab.log(optim_result.metrics, step=step)
 
     # Step 4: Save checkpoint
     save_result = training_client.save_state('dpo-lora-final').result()

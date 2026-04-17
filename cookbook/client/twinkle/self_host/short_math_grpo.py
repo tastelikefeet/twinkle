@@ -29,8 +29,6 @@ import re
 from peft import LoraConfig
 from typing import List, Tuple, Dict, Any
 
-import swanlab
-
 from twinkle import get_logger
 from twinkle.reward import GSM8KAccuracyReward
 from twinkle.reward.base import Reward
@@ -91,10 +89,6 @@ SYNC_INTERVAL = 1  # Save weights for sampler every N steps
 GRADIENT_ACCUMULATION_STEPS = 1
 DATA_NUM = 2000  # Number of Math samples to use
 
-USE_SWANLAB = True
-SWANLAB_PROJECT = 'twinkle-grpo'
-SWANLAB_EXPERIMENT_NAME = 'short-math-grpo'
-
 
 SYSTEM_PROMPT = ('You are a helpful math assistant. Solve the problem with minimal but correct reasoning '
                  'and put your final answer within \\boxed{}.')
@@ -119,26 +113,6 @@ def compute_rewards(
 
 
 def train():
-    # Step 0: Initialize SwanLab if enabled
-    if USE_SWANLAB:
-        swanlab.login(api_key=os.environ.get('SWANLAB_API_KEY', ''))
-        swanlab.init(
-            project=SWANLAB_PROJECT,
-            experiment_name=SWANLAB_EXPERIMENT_NAME,
-            config={
-                'model_id': MODEL_ID,
-                'num_generations': NUM_GENERATIONS,
-                'max_new_tokens': MAX_NEW_TOKENS,
-                'learning_rate': LEARNING_RATE,
-                'max_steps': MAX_STEPS,
-                'batch_size': BATCH_SIZE,
-                'temperature': TEMPERATURE,
-                'sync_interval': SYNC_INTERVAL,
-                'gradient_accumulation_steps': GRADIENT_ACCUMULATION_STEPS,
-            },
-        )
-        logger.info('SwanLab initialized')
-
     # Step 1: Initialize the Twinkle client
     client = init_twinkle_client(
         base_url='http://127.0.0.1:8000',
@@ -283,10 +257,6 @@ def train():
         log_dict.update(model.calculate_metric(is_training=True).result)
         log_dict['train/frac_reward_zero_std'] = frac_zero_std
         logger.info(f'Step {step}: {log_dict}')
-
-        # Log metrics to SwanLab
-        if USE_SWANLAB and log_dict:
-            swanlab.log(log_dict, step=step)
 
         step += 1
         metrics.reset()
