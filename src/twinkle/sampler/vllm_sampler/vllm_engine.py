@@ -625,28 +625,29 @@ class VLLMEngine(BaseSamplerEngine):
                 chunk_offset += chunk_nbytes
             n_weights += 1
 
-        # Send last bucket
-        await _flush_bucket(is_last=True)
+        try:
+            # Send last bucket
+            await _flush_bucket(is_last=True)
 
-        # Wait for worker to finish loading
-        await worker_task
-
-        # Clean up
-        socket.close()
-        zmq_ctx.term()
-        if zmq_handle.startswith('ipc://'):
-            ipc_path = zmq_handle[len('ipc://'):]
-            try:
-                if os.path.exists(ipc_path):
-                    os.remove(ipc_path)
-            except OSError:
-                pass
-        del buffer
-        if shm is not None:
-            shm.close()
-            shm.unlink()
-            del shm
-        gc.collect()
+            # Wait for worker to finish loading
+            await worker_task
+        finally:
+            # Clean up
+            socket.close()
+            zmq_ctx.term()
+            if zmq_handle.startswith('ipc://'):
+                ipc_path = zmq_handle[len('ipc://'):]
+                try:
+                    if os.path.exists(ipc_path):
+                        os.remove(ipc_path)
+                except OSError:
+                    pass
+            del buffer
+            if shm is not None:
+                shm.close()
+                shm.unlink()
+                del shm
+            gc.collect()
 
         elapsed = time.time() - start_time
         mode = 'LoRA' if base_sync_done and peft_config else 'base'
