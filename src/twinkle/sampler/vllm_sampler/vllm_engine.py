@@ -261,6 +261,7 @@ class VLLMEngine(BaseSamplerEngine):
             seq_logprobs = None
             if output.logprobs is not None:
                 seq_logprobs = []
+                breakpoint()
                 for i, lp in enumerate(output.logprobs):
                     if i < len(token_ids):
                         sorted_items = sorted(lp.items(), key=lambda x: -(x[1].logprob))[:logprobs]

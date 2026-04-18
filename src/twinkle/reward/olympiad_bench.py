@@ -274,7 +274,7 @@ class OlympiadBenchAccuracyReward(Reward):
                     rewards.append(1.0)
                 else:
                     sim = _numeric_similarity(pred, gt_val)
-                    rewards.append(sim * 0.5)
+                    rewards.append(sim * 0.99)
             else:
                 pred_normalized = [_normalize_answer(p) for p in predicted]
                 correct_count = 0
