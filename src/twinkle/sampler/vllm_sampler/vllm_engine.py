@@ -264,11 +264,12 @@ class VLLMEngine(BaseSamplerEngine):
                 for i, lp in enumerate(output.logprobs):
                     if i < len(token_ids):
                         if logprobs == 1:
-                            # Single logprob mode: return the sampled token's logprob directly
-                            assert token_ids[i] in lp, (
-                                f'Sampled token {token_ids[i]} not found in logprobs at position {i}. '
-                                f'Available tokens: {list(lp.keys())}')
-                            seq_logprobs.append(lp[token_ids[i]].logprob)
+                            # Single logprob mode: return the sampled token's logprob
+                            # in the same [(tid, logprob)] format as multi-logprob mode
+                            tid = token_ids[i]
+                            assert tid in lp, (f'Sampled token {tid} not found in logprobs at position {i}. '
+                                               f'Available tokens: {list(lp.keys())}')
+                            seq_logprobs.append([(tid, lp[tid].logprob)])
                         else:
                             # Multiple logprobs mode: return top-k logprobs
                             sorted_items = sorted(lp.items(), key=lambda x: -(x[1].logprob))[:logprobs]
