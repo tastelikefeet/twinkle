@@ -154,8 +154,9 @@ class InputProcessor:
                     torch.tensor(position_ids_f.shape, device=position_ids_f.device, dtype=torch.int32),
                 ])
 
-                for key in ['input_ids', 'position_ids', 'attention_mask', 'labels',
-                            'completion_mask', 'mm_token_type_ids']:
+                for key in [
+                        'input_ids', 'position_ids', 'attention_mask', 'labels', 'completion_mask', 'mm_token_type_ids'
+                ]:
                     value = _input.get(key)
                     if value is None:
                         continue
@@ -169,8 +170,9 @@ class InputProcessor:
                     _input[key] = value
             elif self.device_mesh.sequence_parallel and tp_size > 1:
                 # Sequence parallel without CP still requires seq_len % TP == 0
-                for key in ['input_ids', 'position_ids', 'attention_mask', 'labels',
-                            'completion_mask', 'mm_token_type_ids']:
+                for key in [
+                        'input_ids', 'position_ids', 'attention_mask', 'labels', 'completion_mask', 'mm_token_type_ids'
+                ]:
                     value = _input.get(key)
                     if value is not None:
                         _input[key] = pad_cp_inputs(value, padding_value=self.padding_map.get(key, 0))

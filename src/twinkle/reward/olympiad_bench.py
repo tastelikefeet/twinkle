@@ -148,8 +148,9 @@ def _normalize_answer(answer: str) -> str:
     # === Phase 4: Unit removal with word boundaries ===
     # Units: only match standalone units, not parts of words
     # Covers SI base/derived units and common physics/chemistry units
-    answer = re.sub(r'\b(cm|mm|km|nm|um|kg|mg|Hz|kHz|MHz|GHz|mol|Pa|kPa|MPa|'
-                    r'eV|keV|MeV|GeV|cal|kcal|cd|lm|lx|Wb|Bq|Gy|Sv)\b', '', answer)
+    answer = re.sub(
+        r'\b(cm|mm|km|nm|um|kg|mg|Hz|kHz|MHz|GHz|mol|Pa|kPa|MPa|'
+        r'eV|keV|MeV|GeV|cal|kcal|cd|lm|lx|Wb|Bq|Gy|Sv)\b', '', answer)
     # Single-letter units (N, V, W, A, K, C, T, F, H, L) - only after numbers/brackets
     answer = re.sub(r'(?<=[0-9\])])\s*([NVWAKCTFHLJmgs])\b', '', answer)
     # Also remove trailing single-letter units after comma+number pattern

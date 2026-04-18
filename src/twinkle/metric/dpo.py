@@ -118,8 +118,7 @@ class DPOMetric(Metric):
         # DPO requires interleaved [chosen, rejected, ...] pairs → batch must be even
         assert seq_logps.shape[0] % 2 == 0, (
             f'DPO metric requires an even batch size (interleaved chosen/rejected pairs), '
-            f'but got batch_size={seq_logps.shape[0]}.'
-        )
+            f'but got batch_size={seq_logps.shape[0]}.')
 
         # Split into chosen and rejected (interleaved format)
         chosen_logps, rejected_logps = self._split_chosen_rejected(seq_logps)

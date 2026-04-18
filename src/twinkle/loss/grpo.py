@@ -206,10 +206,8 @@ class GRPOLoss(Loss):
         mask_flat = loss_mask.squeeze(0)  # [total_tokens]
 
         # ── Find sequence boundaries ─────────────────────────────────────
-        assert position_ids is not None, (
-            'position_ids is required for unpacking packed sequences. '
-            'Ensure the processor passes position_ids in packing mode.'
-        )
+        assert position_ids is not None, ('position_ids is required for unpacking packed sequences. '
+                                          'Ensure the processor passes position_ids in packing mode.')
         pos_flat = position_ids.squeeze(0)  # [total_tokens]
         # position_ids resets to 0 at each new sequence
         boundary_indices = (pos_flat == 0).nonzero(as_tuple=True)[0]
