@@ -37,7 +37,7 @@ class RetrySampler(Sampler):
                     traceback.print_exc()
                     continue
             else:
-                return
+                raise StopIteration(f'Max retries exceeded: {self.max_retries}, no valid data found.')
 
         origin_dataset_len = len(self.dataset)
         if total >= origin_dataset_len:
@@ -45,7 +45,7 @@ class RetrySampler(Sampler):
 
         for idx in np.random.RandomState().permutation(len(self.dataset)).tolist():
             if total >= origin_dataset_len:
-                return
+                raise StopIteration
             for _ in range(self.max_retries):
                 try:
                     # Skip None values and raises
@@ -59,7 +59,7 @@ class RetrySampler(Sampler):
                     traceback.print_exc()
                     continue
             else:
-                return
+                raise ValueError(f'Max retries exceeded: {self.max_retries}, no valid data found.')
 
     def __len__(self):
         return len(self.dataset)
