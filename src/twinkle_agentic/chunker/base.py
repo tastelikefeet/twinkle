@@ -1,10 +1,11 @@
 from abc import ABC, abstractmethod
 
+from twinkle.data_format import Trajectory
 from twinkle_agentic.data_format import Chunks
 
 
-class Condenser(ABC):
+class Chunker(ABC):
 
     @abstractmethod
-    def condense(self, chunks: Chunks, **kwargs) -> Chunks:
+    def chunk(self, trajectory: Trajectory) -> Chunks:
         raise NotImplementedError
