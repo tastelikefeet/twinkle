@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from peft import LoraConfig, PeftModel, get_peft_model
 from peft.tuners.lora import Embedding, Linear, LoraLayer
 from types import MethodType
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from twinkle import torch_util
 from twinkle.data_format import InputFeature
@@ -45,17 +45,29 @@ class MultiLora:
     def _count_available_loras(self):
         return len([_lora for _lora in self.loras if _lora.tenant_adapter_name is None])
 
-    def activate_adapter(self, tenant_adapter_name: str):
+    def reset_adapter_status(self):
+        """Force lora_0 require_grad, disable others"""
+        if isinstance(self.module, list):
+            for _module in self.module:
+                _module.set_adapter('lora_0')
+        else:
+            self.module.set_adapter('lora_0')
+
+    def activate_adapter(self, tenant_adapter_name: str, call_enable=False):
         if not self.has_lora(tenant_adapter_name):
             raise ValueError(f'Adapter {tenant_adapter_name} does not exist')
         adapter_name = self.find_lora_by_tenant(tenant_adapter_name).adapter_name
         if isinstance(self.module, list):
             for _module in self.module:
-                # _module.enable_adapter_layers()
+                if call_enable:
+                    # This will cost time
+                    _module.enable_adapter_layers()
                 if _module.active_adapter != adapter_name:
                     _module.set_adapter(adapter_name)
         else:
-            # self.module.enable_adapter_layers()
+            if call_enable:
+                # This will cost time
+                self.module.enable_adapter_layers()
             if self.module.active_adapter != adapter_name:
                 self.module.set_adapter(adapter_name)
 
@@ -67,10 +79,20 @@ class MultiLora:
             self.module.disable_adapter_layers()
 
     @contextmanager
-    def adapter(self, tenant_adapter_name: str):
+    def adapter(self, tenant_adapter_name: str, disable_lora: bool = False):
         self.activate_adapter(tenant_adapter_name)
-        yield self.find_lora_by_tenant(tenant_adapter_name).adapter_name
-        # self.deactivate_adapter()
+        if disable_lora:
+            # Temporarily disable all adapters while keeping optimizer_group active
+            with self._disable_lora_context(tenant_adapter_name):
+                yield self.find_lora_by_tenant(tenant_adapter_name).adapter_name
+        else:
+            yield self.find_lora_by_tenant(tenant_adapter_name).adapter_name
+
+    @contextmanager
+    def _disable_lora_context(self, tenant_adapter_name):
+        self.deactivate_adapter()
+        yield
+        self.activate_adapter(tenant_adapter_name, call_enable=True)
 
     @contextmanager
     def save_context(self, tenant_adapter_name: str):
@@ -158,17 +180,28 @@ class MultiLora:
         if target_modules is None:
             return False
 
-        if isinstance(target_modules, list) and len(target_modules) == 0:
+        if isinstance(target_modules, (list, set)) and len(target_modules) == 0:
             return False
+
+        if isinstance(target_modules,
+                      (list, set)) and len(target_modules) == 1 and next(iter(target_modules)) == 'all-linear':
+            return True
 
         if target_modules == 'all-linear':
             return True
 
-        if isinstance(target_modules, str):
-            return re.fullmatch(target_modules, module_name) is not None
+        # Strip LoRA-specific suffixes (e.g. ".lora_A.default.weight") so that
+        # a full parameter name like "model.layers.0.attn.proj.lora_A.default.weight"
+        # can be matched against target_modules like ["attn.proj"].
+        cleaned = module_name
+        if '.lora_' in module_name:
+            cleaned = re.sub(r'\.lora_\w+(\.[\w-]+)*$', '', module_name)
 
-        if isinstance(target_modules, list):
-            return any(module_name.endswith(t) for t in target_modules)
+        if isinstance(target_modules, str):
+            return re.fullmatch(target_modules, cleaned) is not None
+
+        if isinstance(target_modules, (list, set)):
+            return any(cleaned.endswith(t) for t in target_modules)
 
         return False
 
@@ -177,7 +210,7 @@ class MultiLora:
         # Megatron is an optional dependency; if megatron-core/megatron is missing,
         # we must not crash the entire service just because we try to import megatron modules.
         try:
-            from twinkle.model.megatron.tuners import LoraParallelLinear as _LoraParallelLinear
+            from mcore_bridge import LoraParallelLinear as _LoraParallelLinear
         except Exception:  # noqa: broad-except
             _LoraParallelLinear = ()
 
@@ -191,7 +224,7 @@ class MultiLora:
 
                 lora_A_keys = self.lora_A.keys()
                 for active_adapter in self.active_adapters:
-                    if active_adapter not in lora_A_keys:
+                    if active_adapter not in lora_A_keys or self.disable_adapters:
                         continue
                     _lora = _self.find_lora(active_adapter)
                     target_modules = _lora.tenant_config.target_modules
@@ -224,7 +257,7 @@ class MultiLora:
 
                 lora_embedding_A_keys = self.lora_embedding_A.keys()
                 for active_adapter in self.active_adapters:
-                    if active_adapter not in lora_embedding_A_keys:
+                    if active_adapter not in lora_embedding_A_keys or self.disable_adapters:
                         continue
                     _lora = self.find_lora(active_adapter)
                     target_modules = _lora.tenant_config.target_modules
@@ -303,7 +336,7 @@ class MultiLora:
 
                                 def _get_weight_tensors(self):
                                     tensors = self._get_weight_tensors_origin()
-                                    return [t[:_lora.tenant_config.r, :] for t in tensors]
+                                    return [t[:_lora.tenant_config.r, :].contiguous() for t in tensors]
 
                                 lora_A._get_weight_tensors_origin = lora_A._get_weight_tensors
                                 lora_A._get_weight_tensors = MethodType(_get_weight_tensors, lora_A)
@@ -320,7 +353,7 @@ class MultiLora:
 
                                 def _get_weight_tensors(self):
                                     tensors = self._get_weight_tensors_origin()
-                                    return [t[:, :_lora.tenant_config.r] for t in tensors]
+                                    return [t[:, :_lora.tenant_config.r].contiguous() for t in tensors]
 
                                 lora_B._get_weight_tensors_origin = lora_B._get_weight_tensors
                                 lora_B._get_weight_tensors = MethodType(_get_weight_tensors, lora_B)
@@ -356,11 +389,15 @@ class MultiLora:
             base_layer.forward = MethodType(_megatron_forward, base_layer)
             base_layer.layer_name = name
 
-    def patch(self, module: Union[torch.nn.Module, List[torch.nn.Module]], *args, **kwargs):
+    def patch(self,
+              module: Union[torch.nn.Module, List[torch.nn.Module]],
+              target_modules='all-linear',
+              *args,
+              **kwargs):
         for i in range(self.max_loras):
             config = LoraConfig(
                 r=self.max_r,
-                target_modules='all-linear',
+                target_modules=target_modules,
                 lora_alpha=32,
             )
             lora_tenant = LoraTenant(index=i, adapter_name=f'lora_{i}', config=config)
@@ -380,38 +417,45 @@ class MultiLora:
                 return _module
 
             def _patch_megatron(_module):
-                # Mark expert layers for MoE models
-                from .megatron.tuners.utils import set_linear_is_expert
-                set_linear_is_expert(_module)
-
                 # Expand target_modules (e.g., 'all-linear' -> actual module names)
                 _config = deepcopy(config)
+                if isinstance(_module, PeftModel):
+                    _module.add_adapter(lora_tenant.adapter_name, _config)
+                else:
+                    # TODO first wrap needs parse target_modules, need to fix later
+                    if _config.target_modules:
+                        if isinstance(_config.target_modules, str):
+                            target_modules = [_config.target_modules]
+                        else:
+                            target_modules = list(_config.target_modules)
 
-                from .megatron.tuners.utils import patch_deepcopy
-                with patch_deepcopy():
-                    if isinstance(_module, PeftModel):
-                        _module.add_adapter(lora_tenant.adapter_name, _config)
-                    else:
-                        # TODO first wrap needs parse target_modules, need to fix later
-                        if _config.target_modules:
-                            if isinstance(_config.target_modules, str):
-                                target_modules = [_config.target_modules]
-                            else:
-                                target_modules = list(_config.target_modules)
+                        from .megatron import MegatronModel
+                        _config.target_modules = MegatronModel.get_target_modules(_module, target_modules)
+                    _module = get_peft_model(_module, _config, lora_tenant.adapter_name)
 
-                            from .megatron.tuners.utils import get_target_modules
-                            _config.target_modules = get_target_modules(_module, target_modules)
-                        _module = get_peft_model(_module, _config, lora_tenant.adapter_name)
-
-                    for name, submodule in _module.named_modules():
-                        if isinstance(submodule, LoraLayer):
-                            self._patch_lora_forward(name, submodule)
+                for name, submodule in _module.named_modules():
+                    if isinstance(submodule, LoraLayer):
+                        self._patch_lora_forward(name, submodule)
                 return _module
 
             if isinstance(module, list):
                 module = [_patch_megatron(_m) for _m in module]
             else:
                 module = _patch_peft(module)
+
+        # PEFT's add_adapter calls set_adapter(active_adapters) which only keeps the
+        # first adapter's requires_grad=True.  We need ALL LoRA params to be trainable
+        # so that MegatronDDP registers them all in its gradient buffers (main_grad).
+        def _enable_all_lora_grad(_module):
+            for name, param in _module.named_parameters():
+                if 'lora_' in name and not param.requires_grad:
+                    param.requires_grad_(True)
+
+        if isinstance(module, list):
+            for _m in module:
+                _enable_all_lora_grad(_m)
+        else:
+            _enable_all_lora_grad(module)
 
         self.module = module
         return module
@@ -432,7 +476,7 @@ class MultiLora:
             else:
                 _store_weights(self.module)
 
-    def load_lora_converter(self, name, parameter):
+    def load_lora_converter(self, name, parameter, **kwargs):
 
         def convert_param(name, parameter):
             if 'embedding_A' in name:
@@ -465,25 +509,80 @@ class MultiLora:
             parameter.loader = MethodType(_loader, parameter)
             return name, parameter
 
+    @contextmanager
+    def save_hf_key_context(self, adapter_name):
+        """Temporarily mask LoraParallelLinear modules not in target_modules.
+
+        The bridge uses ``isinstance(module, LoraParallelLinear)`` to detect LoRA
+        layers during export.  For MultiLora every linear is pre-wrapped in
+        LoraParallelLinear (pre-allocated slots), but only a subset defined by
+        ``target_modules`` should actually be exported.
+
+        Because the bridge yields HF-format keys while ``target_modules`` uses
+        Megatron-format names, post-hoc key matching in ``save_lora_converter``
+        fails.  This context manager side-steps the problem by temporarily
+        replacing ``__class__`` of non-target modules so that the bridge's
+        ``isinstance`` check returns *False* and skips them entirely.
+        """
+        try:
+            from mcore_bridge import LoraParallelLinear as _LoraParallelLinear
+        except ImportError:
+            yield
+            return
+
+        _lora = self.find_lora(adapter_name)
+        target_modules = _lora.tenant_config.target_modules
+
+        # 'all-linear' matches everything — no patching needed
+        if target_modules == 'all-linear' or (isinstance(target_modules,
+                                                         (list, set)) and 'all-linear' in target_modules):
+            yield
+            return
+
+        # Create a sibling class with compatible memory layout that is NOT
+        # recognised as LoraParallelLinear by isinstance.
+        _ExcludedLinear = type('_ExcludedLinear', _LoraParallelLinear.__bases__, {})
+
+        patched = []  # (module, original_class)
+        modules_list = self.module if isinstance(self.module, list) else [self.module]
+
+        for _module in modules_list:
+            for name, sub_module in _module.named_modules():
+                if isinstance(sub_module, _LoraParallelLinear):
+                    if not self.match_target_modules(name, target_modules):
+                        patched.append((sub_module, sub_module.__class__))
+                        sub_module.__class__ = _ExcludedLinear
+
+        try:
+            yield
+        finally:
+            for sub_module, original_class in patched:
+                sub_module.__class__ = original_class
+
     def save_lora_converter(self, name, parameter, adapter_name):
         _lora = self.find_lora(adapter_name)
-        pattern = re.compile(rf'\.lora_\w+\.{adapter_name}\.')
-        pattern_no_adapter = re.compile(r'\.lora_\w+\.weight')
-        if (pattern.search(name) or pattern_no_adapter.search(name)) and self.match_target_modules(
-                name, _lora.tenant_config.target_modules):
+        # Skip weights belonging to OTHER adapters
+        if re.search(r'\.lora_\w+\.\w+\.', name) and not re.search(rf'\.lora_\w+\.{adapter_name}\.', name):
+            return None
+        # target_modules filtering is handled by save_hf_key_context (class
+        # patching makes the bridge skip non-target modules entirely), so we
+        # only check the adapter-name / weight pattern here.
+        if re.search(rf'\.lora_\w+\.({adapter_name}|weight)', name):
             _param = torch_util.to_local_tensor(parameter)
-            if 'embedding_A' in name:
-                _param = _param[:, :_lora.tenant_config.r]
+            if _param is None:
+                pass
+            elif 'embedding_A' in name:
+                _param = _param[:, :_lora.tenant_config.r].clone()
             elif 'embedding_B' in name:
-                _param = _param[:_lora.tenant_config.r, :]
+                _param = _param[:_lora.tenant_config.r, :].clone()
             elif '_A' in name:
-                _param = _param[:_lora.tenant_config.r, :]
+                _param = _param[:_lora.tenant_config.r, :].clone()
             elif '_B' in name:
-                _param = _param[:, :_lora.tenant_config.r]
+                _param = _param[:, :_lora.tenant_config.r].clone()
             name = name.replace(f'.{_lora.adapter_name}.', '.')
             return name, _param
         else:
-            return None, None
+            return None
 
     def set_state_dict(self, tenant_adapter_name, state_dict):
         _lora = self.find_lora_by_tenant(tenant_adapter_name)

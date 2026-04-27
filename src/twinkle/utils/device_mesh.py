@@ -364,6 +364,15 @@ class DeviceMesh:
             f'data_world_size: {data_world_size} cannot be divided by ulysses_size: {ulysses_size}.')
         return data_world_size // ulysses_size
 
+    def _get_dp_fsdp_world_size(self) -> int:
+        dp_world_size = self.dp_world_size or 1
+        fsdp_world_size = self.fsdp_world_size or 1
+        if dp_world_size <= 0:
+            dp_world_size = 1
+        if fsdp_world_size <= 0:
+            fsdp_world_size = 1
+        return dp_world_size * fsdp_world_size
+
     def get_slice(self, total_length: int, rank: Optional[int] = None) -> slice:
         world_size = self.data_world_size
         if world_size == 1:
@@ -461,6 +470,39 @@ class DeviceMesh:
     def get_pp_last_ranks(self) -> Optional[list[int]]:
         pp_world_size = self.pp_world_size or 1
         return self.get_pp_stage_ranks(pp_world_size - 1)
+
+    def get_collect_ranks(self) -> list[int]:
+        """Get ranks for collecting slice_dp dispatch results.
+
+        For slice_dp dispatch, data is split by data_rank (DP/FSDP dimensions).
+        Within each data_rank group, outputs are identical (after all-gather for TP, etc.),
+        so we only need one representative per data_rank.
+
+        Returns: One rank per data_rank, preferring PP last stage.
+        """
+        data_ws = self.data_world_size
+        collect_ranks = []
+
+        # For each data_rank, find a representative global rank
+        for data_rank in range(data_ws):
+            # Find all global ranks that map to this data_rank
+            candidates = [
+                r for r in self.mesh.flatten().tolist() if self.get_data_rank_from_global_rank(r) == data_rank
+            ]
+            if not candidates:
+                continue
+
+            # Prefer PP last stage if PP exists
+            pp_last = self.get_pp_last_ranks()
+            if pp_last:
+                pp_candidates = [r for r in candidates if r in pp_last]
+                if pp_candidates:
+                    candidates = pp_candidates
+
+            # Take the smallest rank as representative
+            collect_ranks.append(min(candidates))
+
+        return sorted(collect_ranks)
 
     def has_dim(self, dim_name: str) -> bool:
         if self.mesh_dim_names is None:

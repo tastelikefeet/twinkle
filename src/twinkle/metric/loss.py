@@ -26,12 +26,16 @@ class LossMetric(Metric):
         loss = outputs['loss']
         loss_reduction = kwargs.get('loss_reduction', 'mean')
         if loss_reduction == 'sum':
-            if not isinstance(inputs, list):
-                inputs = [inputs]
-            for input in inputs:
-                # `Transformers` models may use reduction=sum, to average grads before step
-                labels = input['labels']
-                self.num_tokens += (labels >= 0).sum().item()
+            output_num_tokens = outputs.get('num_tokens')
+            if output_num_tokens is not None:
+                self.num_tokens += output_num_tokens.item() if hasattr(output_num_tokens, 'item') else output_num_tokens
+            else:
+                if not isinstance(inputs, list):
+                    inputs = [inputs]
+                for input in inputs:
+                    # Fallback for losses that do not expose an explicit token denominator in outputs.
+                    labels = input['labels']
+                    self.num_tokens += (labels >= 0).sum().item()
         grad_norm = kwargs.get('grad_norm')
         if grad_norm is not None:
             self.grad_norm = grad_norm
@@ -52,7 +56,6 @@ class LossMetric(Metric):
             'grad_norm': self.grad_norm,
             'num_tokens': self.num_tokens
         }]
-
         all_results = self.gather_results(local_results)
 
         total_loss = sum(r['loss'] for r in all_results)
@@ -61,8 +64,10 @@ class LossMetric(Metric):
         num_tokens = sum(r['num_tokens'] for r in all_results)
         if num_tokens > 0:
             avg_loss = total_loss / num_tokens
-        else:
+        elif total_count > 0:
             avg_loss = total_loss / total_count
+        else:
+            avg_loss = 0.0
         self.reset()
         results = {}
         if avg_loss is not None:

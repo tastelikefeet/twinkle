@@ -2,7 +2,7 @@
 import sys
 from typing import Any, Dict, List, Literal, Optional, Union
 
-if sys.version_info <= (3, 11):
+if sys.version_info[:2] <= (3, 11):
     # Pydantic requirements.
     from typing_extensions import TypedDict
 else:
@@ -68,6 +68,3 @@ class Message(TypedDict, total=False):
     content: Union[str, List[Dict[str, str]]]
     tool_calls: List[ToolCall]
     reasoning_content: str
-    images: Optional[List[Union[str, Any]]]
-    videos: Optional[List[Union[str, Any]]]
-    audios: Optional[List[Union[str, Any]]]

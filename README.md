@@ -2,7 +2,7 @@
 
 <p align="center">
     <img src="assets/slogan.png" width="200"/>
-<p>
+</p>
 <p align="center">
 by <a href="https://modelscope.cn/home">ModelScope</a>
 <br>
@@ -30,8 +30,8 @@ with `torchrun`, or scaling training across Ray clusters,
 Twinkle✨ eliminates infrastructure friction by encapsulating
 training logic into standardized APIs. Beyond simple
 abstraction, Twinkle✨ serves as a robust backend and gateway to enable serverless Training-as-a-Service (TaaS).
-It offers interfaces that constitute a _superset_ of  [Tinker](https://thinkingmachines.ai/tinker/) APIs,
-thereby making it possible to access a Twinkle✨ training service via Tinker client or native Twinkle✨ client
+It offers interfaces that constitute a _superset_ of [Tinker](https://thinkingmachines.ai/tinker/) APIs,
+thereby making it possible to access a Twinkle✨ training service via Tinker client or the native Twinkle✨ client,
 which offers more functionalities.
 
 🧩 <b>Decoupled Architecture</b>: Standardized Interfaces, backward compatible with Tinker APIs.<br>
@@ -39,13 +39,13 @@ which offers more functionalities.
 🔌 <b>Versatile Backends</b>: Transformers / Megatron.<br>
 👥 <b>Multi-Tenancy Training Service</b>: Train multiple LoRAs that share one base model deployment.<br>
 
-Note: Twinkle✨is built by the team behind [ms-swift](https://github.com/modelscope/ms-swift), and
+Note: Twinkle✨ is built by the team behind [ms-swift](https://github.com/modelscope/ms-swift), and
 we expect the two projects to evolve together. We expect some fundamental components in Twinkle✨will likely
 be reused in [ms-swift](https://github.com/modelscope/ms-swift).
 
-|                  Twinkle Wechat Group                  |
-|:------------------------------------------------------:|
-| <img src="assets/wechat.jpg" width="200" height="200"> |
+[Discord Group](https://discord.gg/yeN59wxjwe)              |                  Twinkle Wechat Group                  |
+:------------------------------------------------------:|:------------------------------------------------------:|
+<img src="assets/discord_qr.jpg" width="200" height="200">  | <img src="assets/wechat.jpg" width="200" height="200"> |
 
 ## Installation
 
@@ -61,6 +61,12 @@ pip install 'twinkle-kit'
 git clone https://github.com/modelscope/twinkle.git
 cd twinkle
 pip install -e .
+```
+
+### Use our docker image：
+
+```text
+modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:twinkle-0.2.1
 ```
 
 If you need to use Twinkle's Client, you can use our one-click installation script:
@@ -81,34 +87,43 @@ If you need to install Megatron-related dependencies, you can use the following 
 sh INSTALL_MEGATRON.sh
 ```
 
-Or use ModelScope's [official image](https://www.modelscope.cn/docs/intro/environment-setup).
-
 ## Tutorials
 
-| Training Type                     | Model Framework | Cookbook Path                                     |
-| --------------------------------- | --------------- | ------------------------------------------------- |
-| FSDP finetuning                   | transformers    | [Script](cookbook/transformers/fsdp2.py)             |
-| FSDP MoE finetuning               | transformers    | [Script](cookbook/transformers/fsdp2_moe.py)         |
-| ep FSDP MoE finetuning            | transformers    | [Script](cookbook/transformers/ep_fsdp_qwen3_moe.py) |
-| sp FSDP finetuning                | transformers    | [Script](cookbook/transformers/sp_fsdp_dense.py)     |
-| EP MoE finetuning                 | transformers    | [Script](cookbook/transformers/ep_fsdp_qwen3_moe.py) |
-| pp/tp/cp finetuning               | megatron        | [Script](cookbook/megatron/tp.py)                    |
-| pp/tp/cp MoE finetuning           | megatron        | [Script](cookbook/megatron/tp_moe.py)                |
-| tinker client finetuning          | megatron        | [Script](cookbook/client/tinker/megatron)            |
-| tinker client finetuning/sampling | transformers    | [Script](cookbook/client/tinker/transformer)         |
-| twinkle client finetuning         | megatron        | [Script](cookbook/client/twinkle/megatron)           |
-| twinkle client finetuning         | transformer     | [Script](cookbook/client/twinkle/transformer)        |
+| Training Type                        | Model Framework | Cookbook Path                                          |
+| ------------------------------------ | --------------- | ----------------------------------------------------- |
+| FSDP finetuning                      | transformers    | [Script](cookbook/transformers/fsdp2.py)               |
+| FSDP MoE finetuning                  | transformers    | [Script](cookbook/transformers/fsdp2_moe.py)           |
+| EP FSDP MoE finetuning               | transformers    | [Script](cookbook/transformers/ep_fsdp_qwen3_moe.py)  |
+| SP FSDP finetuning                   | transformers    | [Script](cookbook/transformers/sp_fsdp_dense.py)      |
+| pp/tp/cp finetuning                  | megatron        | [Script](cookbook/megatron/tp.py)                      |
+| pp/tp/cp MoE finetuning              | megatron        | [Script](cookbook/megatron/tp_moe.py)                  |
+| Multimodal FSDP finetuning           | transformers    | [Script](cookbook/mm/fsdp2.py)                         |
+| GRPO RL training                     | megatron        | [Script](cookbook/rl/grpo.py)                          |
+| GRPO Multimodal RL training          | megatron        | [Script](cookbook/rl/grpo_mm.py)                       |
+| GRPO Math RL training                | megatron        | [Script](cookbook/rl/short_math_grpo.py)               |
+| DPO full-parameter training          | transformers    | [Script](cookbook/rl/dpo_full.py)                      |
+| DPO LoRA training                    | transformers    | [Script](cookbook/rl/dpo_lora.py)                      |
+| DPO multi-LoRA training              | transformers    | [Script](cookbook/rl/dpo_multi_lora.py)                |
+| GKD on-policy distillation           | megatron        | [Script](cookbook/rl/gkd_on_policy.py)                 |
+| GKD off-policy distillation          | megatron        | [Script](cookbook/rl/gkd_off_policy.py)                |
+| Tinker client finetuning (self-host) | transformers    | [Script](cookbook/client/tinker/self_host)             |
+| Tinker client finetuning (ModelScope) | transformers   | [Script](cookbook/client/tinker/modelscope)            |
+| Twinkle client finetuning (self-host) | transformers   | [Script](cookbook/client/twinkle/self_host)            |
+| Twinkle client finetuning (ModelScope) | transformers  | [Script](cookbook/client/twinkle/modelscope)           |
+| Server startup scripts               | transformers/megatron | [Script](cookbook/client/server)                 |
 
 ## Changelog
-
+- 🎉2026-04-27 Support the `padding_free` operation for sft/dpo/grpo/gkd, use `set_processor('InputProcessor', padding_free=True)` to train with it.
+- 🎉2026-04-22 The ModelScope service has been deployed to [Qwen/Qwen3.6-27B](https://www.modelscope.cn/models/Qwen/Qwen3.6-27B) with a new release 0.2.1.
+- 🎉2026-04-14 The ModelScope service has been deployed to [Qwen/Qwen3.6-35B-A3B](https://www.modelscope.cn/models/Qwen/Qwen3.6-35B-A3B) with a new release 0.2.0.
+- 🎉2026-03-28 Support DPO training with both Transformers and Megatron backends. See [dpo_full.py](cookbook/rl/dpo_full.py) and [dpo_lora.py](cookbook/rl/dpo_lora.py).
 - 🎉2026-03-24 Twinkle Web site is now live at https://modelscope.github.io/twinkle-web/
-- 🎉2026-03-19 Support GKD training ，please refer to this [cookbook](cookbook/rl/gkd_on_policy.py).
+- 🎉2026-03-19 Support GKD training, please refer to this [cookbook](cookbook/rl/gkd_on_policy.py).
 - 🎉2026-02-13 Initial version of Twinkle✨ released, including SFT/PT/RL support for text models.
 
 ## Training as a Service on ModelScope
 
-We are rolling out training service built atop Twinkle✨ on ModelScope. It is currently in _Beta_. You may
-sign up for free access by joining the [Twinkle-Explorers](https://modelscope.cn/organization/twinkle-explorers) organization, and
+We are rolling out training service built atop Twinkle✨ on ModelScope. You may
 train via API endpoint  `base_url=https://www.modelscope.cn/twinkle`. For more details, please refer to
 our [documentation](docs/source_en/Usage%20Guide/Train-as-a-Service.md).
 
@@ -117,7 +132,7 @@ our [documentation](docs/source_en/Usage%20Guide/Train-as-a-Service.md).
 | Hardware Environment | Notes                                                            |
 | -------------------- | ---------------------------------------------------------------- |
 | Nvidia GPUs          | ✅ Support for BF16/Flash-Attn may be incomplete in earlier GPUs |
-| Ascend NPU           | ✅ Some operators may not supported                              |
+| Ascend NPU           | ✅ Some operators may not be supported                           |
 | PPU                  | ✅                                                               |
 | CPU                  | Supports partial components like dataset, dataloader             |
 
@@ -130,15 +145,15 @@ supported on Twinkle✨ framework.
 > For serverless training service accessed via `base_url=https://www.modelscope.cn/twinkle`, it
 > is currently provided via the Tinker-compatible APIs. We will be rolling out services that support
 > both Tinker APIs, as well as the full-fledged Twinkle✨ native APIs. The serverless endpoint is backed
-> by one training base at a time, and currently it is [Qwen3.5-4B](https://modelscope.cn/models/Qwen/Qwen3.5-4B).
+> by one training base at a time, and currently it is [Qwen3.6-27B](https://modelscope.cn/models/Qwen/Qwen3.6-27B).
 
 | Model Type          | Model ID on [ModelScope](https://modelscope.cn)                                                                 |               Model Size                | Requires             | Support Megatron |                                                HF Model ID                                                |
 |---------------------|-----------------------------------------------------------------------------------------------------------------|:---------------------------------------:|----------------------|:----------------:|:---------------------------------------------------------------------------------------------------------:|
 | qwen3 series        | [Qwen/Qwen3-14B-Base](https://modelscope.cn/models/Qwen/Qwen3-14B-Base)                                         |           0.6B/1.7B/4B/8B/14B           | transformers>=4.51   |        ✔         |                     [Qwen/Qwen3-14B-Base](https://huggingface.co/Qwen/Qwen3-14B-Base)                     |
 |                     | [Qwen/Qwen3-32B](https://modelscope.cn/models/Qwen/Qwen3-32B)                                                   |         0.6B/1.7B/4B/8B/14B/32B         | transformers>=4.51   |        ✔         |                          [Qwen/Qwen3-32B](https://huggingface.co/Qwen/Qwen3-32B)                          |
 | qwen3_moe series    | [Qwen/Qwen3-30B-A3B-Base](https://modelscope.cn/models/Qwen/Qwen3-30B-A3B-Base)                                 |       30B-A3B/A3B-Base,235B-A22B        | transformers>=4.51   |        ✔         |                 [Qwen/Qwen3-30B-A3B-Base](https://huggingface.co/Qwen/Qwen3-30B-A3B-Base)                 |
-| qwen3.5 moe series  | [Qwen/Qwen3.5-35B-A3B](https://www.modelscope.cn/models/Qwen/Qwen3.5-35B-A3B)                                   |         35B-A3B,122B-A10B, etc.         | transformers>=5.20   |        ✔         |                    [Qwen/Qwen3.5-35B-A3B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B)                    |
-| qwen3.5 series      | [Qwen/Qwen3.5-9B](https://www.modelscope.cn/models/Qwen/Qwen3.5-9B)                                             |                2B ~ 27B                 | transformers>=5.20   |        ✔         |                         [Qwen/Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B)                         |
+| qwen3.5 moe series  | [Qwen/Qwen3.5-35B-A3B](https://www.modelscope.cn/models/Qwen/Qwen3.5-35B-A3B)                                   |         35B-A3B,122B-A10B, etc.         | transformers>=5.2.0   |        ✔         |                    [Qwen/Qwen3.5-35B-A3B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B)                    |
+| qwen3.5 series      | [Qwen/Qwen3.5-9B](https://www.modelscope.cn/models/Qwen/Qwen3.5-9B)                                             |                2B ~ 27B                 | transformers>=5.2.0   |        ✔         |                         [Qwen/Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B)                         |
 | qwen2 series        | [Qwen/Qwen2-0.5B-Instruct](https://modelscope.cn/models/Qwen/Qwen2-0.5B-Instruct)                               |            0.5B/1.5B/7B/72B             | transformers>=4.37   |        ✔         |                [Qwen/Qwen2-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2-0.5B-Instruct)                |
 |                     | [Qwen/Qwen2-1.5B](https://modelscope.cn/models/Qwen/Qwen2-1.5B)                                                 |            0.5B/1.5B/7B/72B             | transformers>=4.37   |        ✔         |                         [Qwen/Qwen2-1.5B](https://huggingface.co/Qwen/Qwen2-1.5B)                         |
 |                     | [Qwen/Qwen2.5-1.5B-Instruct](https://modelscope.cn/models/Qwen/Qwen2.5-1.5B-Instruct)                           |       0.5B/1.5B/3B/7B/14B/32B/72B       | transformers>=4.37   |        ✔         |              [Qwen/Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct)              |
@@ -179,11 +194,11 @@ twinkle.initialize(mode='ray', groups=device_group, global_device_mesh=device_me
 
 def train():
     # to load model from Hugging Face, use 'hf://...'
-    base_model = 'ms://Qwen/Qwen3.5-4B'
+    base_model = 'ms://Qwen/Qwen3.6-27B'
     # 1000 samples
     dataset = Dataset(dataset_meta=DatasetMeta('ms://swift/self-cognition', data_slice=range(1000)))
     # Set template to prepare encoding
-    dataset.set_template('Template', model_id=base_model)
+    dataset.set_template('Qwen3_5Template', model_id=base_model)
     # Preprocess the dataset to standard format
     dataset.map(SelfCognitionProcessor('twinkle LLM', 'ModelScope Community'))
     # Encode dataset
@@ -235,13 +250,13 @@ from twinkle.dataset import Dataset, DatasetMeta
 from twinkle.preprocessor import SelfCognitionProcessor
 from twinkle.server.common import input_feature_to_datum
 
-base_model = 'ms://Qwen/Qwen3.5-4B'
+base_model = 'ms://Qwen/Qwen3.6-27B'
 base_url='your-base-url'
 api_key='your-api-key'
 
 # Use twinkle dataset to load the data
 dataset = Dataset(dataset_meta=DatasetMeta('ms://swift/self-cognition', data_slice=range(500)))
-dataset.set_template('Template', model_id=base_model, max_length=256)
+dataset.set_template('Qwen3_5Template', model_id=base_model, max_length=256)
 dataset.map(SelfCognitionProcessor('twinkle Model', 'ModelScope Team'), load_from_cache_file=False)
 dataset.encode(batched=True, load_from_cache_file=False)
 dataloader = DataLoader(dataset=dataset, batch_size=8)

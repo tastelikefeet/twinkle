@@ -7,6 +7,7 @@ both Tinker (/tinker/*) and Twinkle (/twinkle/*) model endpoints.
 """
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from ray import serve
 from ray.serve.config import RequestRouterConfig
@@ -15,6 +16,7 @@ from typing import Any, Dict, Optional
 import twinkle
 from twinkle import DeviceGroup, DeviceMesh
 from twinkle.server.utils.lifecycle import AdapterManagerMixin
+from twinkle.server.utils.metrics import create_metrics_middleware
 from twinkle.server.utils.state import ServerStateProxy, get_server_state
 from twinkle.server.utils.task_queue import TaskQueueConfig, TaskQueueMixin
 from twinkle.server.utils.validation import get_token_from_request, verify_request_token
@@ -44,7 +46,7 @@ class ModelManagement(TaskQueueMixin, AdapterManagerMixin):
                  device_group: dict[str, Any],
                  device_mesh: dict[str, Any],
                  use_megatron: bool = False,
-                 adapter_config: dict[str, Any] = {},
+                 adapter_config: dict[str, Any] | None = None,
                  queue_config: dict[str, Any] | None = None,
                  **kwargs):
         self.device_group = DeviceGroup(**device_group)
@@ -81,8 +83,8 @@ class ModelManagement(TaskQueueMixin, AdapterManagerMixin):
         self._replica_registered = False
 
         # Initialize mixins
-        self._init_task_queue(TaskQueueConfig.from_dict(queue_config))
-        self._init_adapter_manager(**adapter_config)
+        self._init_task_queue(TaskQueueConfig.from_dict(queue_config), deployment_name='Model')
+        self._init_adapter_manager(**(adapter_config or {}))
         # Note: countdown task is started lazily in _ensure_sticky()
 
     async def _ensure_replica_registered(self):
@@ -107,13 +109,10 @@ class ModelManagement(TaskQueueMixin, AdapterManagerMixin):
         token = get_token_from_request(request)
         return token
 
-    def __del__(self):
+    async def shutdown(self) -> None:
+        """Explicit async cleanup — called via FastAPI shutdown event."""
         try:
-            # Best-effort cleanup; event loop may already be closed
-            import asyncio
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.create_task(self.state.unregister_replica(self.replica_id))
+            await self.state.unregister_replica(self.replica_id)
         except Exception:
             pass
 
@@ -135,7 +134,7 @@ def build_model_app(model_id: str,
                     device_mesh: dict[str, Any],
                     deploy_options: dict[str, Any],
                     use_megatron: bool = False,
-                    adapter_config: dict[str, Any] = {},
+                    adapter_config: dict[str, Any] | None = None,
                     queue_config: dict[str, Any] | None = None,
                     **kwargs):
     """Build a unified model management application for distributed training.
@@ -143,7 +142,7 @@ def build_model_app(model_id: str,
     Supports both Tinker (polling-style) and Twinkle (synchronous) clients.
 
     Args:
-        model_id: Base model identifier (e.g., "Qwen/Qwen2.5-0.5B-Instruct")
+        model_id: Base model identifier (e.g., "Qwen/Qwen3.5-4B")
         nproc_per_node: Number of processes per node for distributed training
         device_group: Device group configuration dict
         device_mesh: Device mesh configuration dict for tensor parallelism
@@ -156,16 +155,27 @@ def build_model_app(model_id: str,
     Returns:
         Configured Ray Serve deployment bound with parameters
     """
+
     # Build the FastAPI app and register all routes BEFORE serve.ingress so that
     # the frozen app contains the complete route table (visible to ProxyActor).
-    app = FastAPI()
+    def get_self() -> ModelManagement:
+        return serve.get_replica_context().servable_object
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        yield
+        try:
+            await get_self().shutdown()
+        except Exception:
+            pass
+
+    app = FastAPI(lifespan=lifespan)
 
     @app.middleware('http')
     async def verify_token(request: Request, call_next):
         return await verify_request_token(request=request, call_next=call_next)
 
-    def get_self() -> ModelManagement:
-        return serve.get_replica_context().servable_object
+    app.middleware('http')(create_metrics_middleware('Model'))
 
     _register_tinker_routes(app, get_self)
     _register_twinkle_routes(app, get_self)

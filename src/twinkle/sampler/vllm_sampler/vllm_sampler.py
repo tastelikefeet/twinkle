@@ -122,8 +122,7 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
         # fix: On NPU, monkey_patch_model can trigger Triton compatibility errors and abort sampler init.
         # fix: Explicitly skip this patch on NPU and keep it for non-NPU paths only.
         # NPU platform may trigger triton errors with monkey_patch_model
-        if Platform.get_platform().device_prefix() != 'npu':
-            self._run_in_loop(self.engine.engine.collective_rpc('monkey_patch_model'))
+        self._run_in_loop(self.engine.engine.collective_rpc('monkey_patch_model'))
 
         VLLMLoraWeights()(self)
 
@@ -147,74 +146,67 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
     def encode_trajectory_for_vllm(self,
                                    trajectory: Trajectory,
                                    adapter_name: str = '',
-                                   add_generation_prompt=True) -> InputFeature:
-        """Encode trajectory for vLLM - does not expand image tokens.
+                                   add_generation_prompt=True) -> Dict[str, Any]:
+        """Encode trajectory for vLLM.
 
-        Args:
-            trajectory: The trajectory to encode.
-            adapter_name: Optional LoRA adapter name.
-
-        Returns:
-            InputFeature with input_ids suitable for vLLM (unexpanded image tokens).
+        Messages should already use transformers standard format (content is List[Dict]).
+        ``encode`` preprocesses media refs in-place (to PIL objects).
         """
         template = self.template
         if template is None:
             raise ValueError(f"Template not set for adapter '{adapter_name}'. Use set_template() first.")
-
-        # For vLLM: tokenize without passing images to the processor
-        # This gives us the text with placeholder tokens, which vLLM will expand
-        messages = [dict(msg) for msg in trajectory['messages']]
-
-        # Preprocess images for vLLM (load as PIL Images)
-        # vLLM expects PIL Images, not URLs
-        images = []
-        if trajectory.get('images'):
-            images = template.preprocess_images(trajectory['images'])
-        videos = []
-        if trajectory.get('videos'):
-            videos = template.preprocess_videos(trajectory['videos'])
-
-        # Apply chat template without images (to get unexpanded tokens)
-        # We need to convert <image> placeholders to the model's native format
-        for msg in messages:
-            content = msg.get('content', '')
-            if isinstance(content, str) and template.is_mm:
-                # Convert placeholders to standard format for tokenization
-                if template.image_placeholder in content:
-                    # Split content by image placeholder and rebuild with proper format
-                    parts = content.split(template.image_placeholder)
-                    new_content = []
-                    for i, part in enumerate(parts):
-                        if i > 0:
-                            # Add image token structure (vLLM will expand this)
-                            new_content.append({'type': 'image'})
-                        if part.strip():
-                            new_content.append({'type': 'text', 'text': part})
-                    msg['content'] = new_content if new_content else [{'type': 'text', 'text': ''}]
-
-        encoded = template.batch_encode(
-            [Trajectory(messages=messages)],
+        encoded = template.encode(
+            trajectory,
             add_generation_prompt=add_generation_prompt,
-        )[0]
-
-        input_ids = encoded['input_ids']
-        if hasattr(input_ids, 'squeeze'):
-            input_ids = input_ids.squeeze()
-        if hasattr(input_ids, 'tolist'):
-            input_ids = input_ids.tolist()
-
-        result = trajectory
-        result.update(encoded)
-
-        # Attach preprocessed images/videos for vLLM
-        if images:
-            result['images'] = images
-        if videos:
-            result['videos'] = videos
-        return result
+        )
+        for key in encoded:
+            if isinstance(encoded[key], np.ndarray):
+                encoded[key] = encoded[key].tolist()
+        return encoded
 
     def apply_patch(self, patch_cls: Union[Patch, Type[Patch], str], **kwargs) -> None:
         apply_patch(self, patch_cls, **kwargs)
+
+    @staticmethod
+    def _extract_multi_modal_data(feat: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Build vLLM ``multi_modal_data`` dict from feat.
+
+        Checks top-level 'images'/'videos' first, then falls back to
+        extracting PIL objects from transformers-standard message content blocks.
+        """
+        images = feat.get('images')
+        videos = feat.get('videos')
+
+        if not images and not videos:
+            for msg in feat.get('messages', []):
+                content = msg.get('content')
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    btype = block.get('type')
+                    if btype == 'image':
+                        for key in ('image', 'url', 'path'):
+                            if key in block and block[key] is not None:
+                                if images is None:
+                                    images = []
+                                images.append(block[key])
+                                break
+                    elif btype == 'video':
+                        for key in ('video', 'url', 'path'):
+                            if key in block and block[key] is not None:
+                                if videos is None:
+                                    videos = []
+                                videos.append(block[key])
+                                break
+
+        mm_data = {}
+        if images:
+            mm_data['image'] = images
+        if videos:
+            mm_data['video'] = videos
+        return mm_data or None
 
     async def _sample_single(
         self,
@@ -222,6 +214,7 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
         sampling_params: SamplingParams,
         lora_request: Optional[Any] = None,
         *,
+        multi_modal_data: Optional[Dict[str, Any]] = None,
         logprobs_only: bool = False,
     ) -> SampleResponse:
         """Sample a single input asynchronously.
@@ -232,50 +225,57 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
             adapter_path: Optional LoRA adapter path (legacy, prefer lora_request).
             lora_request: Pre-built LoRARequest to attach to the sampling request.
                 Avoids repeated ``_get_or_load_lora`` calls per input.
+            multi_modal_data: The multi modal data dict.
             logprobs_only: Only return logprobs (no generated tokens).
 
         Returns:
             A SampleResponse object
         """
-        input_ids = feat['input_ids']
-        if hasattr(input_ids, 'tolist'):
-            input_ids = input_ids.tolist()
-
-        images = feat.get('images')
-        videos = feat.get('videos')
-
         response = await self.engine.sample(
-            prompt_token_ids=input_ids,
+            prompt=self.template.get_vllm_input_ids(feat['input_ids']),
             sampling_params=sampling_params,
             lora_request=lora_request,
-            images=images,
-            videos=videos,
+            multi_modal_data=multi_modal_data,
+            mm_processor_kwargs=feat.get('mm_processor_kwargs'),
         )
 
+        if 'input_ids' not in feat or multi_modal_data:
+            if 'input_ids' in feat:
+                if len(feat['input_ids']) != len(response.prompt_token_ids):
+                    raise RuntimeError(f'Input ids length {len(feat["input_ids"])} does not '
+                                       f'match prompt_token_ids length {len(response.prompt_token_ids)}')
+            else:
+                feat['input_ids'] = response.prompt_token_ids
+                feat['labels'] = [-100] * len(response.prompt_token_ids)
         if not logprobs_only:
             # response.sequences contains num_samples sequences for this prompt
+            sequences = []
+            for seq in response.sequences:
+                sampled_seq = SampledSequence(
+                    stop_reason=seq.stop_reason,
+                    tokens=seq.tokens,
+                    logprobs=seq.logprobs,
+                    decoded=self.template.decode(seq.tokens),
+                    new_input_feature=_convert_ndarray_to_list(self.template.concat_input_feature(feat, seq.tokens)),
+                )
+                sequences.append(sampled_seq)
             return SampleResponse(
-                sequences=[
-                    SampledSequence(
-                        stop_reason=seq.stop_reason,
-                        tokens=seq.tokens,
-                        logprobs=seq.logprobs,
-                        decoded=self.template.decode(seq.tokens),
-                        new_input_feature=_convert_ndarray_to_list(
-                            self.template.concat_input_feature(feat, seq.tokens)),
-                    ) for seq in response.sequences
-                ],
+                prompt_token_ids=response.prompt_token_ids,
+                sequences=sequences,
                 prompt_logprobs=response.prompt_logprobs,
                 topk_prompt_logprobs=response.topk_prompt_logprobs)
         else:
+            sequences = []
+            for seq in response.sequences:
+                sampled_seq = SampledSequence(
+                    tokens=[],
+                    stop_reason=seq.stop_reason,
+                    new_input_feature=_convert_ndarray_to_list(feat),
+                )
+                sequences.append(sampled_seq)
             return SampleResponse(
-                sequences=[
-                    SampledSequence(
-                        tokens=[],
-                        stop_reason=seq.stop_reason,
-                        new_input_feature=_convert_ndarray_to_list(feat),
-                    ) for seq in response.sequences
-                ],
+                prompt_token_ids=response.prompt_token_ids,
+                sequences=sequences,
                 prompt_logprobs=response.prompt_logprobs,
                 topk_prompt_logprobs=response.topk_prompt_logprobs)
 
@@ -322,13 +322,18 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
         inputs_list = self._normalize_inputs(inputs)
 
         # Check if inputs are Trajectory (not encoded) - aligned with Model.forward logic
-        is_trajectory = self._is_trajectory(inputs)
+        is_trajectory = 'input_ids' not in inputs_list[0]
         logprobs_only = False
         if sampling_params.max_tokens == 0:
             sampling_params.max_tokens = 1
             logprobs_only = True
+            assert not is_trajectory, 'Logprobs only not supported for Trajectory inputs'
 
-        if is_trajectory:
+        multi_modal_data_list = []
+        for feat in inputs_list:
+            multi_modal_data_list.append(self._extract_multi_modal_data(feat))
+
+        if is_trajectory and not logprobs_only:
             template = self.template
             assert template is not None, \
                 'Use set_template to add a template when trying to input Trajectory'
@@ -340,6 +345,7 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
 
         lora_request = None
         if adapter_path is not None:
+            logger.info(f'Loading LoRA from {adapter_path}')
             lora_request = self._run_in_loop(self.engine._get_or_load_lora(adapter_path))
             if lora_request is None:
                 logger.warning(f'Failed to pre-load LoRA from {adapter_path}, '
@@ -352,8 +358,9 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
                     feat,
                     sampling_params,
                     lora_request=lora_request,
+                    multi_modal_data=multi_modal_data,
                     logprobs_only=logprobs_only,
-                ) for feat in encoded_inputs
+                ) for feat, multi_modal_data in zip(encoded_inputs, multi_modal_data_list)
             ]
             return await asyncio.gather(*tasks)
 
@@ -374,6 +381,10 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
     @remote_function(dispatch='all', collect='first')
     def reset_prefix_cache(self):
         self._run_in_loop(self.engine.reset_prefix_cache())
+
+    @remote_function(dispatch='all', collect='first')
+    def get_state_keys(self):
+        return self._run_in_loop(self.engine.get_state_keys())
 
     @remote_function(dispatch='all', lazy_collect=True)
     def receive_weights(
@@ -425,6 +436,7 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
 
         self._run_in_loop(_receive_and_load())
 
+    @remote_function(dispatch='all', collect='first', lazy_collect=False)
     def shutdown(self):
         """Gracefully shutdown the vLLM engine and background event loop.
 

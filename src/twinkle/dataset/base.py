@@ -50,11 +50,18 @@ class Dataset(TorchDataset):
             Any other kwargs supported by `datasets.load_dataset`.
     """
 
-    def __init__(self, dataset_meta: DatasetMeta, **kwargs):
+    def __init__(self, dataset_meta: DatasetMeta = None, **kwargs):
+        self.template = None
+        if dataset_meta is None:
+            self.datasets = {}
+            self.dataset = None
+            return
+        trust_remote_code = bool(os.environ.get('TWINKLE_TRUST_REMOTE_CODE', '1'))
+        if not trust_remote_code:
+            kwargs['trust_remote_code'] = False
         dataset = self._load_dataset(dataset_meta, **kwargs)
         self.datasets = {dataset_meta.get_id(): dataset}
         self.dataset = dataset
-        self.template = None
 
     @remote_function()
     def set_template(self, template_func: Union[Template, Type[Template], str], **kwargs):
@@ -86,9 +93,9 @@ class Dataset(TorchDataset):
         encode_fn = partial(self.template.batch_encode, add_generation_prompt=add_generation_prompt)
         with processing_lock('dataset'):
             # use a default lock because encode is to all datasets
-            self.dataset = self.dataset.map(encode_fn,
-                                            **kwargs).filter(lambda batch: [len(x) > 0 for x in batch['input_ids']],
-                                                             **kwargs)
+            self.dataset = self.dataset.map(encode_fn, **kwargs).filter(
+                lambda batch: [True] * len(next(iter(batch.values())))
+                if 'input_ids' not in batch else [len(x) > 0 for x in batch['input_ids']], **kwargs)
 
     @remote_function()
     def check(self, **kwargs):
@@ -169,6 +176,19 @@ class Dataset(TorchDataset):
         return dataset
 
     @remote_function()
+    def cast_column(self, column: str, decode: bool = True) -> None:
+        """Cast an image/audio column's decode mode.
+
+        Useful for setting ``decode=False`` before ``.map()`` to keep media
+        as raw bytes and avoid expensive PIL encode/decode round-trips.
+        """
+        from datasets import Image as ImageFeature
+        for key in list(self.datasets.keys()):
+            self.datasets[key] = self.datasets[key].cast_column(column, ImageFeature(decode=decode))
+        if len(self.datasets) == 1:
+            self.dataset = self.datasets[next(iter(self.datasets.keys()))]
+
+    @remote_function()
     def map(self,
             preprocess_func: Union[Preprocessor, Callable, str, Type[Preprocessor]],
             dataset_meta: DatasetMeta = None,
@@ -234,8 +254,13 @@ class Dataset(TorchDataset):
         Args:
             dataset_meta: The dataset_meta information of the loaded dataset.
         """
+        trust_remote_code = bool(os.environ.get('TWINKLE_TRUST_REMOTE_CODE', '1'))
+        if not trust_remote_code:
+            kwargs['trust_remote_code'] = False
         dataset = self._load_dataset(dataset_meta, **kwargs)
         self.datasets[dataset_meta.get_id()] = dataset
+        if len(self.datasets) == 1:
+            self.dataset = dataset
 
     @remote_function()
     def mix_dataset(self, interleave=True):

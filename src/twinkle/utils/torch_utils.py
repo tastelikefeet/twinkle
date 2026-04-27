@@ -1,6 +1,6 @@
 import socket
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Union
+from typing import TYPE_CHECKING, Any, List, Mapping, Optional, Union
 
 from .network import is_valid_ipv6_address
 
@@ -77,7 +77,7 @@ def selective_log_softmax(logits, index) -> 'torch.Tensor':
         if mpu.get_tensor_model_parallel_world_size() > 1:
             # clone to avoid modifying the original logits
             return _vocab_parallel_selective_log_softmax(logits.clone(), index)
-    except Exception:
+    except (ImportError, AssertionError, OSError):
         pass
 
     if logits.dtype in [torch.float32, torch.float64]:
@@ -190,3 +190,64 @@ def stateless_init_process_group(
 
     communicator = Communicator(pg, device=device)
     return communicator
+
+
+def pad_and_stack_tensors(tensors: List['torch.Tensor'], pad_value: float = -200, concat=True) -> 'torch.Tensor':
+    import torch
+    if not tensors:
+        raise ValueError('Empty tensor list')
+
+    if len(tensors) == 1:
+        return tensors[0]
+
+    max_ndim = max(t.ndim for t in tensors)
+    expanded_tensors = []
+    for t in tensors:
+        while t.ndim < max_ndim:
+            t = t.unsqueeze(0)
+        expanded_tensors.append(t)
+
+    max_shape = []
+    for dim in range(max_ndim):
+        max_shape.append(max(t.shape[dim] for t in expanded_tensors))
+
+    padded_tensors = []
+    for t in expanded_tensors:
+        if list(t.shape) == max_shape:
+            padded_tensors.append(t)
+        else:
+            pad_params = []
+            for dim in range(max_ndim - 1, -1, -1):
+                pad_params.extend([0, max_shape[dim] - t.shape[dim]])
+            padded = torch.nn.functional.pad(t, pad_params, value=pad_value)
+            padded_tensors.append(padded)
+
+    if concat:
+        return torch.cat(padded_tensors, dim=0)
+    else:
+        return torch.stack(padded_tensors, dim=0)
+
+
+def split_cp_inputs(inputs: 'torch.Tensor', cu_seqlens: Optional['torch.Tensor'], dim: int):
+    import torch
+    from megatron.core import mpu
+    if dim < 0:
+        dim = (dim + inputs.ndim) % inputs.ndim
+    new_inputs = []
+    cp_size = mpu.get_context_parallel_world_size()
+    cp_rank = mpu.get_context_parallel_rank()
+    for i in range(1 if cu_seqlens is None else (cu_seqlens.shape[0] - 1)):
+        if cu_seqlens is None:
+            val = inputs
+        else:
+            slices = [slice(None)] * inputs.ndim
+            slices[dim] = slice(cu_seqlens[i], cu_seqlens[i + 1])
+            val = inputs[tuple(slices)]
+        view_shape = (*inputs.shape[:dim], 2 * cp_size, val.shape[dim] // (2 * cp_size), *inputs.shape[dim + 1:])
+        val = val.view(view_shape)
+        index = torch.tensor([cp_rank, (2 * cp_size - cp_rank - 1)], device='cpu',
+                             pin_memory=True).cuda(non_blocking=True)
+        val = val.index_select(dim, index)
+        view_shape = (*inputs.shape[:dim], -1, *inputs.shape[dim + 1:])
+        new_inputs.append(val.view(view_shape))
+    return torch.cat(new_inputs, dim=dim)

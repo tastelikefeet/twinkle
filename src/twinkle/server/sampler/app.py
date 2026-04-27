@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 
 import twinkle
 from twinkle import DeviceGroup, DeviceMesh
+from twinkle.server.utils.metrics import create_metrics_middleware
 from twinkle.server.utils.state import ServerStateProxy, get_server_state
 from twinkle.server.utils.task_queue import TaskQueueConfig, TaskQueueMixin
 from twinkle.server.utils.validation import get_token_from_request, verify_request_token
@@ -50,37 +51,27 @@ class SamplerManagement(TaskQueueMixin):
         else:
             self.device_mesh = DeviceMesh.from_sizes(**device_mesh)
         self.sampler_type = sampler_type
+        self.model_id = model_id
         replica_context = serve.get_replica_context()
         replica_id = replica_context.replica_id.unique_id
 
-        # Initialize sampler based on type
-        if sampler_type == 'vllm':
-            from twinkle.sampler import vLLMSampler
-            sampler_kwargs = engine_args or {}
-            self.sampler = vLLMSampler(
-                model_id=model_id,
-                engine_args=sampler_kwargs,
-                device_mesh=self.device_mesh,
-                remote_group=self.device_group.name,
-                instance_id=replica_id,
-                **{
-                    k: v
-                    for k, v in kwargs.items() if k not in ['engine_args']
-                })
-        else:
-            from twinkle.sampler import TorchSampler
-            self.sampler = TorchSampler(
-                model_id=model_id,
-                device_mesh=self.device_mesh,
-                instance_id=replica_id,
-                remote_group=self.device_group.name,
-                **kwargs)
+        from twinkle.sampler import vLLMSampler
+        sampler_kwargs = engine_args or {}
+        self.sampler = vLLMSampler(
+            model_id=model_id,
+            engine_args=sampler_kwargs,
+            device_mesh=self.device_mesh,
+            remote_group=self.device_group.name,
+            instance_id=replica_id,
+            **{
+                k: v
+                for k, v in kwargs.items() if k not in ['engine_args']
+            })
 
-        self.sampler.set_template('Template', model_id=model_id)
         self.state: ServerStateProxy = get_server_state()
 
         # Initialize task queue mixin
-        self._init_task_queue(TaskQueueConfig.from_dict(queue_config))
+        self._init_task_queue(TaskQueueConfig.from_dict(queue_config), deployment_name='Sampler')
 
     @serve.multiplexed(max_num_models_per_replica=5)
     async def _sticky_entry(self, sticky_key: str):
@@ -111,7 +102,7 @@ def build_sampler_app(model_id: str,
     Twinkle (synchronous /twinkle/*) sampler clients.
 
     Args:
-        model_id: Model identifier (e.g., "Qwen/Qwen2.5-0.5B-Instruct")
+        model_id: Model identifier (e.g., "Qwen/Qwen3.5-4B")
         nproc_per_node: Number of processes per node
         device_group: Device group configuration dict
         device_mesh: Device mesh configuration dict for parallelism
@@ -134,6 +125,8 @@ def build_sampler_app(model_id: str,
     @app.middleware('http')
     async def verify_token(request: Request, call_next):
         return await verify_request_token(request=request, call_next=call_next)
+
+    app.middleware('http')(create_metrics_middleware('Sampler'))
 
     def get_self() -> SamplerManagement:
         return serve.get_replica_context().servable_object

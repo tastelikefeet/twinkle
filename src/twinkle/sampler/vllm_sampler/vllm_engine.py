@@ -1,6 +1,8 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
+import contextlib
 import inspect
 import os
+import re
 import torch
 import uuid
 from typing import Any, Dict, List, Optional, Union
@@ -95,6 +97,18 @@ class VLLMEngine(BaseSamplerEngine):
         # ``list_loras()`` per request.
         self._synced_lora_request: Optional[Any] = None
 
+        # Long-lived CUDA IPC bucket reused across all update_weights()
+        # calls. Allocating a new IPC buffer (and hence a new IPC handle)
+        # per sync forces every worker to create a new CUDA IPC mapping via
+        # ``rebuild_cuda_tensor`` because PyTorch's ``shared_cache`` cannot
+        # hit on unseen storage handles. The driver reclaims those mappings
+        # lazily, which is the root cause of the slow GPU memory drift we
+        # observed under frequent LoRA syncs. By pinning a single buffer
+        # and its handle we guarantee the worker-side cache always hits.
+        self._ipc_buffer: Optional[torch.Tensor] = None
+        self._ipc_handle: Any = None
+        self._ipc_buffer_size: int = 0
+
         # Initialize engine
         self.engine = self._create_engine()
 
@@ -177,39 +191,33 @@ class VLLMEngine(BaseSamplerEngine):
     # =========================================================================
 
     async def sample(self,
-                     prompt_token_ids: List[int],
+                     prompt: Union[List[int], str],
                      sampling_params: Union[SamplingParams, Dict[str, Any]],
                      lora_request: Optional[Any] = None,
                      request_id: Optional[str] = None,
                      priority: int = 0,
                      *,
-                     images: Optional[List[Any]] = None,
-                     videos: Optional[List[Any]] = None,
+                     multi_modal_data: Optional[Dict[str, Any]] = None,
+                     mm_processor_kwargs: Optional[Dict[str, Any]] = None,
                      **kwargs) -> SampleResponse:
         """
         Sample completions from the model.
 
-        This is the core API aligned with tinker's sampling interface.
-
         Args:
-            prompt_token_ids: Input token IDs.
+            prompt: Input token IDs or string.
             sampling_params: Sampling parameters (tinker.types.SamplingParams or dict).
-            num_samples: Number of samples to generate.
-            logprobs: Whether to return log probabilities for generated tokens.
-            include_prompt_logprobs: Whether to compute logprobs on prompt tokens.
-            topk_prompt_logprobs: If > 0, returns top-k logprobs for each prompt token.
             lora_request: LoRARequest for sampling.
             request_id: Optional request ID for tracking.
             priority: Request priority (higher = more urgent).
-            images: Optional list of images for multimodal models.
-                    Can be PIL.Image, file paths, URLs, or bytes.
-            videos: Optional list of videos for multimodal models.
-                    Can be file paths or list of frames.
+            multi_modal_data: Optional dict of multimodal data for vLLM
+                (e.g. ``{'image': [PIL_Image, ...], 'video': [...]}``)
+            mm_processor_kwargs: Optional kwargs forwarded to vLLM's multimodal processor
+                (e.g. ``{'do_resize': False}``)
 
         Returns:
-            tinker.types.SampleResponse containing sequences and optionally prompt_logprobs.
+            SampleResponse containing sequences and optionally prompt_logprobs.
         """
-        from vllm.inputs import TokensPrompt
+        from vllm.inputs import TextPrompt, TokensPrompt
 
         # Convert to vLLM params
         if isinstance(sampling_params, dict):
@@ -222,21 +230,14 @@ class VLLMEngine(BaseSamplerEngine):
         if request_id is None:
             request_id = uuid.uuid4().hex
 
-        # Build multi_modal_data if images or videos provided
-        multi_modal_data = {}
-        if images:
-            multi_modal_data['image'] = images
-        if videos:
-            multi_modal_data['video'] = videos
-
-        # Build prompt (with or without multimodal data)
-        if multi_modal_data:
-            prompt = TokensPrompt(
-                prompt_token_ids=prompt_token_ids,
-                multi_modal_data=multi_modal_data,
-            )
+        if isinstance(prompt, str):
+            prompt = TextPrompt(prompt=prompt)
         else:
-            prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
+            prompt = TokensPrompt(prompt_token_ids=prompt)
+        if multi_modal_data:
+            prompt['multi_modal_data'] = multi_modal_data
+        if mm_processor_kwargs:
+            prompt['mm_processor_kwargs'] = mm_processor_kwargs
 
         if lora_request is not None and not self.enable_lora:
             logger.warning('lora_request provided but enable_lora is '
@@ -276,8 +277,17 @@ class VLLMEngine(BaseSamplerEngine):
                 seq_logprobs = []
                 for i, lp in enumerate(output.logprobs):
                     if i < len(token_ids):
-                        sorted_items = sorted(lp.items(), key=lambda x: -(x[1].logprob))[:logprobs]
-                        seq_logprobs.append([(tid, lp_obj.logprob) for tid, lp_obj in sorted_items])
+                        if logprobs == 1:
+                            # Single logprob mode: return the sampled token's logprob
+                            # in the same [(tid, logprob)] format as multi-logprob mode
+                            tid = token_ids[i]
+                            assert tid in lp, (f'Sampled token {tid} not found in logprobs at position {i}. '
+                                               f'Available tokens: {list(lp.keys())}')
+                            seq_logprobs.append([(tid, lp[tid].logprob)])
+                        else:
+                            # Multiple logprobs mode: return top-k logprobs
+                            sorted_items = sorted(lp.items(), key=lambda x: -(x[1].logprob))[:logprobs]
+                            seq_logprobs.append([(tid, lp_obj.logprob) for tid, lp_obj in sorted_items])
 
             # Map finish_reason to StopReason
             stop_reason: StopReason = 'length'
@@ -304,8 +314,8 @@ class VLLMEngine(BaseSamplerEngine):
                     continue
 
                 # Get logprob for the actual token
-                if i < len(prompt_token_ids):
-                    token_id = prompt_token_ids[i]
+                if i < len(result.prompt_token_ids):
+                    token_id = result.prompt_token_ids[i]
                     if token_id in lp_dict:
                         lp_obj = lp_dict[token_id]
                         result_prompt_logprobs.append(lp_obj.logprob)
@@ -319,6 +329,7 @@ class VLLMEngine(BaseSamplerEngine):
                 result_topk_prompt_logprobs.append([(tid, lp_obj.logprob) for tid, lp_obj in sorted_items])
         return SampleResponse(
             sequences=sequences,
+            prompt_token_ids=result.prompt_token_ids,
             prompt_logprobs=result_prompt_logprobs,
             topk_prompt_logprobs=result_topk_prompt_logprobs,
         )
@@ -377,6 +388,7 @@ class VLLMEngine(BaseSamplerEngine):
 
         # Fast path: return cached request for this path.
         if lora_path in self._lora_request_cache:
+            logger.info(f'Using cached LoRA request for {lora_path}')
             return self._lora_request_cache[lora_path]
 
         if not os.path.exists(lora_path):
@@ -450,6 +462,13 @@ class VLLMEngine(BaseSamplerEngine):
     async def reset_prefix_cache(self) -> None:
         await self.engine.reset_prefix_cache()
 
+    async def get_state_keys(self) -> List[str]:
+        results = await self.engine.collective_rpc('get_state_keys')
+        all_keys = set()
+        for r in results:
+            all_keys.update(r)
+        return list(all_keys)
+
     async def update_weights(
         self,
         weights,
@@ -517,7 +536,14 @@ class VLLMEngine(BaseSamplerEngine):
         sync_id = uuid.uuid4().hex
         zmq_handle = f'ipc:///tmp/twinkle-ipc-{device_uuid}-{os.getpid()}-{sync_id}.sock'
 
+        env_bucket_mb = os.environ.get('TWINKLE_VLLM_BUCKET_SIZE_MB')
+        if env_bucket_mb is not None:
+            bucket_size_mb = int(env_bucket_mb)
+        if bucket_size_mb <= 0:
+            raise ValueError(f'bucket_size_mb must be > 0, got {bucket_size_mb}')
+
         bucket_size = bucket_size_mb << 20
+        lora_mode = bool(base_sync_done and peft_config)
 
         # Create transfer buffer
         buffer = None
@@ -525,8 +551,25 @@ class VLLMEngine(BaseSamplerEngine):
 
         if use_gpu_ipc:
             from torch.multiprocessing.reductions import reduce_tensor
-            buffer = torch.empty(bucket_size, dtype=torch.uint8, device=first_tensor.device)
-            ipc_handle = reduce_tensor(buffer)
+
+            # Reuse a long-lived IPC bucket whenever the requested size
+            # fits. The handle is produced once and shipped to every
+            # subsequent sync so each worker's ``shared_cache`` stays warm
+            # and no new CUDA IPC mapping is created per sync.
+            need_realloc = (
+                self._ipc_buffer is None or self._ipc_buffer_size < bucket_size
+                or self._ipc_buffer.device != first_tensor.device)
+            if need_realloc:
+                # Drop the old handle/buffer before allocating a bigger one
+                # so we do not briefly hold both and double the peak usage.
+                self._ipc_buffer = None
+                self._ipc_handle = None
+                self._ipc_buffer_size = 0
+                self._ipc_buffer = torch.empty(bucket_size, dtype=torch.uint8, device=first_tensor.device)
+                self._ipc_handle = reduce_tensor(self._ipc_buffer)
+                self._ipc_buffer_size = bucket_size
+            buffer = self._ipc_buffer
+            ipc_handle = self._ipc_handle
         else:
             from multiprocessing import shared_memory
             shm_name = f'twinkle_weights_{uuid.uuid4().hex}'
@@ -554,104 +597,125 @@ class VLLMEngine(BaseSamplerEngine):
             except zmq.error.Again as e:
                 raise RuntimeError(f'IPC timeout ({zmq_timeout_s}s) during {where} on {zmq_handle}') from e
 
-        # Launch worker side concurrently
-        worker_task = asyncio.ensure_future(
-            self.engine.collective_rpc(
-                'update_weights_from_ipc',
-                kwargs={
-                    'peft_config': peft_config,
-                    'base_sync_done': base_sync_done,
-                    'use_shm': use_shm,
-                    'zmq_handle': zmq_handle,
-                },
-            ))
-
-        # Send IPC/SHM handle, wait for worker ready (non-blocking)
-        handle_payload = ipc_handle if use_gpu_ipc else {'name': shm_name, 'size': bucket_size}
-        await loop.run_in_executor(None, _zmq_send_recv, handle_payload, 'handle handshake')
-
-        # Stream weights into buckets and send to worker
-        async def _chain_first():
-            """Re-inject the peeked first tensor, then yield the rest."""
-            yield first_name, first_tensor
-            async for item in weight_aiter:
-                yield item
-
-        offset = 0
-        bucket_meta: list[dict] = []
         n_weights = 0
+        worker_task: Optional['asyncio.Future'] = None
+        try:
+            # Launch worker side concurrently
+            worker_task = asyncio.ensure_future(
+                self.engine.collective_rpc(
+                    'update_weights_from_ipc',
+                    kwargs={
+                        'peft_config': peft_config,
+                        'base_sync_done': base_sync_done,
+                        'use_shm': use_shm,
+                        'zmq_handle': zmq_handle,
+                    },
+                ))
 
-        async def _flush_bucket(is_last: bool) -> None:
-            nonlocal offset, bucket_meta
-            if not bucket_meta and not is_last:
-                return
-            if buffer.device.type != 'cpu':
-                Torch.synchronize()
-            await loop.run_in_executor(
-                None,
-                _zmq_send_recv,
-                {
-                    'bucket_meta': bucket_meta,
-                    'is_last': is_last,
-                },
-                'final bucket' if is_last else 'bucket flush',
-            )
+            # Send IPC/SHM handle, wait for worker ready (non-blocking)
+            handle_payload = ipc_handle if use_gpu_ipc else {'name': shm_name, 'size': bucket_size}
+            await loop.run_in_executor(None, _zmq_send_recv, handle_payload, 'handle handshake')
+
+            # Stream weights into buckets and send to worker
+            async def _chain_first():
+                """Re-inject the peeked first tensor, then yield the rest."""
+                yield first_name, first_tensor
+                async for item in weight_aiter:
+                    yield item
+
             offset = 0
-            bucket_meta = []
+            bucket_meta: list[dict] = []
+            current_expert_layer: Optional[str] = None
 
-        async for name, weight in _chain_first():
-            if use_shm and weight.device.type != 'cpu':
-                weight = weight.cpu()
-            if not weight.is_contiguous():
-                weight = weight.contiguous()
+            def _get_expert_layer_prefix(weight_name: str) -> Optional[str]:
+                m = re.match(r'^(.*\.mlp\.experts)\.\d+\.', weight_name)
+                return m.group(1) if m else None
 
-            weight_u8 = weight.view(-1).view(torch.uint8)
-            total_nbytes = int(weight_u8.numel())
-            chunk_offset = 0
-            while chunk_offset < total_nbytes:
-                if offset >= bucket_size:
-                    await _flush_bucket(is_last=False)
-
-                chunk_nbytes = min(bucket_size - offset, total_nbytes - chunk_offset)
-                buffer[offset:offset + chunk_nbytes].copy_(
-                    weight_u8[chunk_offset:chunk_offset + chunk_nbytes],
-                    non_blocking=True,
+            async def _flush_bucket(is_last: bool) -> None:
+                nonlocal offset, bucket_meta, current_expert_layer
+                if not bucket_meta and not is_last:
+                    return
+                if buffer.device.type != 'cpu':
+                    Torch.synchronize()
+                await loop.run_in_executor(
+                    None,
+                    _zmq_send_recv,
+                    {
+                        'bucket_meta': bucket_meta,
+                        'is_last': is_last,
+                    },
+                    'final bucket' if is_last else 'bucket flush',
                 )
-                bucket_meta.append({
-                    'name': name,
-                    'shape': weight.shape,
-                    'dtype': weight.dtype,
-                    'offset': offset,
-                    'nbytes': chunk_nbytes,
-                    'chunk_offset': chunk_offset,
-                    'total_nbytes': total_nbytes,
-                })
-                offset += chunk_nbytes
-                chunk_offset += chunk_nbytes
-            n_weights += 1
+                offset = 0
+                bucket_meta = []
+                current_expert_layer = None
 
-        # Send last bucket
-        await _flush_bucket(is_last=True)
+            async for name, weight in _chain_first():
+                if use_shm and weight.device.type != 'cpu':
+                    weight = weight.cpu()
+                if not weight.is_contiguous():
+                    weight = weight.contiguous()
 
-        # Wait for worker to finish loading
-        await worker_task
+                weight_u8 = weight.view(-1).view(torch.uint8)
+                total_nbytes = int(weight_u8.numel())
+                expert_layer_prefix = _get_expert_layer_prefix(name) if lora_mode else None
+                if lora_mode and offset > 0:
+                    # Keep each expert layer in an isolated bucket to avoid sending
+                    # partial expert-layer weights.
+                    if current_expert_layer != expert_layer_prefix:
+                        await _flush_bucket(is_last=False)
+                if lora_mode:
+                    current_expert_layer = expert_layer_prefix
 
-        # Clean up
-        socket.close()
-        zmq_ctx.term()
-        if zmq_handle.startswith('ipc://'):
-            ipc_path = zmq_handle[len('ipc://'):]
-            try:
-                if os.path.exists(ipc_path):
-                    os.remove(ipc_path)
-            except OSError:
-                pass
-        del buffer
-        if shm is not None:
-            shm.close()
-            shm.unlink()
-            del shm
-        gc.collect()
+                chunk_offset = 0
+                while chunk_offset < total_nbytes:
+                    if offset >= bucket_size:
+                        await _flush_bucket(is_last=False)
+
+                    chunk_nbytes = min(bucket_size - offset, total_nbytes - chunk_offset)
+                    buffer[offset:offset + chunk_nbytes].copy_(
+                        weight_u8[chunk_offset:chunk_offset + chunk_nbytes],
+                        non_blocking=True,
+                    )
+                    bucket_meta.append({
+                        'name': name,
+                        'shape': weight.shape,
+                        'dtype': weight.dtype,
+                        'offset': offset,
+                        'nbytes': chunk_nbytes,
+                        'chunk_offset': chunk_offset,
+                        'total_nbytes': total_nbytes,
+                    })
+                    offset += chunk_nbytes
+                    chunk_offset += chunk_nbytes
+                n_weights += 1
+
+            # Send last bucket
+            await _flush_bucket(is_last=True)
+
+            # Wait for worker to finish loading
+            await worker_task
+        finally:
+            # Clean up — always release resources regardless of exceptions
+            if worker_task is not None and not worker_task.done():
+                worker_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await worker_task
+            socket.close()
+            zmq_ctx.term()
+            if zmq_handle.startswith('ipc://'):
+                ipc_path = zmq_handle[len('ipc://'):]
+                try:
+                    if os.path.exists(ipc_path):
+                        os.remove(ipc_path)
+                except OSError:
+                    pass
+            del buffer
+            if shm is not None:
+                shm.close()
+                shm.unlink()
+                del shm
+            gc.collect()
 
         elapsed = time.time() - start_time
         mode = 'LoRA' if base_sync_done and peft_config else 'base'
@@ -667,6 +731,10 @@ class VLLMEngine(BaseSamplerEngine):
         import gc
 
         logger.info('Shutting down VLLMEngine...')
+
+        self._ipc_buffer = None
+        self._ipc_handle = None
+        self._ipc_buffer_size = 0
 
         if self.engine is not None:
             try:
@@ -688,10 +756,7 @@ class VLLMEngine(BaseSamplerEngine):
         # Force garbage collection
         gc.collect()
 
-        # Clear CUDA cache if available
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            if hasattr(torch.cuda, 'ipc_collect'):
-                torch.cuda.ipc_collect()
+        Torch.empty_cache()
+        Torch.ipc_collect()
 
         logger.info('VLLMEngine shutdown complete')

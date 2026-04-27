@@ -128,9 +128,104 @@ class TwinkleCompatModelBase:
     def get_template(self, adapter_name: str) -> Template:
         return self.optimizer_group[adapter_name].template
 
+    def _tinker_setup_loss(self, loss_fn: str, inputs, adapter_name: str, kwargs: dict):
+        """Set up loss function based on loss_fn; pops DPO/GRPO-specific params from kwargs in-place."""
+        if loss_fn == 'cross_entropy':
+            self.set_loss('CrossEntropyLoss', adapter_name=adapter_name)
+        elif loss_fn == 'importance_sampling':
+            has_ref_logps = any('ref_logps' in d.loss_fn_inputs for d in inputs)
+            if has_ref_logps:
+                beta = kwargs.pop('dpo_beta', 0.1)
+                loss_type = kwargs.pop('dpo_loss_type', 'sigmoid')
+                sft_weight = kwargs.pop('dpo_sft_weight', 0.0)
+                self.set_loss(
+                    'DPOLoss', adapter_name=adapter_name, beta=beta, loss_type=loss_type, sft_weight=sft_weight)
+                # Only add DPOMetric if not already present for this adapter
+                self._ensure_dpo_metric(adapter_name, beta)
+            else:
+                epsilon = kwargs.pop('epsilon', 0.2)
+                grpo_beta = kwargs.pop('beta', 0.0)
+                self.set_loss('GRPOLoss', adapter_name=adapter_name, epsilon=epsilon, beta=grpo_beta)
+        else:
+            self.set_loss('CrossEntropyLoss', adapter_name=adapter_name)
+
+    def _ensure_dpo_metric(self, adapter_name: str, beta: float):
+        """Add DPOMetric for the adapter if not already present.
+
+        This prevents duplicate metric accumulation across training steps.
+        """
+        from twinkle.metric.dpo import DPOMetric
+        optimizer_config = self.optimizer_group[adapter_name]
+        # Check if DPOMetric already exists in training metrics
+        for metric in optimizer_config.train_status.metrics:
+            if isinstance(metric, DPOMetric):
+                return
+        self.add_metric('DPOMetric', adapter_name=adapter_name, beta=beta)
+
+    def _apply_ref_outputs(self, loss_values: dict, loss_kwargs: dict, adapter_name: str) -> None:
+        """Pop ref_outputs from loss_values into loss_kwargs and propagate to train_status.
+
+        DPOMetric reads ref_outputs from train_status.forward_kwargs during accumulate_metrics,
+        so it must be set here before the subsequent loss calculation.
+        """
+        if 'ref_outputs' not in loss_values:
+            return
+        ref_outputs_dict = loss_values.pop('ref_outputs')
+        loss_kwargs['ref_outputs'] = ref_outputs_dict
+        self.optimizer_group[adapter_name].train_status.forward_kwargs['ref_outputs'] = ref_outputs_dict
+
+    def _tinker_build_output(self, inputs, outputs, return_full_logprobs: bool = False):
+        """Extract logits/logps from model outputs and build per-datum output list."""
+        logits = self._normalize_tensor_output(outputs.get('logits'))
+        logps = self._normalize_tensor_output(outputs.get('logps'))
+        if logits is None and logps is None:
+            # non-last PP stage: no outputs produced, collector will discard this
+            return []
+        return self._get_forward_output(inputs, logits, logps, return_full_logprobs=return_full_logprobs)
+
     @staticmethod
-    def _get_forward_output(inputs: List[types.Datum], logits: torch.Tensor, logps: torch.Tensor) -> List[dict]:
-        """Convert raw logits to the expected output format with logprobs and elementwise_loss."""
+    def _normalize_tensor_output(value):
+        """Normalize various output formats (tensor, list of tensors, nested lists, floats) to a single tensor.
+
+        Handles:
+        - None or empty list: returns None
+        - torch.Tensor: detach and move to cpu
+        - list of torch.Tensor: cat along dim=0
+        - list of floats/int: convert to tensor
+        """
+        if value is None:
+            return None
+
+        if isinstance(value, torch.Tensor):
+            return value.detach().cpu()
+
+        if isinstance(value, list):
+            if not value:  # empty list (e.g. non-last PP stage): treat as missing
+                return None
+            if isinstance(value[0], torch.Tensor):
+                return torch.cat(value, dim=0).detach().cpu()
+            return torch.as_tensor(value, dtype=torch.float32).detach().cpu()
+
+        if isinstance(value, (int, float)):
+            return torch.tensor([value], dtype=torch.float32)
+
+        raise ValueError(f'Unexpected type for tensor output: {type(value)}')
+
+    @staticmethod
+    def _get_forward_output(inputs: List[types.Datum],
+                            logits: torch.Tensor,
+                            logps: torch.Tensor,
+                            return_full_logprobs: bool = False) -> List[dict]:
+        """Convert raw logits to the expected output format with logprobs and elementwise_loss.
+
+        When return_full_logprobs is True (forward_only / reference pass), logprobs is returned
+        at the full TP/CP-padded sequence length so that when the client sends it back as
+        ref_logps in the DPO forward_backward step the shape already matches the padded labels.
+        When return_full_logprobs is False (default, forward_backward pass), logprobs is
+        truncated to the original unpadded sequence length.
+        elementwise_loss is always computed on the original (unpadded) length because the
+        per-datum weights tensor has that length.
+        """
         from twinkle.utils.torch_utils import selective_log_softmax
         if logps is not None:
             device = logps.device
@@ -145,21 +240,35 @@ class TwinkleCompatModelBase:
             labels = feature.loss_fn_inputs['target_tokens'].to_torch().long().view(-1).to(device)
             weights = feature.loss_fn_inputs['weights'].to_torch().view(-1).to(device)
 
-            seq_len = labels.numel()
+            seq_len = labels.numel()  # original unpadded length
 
             if logps is None:
                 assert logit is not None, 'logit must not be None when logps is None'
                 feature_logits = logit[:seq_len, :]
-                token_log_probs = selective_log_softmax(feature_logits, labels)
+                token_log_probs_orig = selective_log_softmax(feature_logits, labels)
+                if return_full_logprobs:
+                    # Extend to the full logit length (TP/CP-padded) by padding with 0.
+                    # Padded positions have label -100 so they are masked out by DPOLoss.
+                    padded_len = logit.shape[0]
+                    if padded_len > seq_len:
+                        import torch.nn.functional as F
+                        token_log_probs_full = F.pad(token_log_probs_orig, (0, padded_len - seq_len), value=0.0)
+                    else:
+                        token_log_probs_full = token_log_probs_orig
+                else:
+                    token_log_probs_full = token_log_probs_orig
             else:
-                token_log_probs = logps[idx, :seq_len]
+                token_log_probs_orig = logps[idx, :seq_len]
+                # When return_full_logprobs is True, retain the full TP/CP-padded slice.
+                # Positions beyond seq_len have label -100 and are masked by _compute_sequence_logps.
+                token_log_probs_full = logps[idx] if return_full_logprobs else token_log_probs_orig
 
             # elementwise_loss: positive NLL loss (0.0 where masked)
-            token_log_probs = token_log_probs.to(weights.device)
-            elementwise_loss = -token_log_probs * weights
+            token_log_probs_orig = token_log_probs_orig.to(weights.device)
+            elementwise_loss = -token_log_probs_orig * weights
 
             results.append({
-                'logprobs': types.TensorData.from_torch(token_log_probs.cpu()),
+                'logprobs': types.TensorData.from_torch(token_log_probs_full.cpu()),
                 'elementwise_loss': types.TensorData.from_torch(elementwise_loss.cpu())
             })
         return results

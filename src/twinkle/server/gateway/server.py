@@ -8,11 +8,13 @@ Twinkle (/twinkle/*) management and proxy endpoints.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from ray import serve
 from typing import Any
 
 import twinkle_client.types as types
+from twinkle.server.utils.metrics import create_metrics_middleware
 from twinkle.server.utils.state import get_server_state
 from twinkle.server.utils.validation import verify_request_token
 from twinkle.utils.logger import get_logger
@@ -28,15 +30,16 @@ class GatewayServer:
 
     def __init__(self,
                  supported_models: list | None = None,
-                 server_config: dict[str, Any] = {},
+                 server_config: dict[str, Any] | None = None,
                  http_options: dict[str, Any] | None = None,
                  **kwargs) -> None:
+        server_config = server_config or {}
         self.state = get_server_state(**server_config)
         self.route_prefix = kwargs.get('route_prefix', '/api/v1')
         self.http_options = http_options or {}
         self.proxy = ServiceProxy(http_options=http_options, route_prefix=self.route_prefix)
         self.supported_models = self._normalize_models(supported_models) or [
-            types.SupportedModel(model_name='Qwen/Qwen3.5-4B'),
+            types.SupportedModel(model_name='Qwen/Qwen3.6-27B'),
         ]
         self._modelscope_config_lock = asyncio.Lock()
 
@@ -70,7 +73,7 @@ class GatewayServer:
 
 def build_server_app(deploy_options: dict[str, Any],
                      supported_models: list | None = None,
-                     server_config: dict[str, Any] = {},
+                     server_config: dict[str, Any] | None = None,
                      http_options: dict[str, Any] | None = None,
                      **kwargs):
     """Build and configure the unified gateway server application.
@@ -87,14 +90,25 @@ def build_server_app(deploy_options: dict[str, Any],
     Returns:
         Configured Ray Serve deployment bound with options
     """
-    app = FastAPI()
+
+    def get_self() -> GatewayServer:
+        return serve.get_replica_context().servable_object
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        yield
+        try:
+            await get_self().proxy.close()
+        except Exception:
+            pass
+
+    app = FastAPI(lifespan=lifespan)
 
     @app.middleware('http')
     async def verify_token(request: Request, call_next):
         return await verify_request_token(request=request, call_next=call_next)
 
-    def get_self() -> GatewayServer:
-        return serve.get_replica_context().servable_object
+    app.middleware('http')(create_metrics_middleware('Gateway'))
 
     _register_tinker_routes(app, get_self)
     _register_twinkle_routes(app, get_self)

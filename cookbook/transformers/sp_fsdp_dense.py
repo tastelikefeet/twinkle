@@ -19,9 +19,10 @@ device_group = [DeviceGroup(
     device_type=Platform.get_platform().device_prefix(),
 )]
 
-# FSDP + SP validation over 4 GPUs: dp=2, fsdp=2 (SP only affects input slicing)
+# FSDP + sequence-parallel validation over 4 GPUs: dp=2, fsdp=2.
+# In Transformers route, ulysses_size is the total sequence-parallel degree.
 device_mesh = DeviceMesh(
-    device_type='cuda',
+    device_type=Platform.get_platform().device_prefix(),
     mesh=np.arange(4).reshape(2, 2),
     mesh_dim_names=('dp', 'fsdp'),
     ulysses_size=2,
@@ -49,7 +50,7 @@ def eval(model):
 
 def create_dataset(data_slice=None):
     dataset = Dataset(dataset_meta=DatasetMeta(DATASETS, data_slice=range(500)))
-    dataset.set_template('Template', model_id=MODEL_ID)
+    dataset.set_template('Qwen3_5Template', model_id=MODEL_ID)
     dataset.map(SelfCognitionProcessor('twinkle模型', 'twinkle团队'))
     dataset.encode(batched=True)
     return dataset

@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Type, Union
 from twinkle import DeviceMesh, remote_class, remote_function, template
 from twinkle.data_format import InputFeature, Trajectory
 from twinkle.hub import HubOperation
+from twinkle.infra import collect_tensor_dict
 from twinkle.loss import Loss
 from twinkle.metric import Metric
 from twinkle.processor import InputProcessor
@@ -23,7 +24,7 @@ class MultiLoraTransformersModel(TransformersModel, PreTrainedModel):
 
     def __init__(
             self,  # noqa
-            model_cls=AutoModelForCausalLM,
+            model_cls=None,
             model_id: Optional[str] = None,
             config: Optional[PretrainedConfig] = None,
             device_mesh: Optional[DeviceMesh] = None,
@@ -32,14 +33,26 @@ class MultiLoraTransformersModel(TransformersModel, PreTrainedModel):
             max_loras: int = 5,
             max_r: int = 32,
             max_length: int = 8192,
+            target_modules: Union[List[str], str] = 'all-linear',
             **kwargs):
         assert device_mesh.fsdp_world_size <= 0, f'MultiLora does not support FSDP, current is: {str(device_mesh)}'
         os.environ['TOKENIZERS_PARALLELISM'] = 'true'
+        self._try_init_process_group()
         super(PreTrainedModel, self).__init__()
         model_id = HubOperation.download_model(model_id)
+        self.model_id = model_id
+        if config is None:
+            from transformers import AutoConfig
+            self.hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+        else:
+            self.hf_config = config
+        if model_cls is None and hasattr(self.hf_config, 'architectures'):
+            model_cls = self.hf_config.architectures[0]
+        if model_cls is None:
+            model_cls = AutoModelForCausalLM
         if isinstance(model_cls, str):
             model_cls = getattr(transformers, model_cls)
-        self.model = model_cls.from_pretrained(model_id, config=config, **kwargs)
+        self.model = model_cls.from_pretrained(model_id, config=self.hf_config, **kwargs)
         self.model_id = model_id
         self.tokenizer_id = kwargs.get('tokenizer_id', self.model_id)
         self.device_mesh = device_mesh
@@ -54,13 +67,14 @@ class MultiLoraTransformersModel(TransformersModel, PreTrainedModel):
         self.optimizer_group: Dict[str, OptimizerGroup] = {}
         self.multi_adapter = MultiLora(max_loras=max_loras, max_r=max_r, max_length=max_length)
         self.model.gradient_checkpointing_enable()
-        self.model = self.multi_adapter.patch(self.model)
+        self.model = self.multi_adapter.patch(self.model, target_modules=target_modules)
         self.strategy = AccelerateStrategy(mixed_precision=mixed_precision, device_mesh=None)
         self.model = self.strategy.wrap_model(self.model)
         self.multi_adapter.save_initial_weights()
         # Active group for compatibility with single adapter
         self.active_group = None
         self.handler = self.register_global_mm_forward_hook()
+        self.multi_adapter.reset_adapter_status()
 
     def _check_adapter_valid(self, adapter_name: str):
         assert adapter_name and adapter_name in self.optimizer_group, (f'Use a valid adapter_name first, '
@@ -88,7 +102,7 @@ class MultiLoraTransformersModel(TransformersModel, PreTrainedModel):
     def _lazy_wrap_model(self):
         pass
 
-    @remote_function(dispatch='slice_dp', collect='mean')
+    @remote_function(dispatch='slice_dp', collect=collect_tensor_dict)
     def forward(self, *, inputs: Union[InputFeature, List[InputFeature], Trajectory, List[Trajectory]], **kwargs):
         self._check_adapter_valid(kwargs.get('adapter_name'))
         optimizer_config = self.optimizer_group[kwargs.get('adapter_name')]
@@ -104,10 +118,12 @@ class MultiLoraTransformersModel(TransformersModel, PreTrainedModel):
         with self.multi_adapter.adapter(kwargs.get('adapter_name')):
             return super().forward(inputs=inputs, **kwargs)
 
-    @remote_function(dispatch='slice_dp', collect='flatten')
+    @remote_function(dispatch='slice_dp', collect=collect_tensor_dict)
     def forward_only(self, *, inputs: Union[InputFeature, List[InputFeature], List[Trajectory]], **kwargs):
-        self._check_adapter_valid(kwargs.get('adapter_name'))
-        optimizer_config = self.optimizer_group[kwargs.get('adapter_name')]
+        adapter_name = kwargs.get('adapter_name')
+        disable_lora = kwargs.get('disable_lora', False)
+        self._check_adapter_valid(adapter_name)
+        optimizer_config = self.optimizer_group[adapter_name]
         if (isinstance(inputs, dict) and self._not_encoded(inputs)) or (isinstance(inputs, list)
                                                                         and self._not_encoded(inputs[0])):
             # Trajectory or List[Trajectory]
@@ -117,10 +133,10 @@ class MultiLoraTransformersModel(TransformersModel, PreTrainedModel):
                 inputs = [inputs]
             inputs = optimizer_config.template.batch_encode(inputs)  # noqa
         self.multi_adapter.check_length(inputs)
-        with self.multi_adapter.adapter(kwargs.get('adapter_name')):
+        with self.multi_adapter.adapter(adapter_name, disable_lora=disable_lora):
             return super().forward_only(inputs=inputs, **kwargs)
 
-    @remote_function()
+    @remote_function(collect='mean')
     def calculate_loss(self, **kwargs):
         self._check_adapter_valid(kwargs.get('adapter_name'))
         with self.multi_adapter.adapter(kwargs.get('adapter_name')):
@@ -207,7 +223,7 @@ class MultiLoraTransformersModel(TransformersModel, PreTrainedModel):
         self._check_adapter_valid(kwargs.get('adapter_name'))
         super().set_processor(processor_cls, **kwargs)
 
-    @remote_function()
+    @remote_function(collect='first')
     def get_state_dict(self, **kwargs):
         self._check_adapter_valid(kwargs.get('adapter_name'))
         return self.multi_adapter.get_state_dict(kwargs.get('adapter_name'))
@@ -244,6 +260,7 @@ class MultiLoraTransformersModel(TransformersModel, PreTrainedModel):
         self._check_adapter_valid(kwargs.get('adapter_name'))
         super().set_grad_scaler(**kwargs)
 
+    @remote_function()
     def add_metric(self, metric_cls: Union[Metric, str], is_training: Optional[bool] = None, **kwargs):
         self._check_adapter_valid(kwargs.get('adapter_name'))
         super().add_metric(metric_cls, is_training, **kwargs)

@@ -298,6 +298,12 @@ def _collect_func(method: Union[Literal['none', 'flatten', 'mean', 'sum', 'first
     elif method == 'last_pp':
         assert device_mesh is not None
         return [r for i, r in enumerate(result) if i in device_mesh.get_pp_last_ranks()]
+    elif method == 'last_pp_first':
+        # Return the first result from the last PP stage workers.
+        # Falls back to result[0] when PP = 1 (all workers are the last stage).
+        assert device_mesh is not None
+        last_pp = [r for i, r in enumerate(result) if i in device_mesh.get_pp_last_ranks()]
+        return last_pp[0] if last_pp else result[0]
     elif isinstance(method, Callable):
         # Callable
         return method(result, device_mesh=device_mesh)
@@ -367,6 +373,21 @@ def _dispatch_args(workers, dispatch, execute, device_mesh: Optional[DeviceMesh]
             sliced_args = tuple(arg[i] for arg in args)
             sliced_kwargs = {k: v[i] for k, v in kwargs.items()}
             result.append((workers[i], sliced_args, sliced_kwargs))
+
+        # Raise early if some ranks got data and others didn't (causes hangs).
+        def _check_uniform(slices):
+            lens = [len(s) if s is not None and isinstance(s, (list, tuple)) else 0 for s in slices]
+            return not lens or all(length > 0 for length in lens) or all(length == 0 for length in lens)
+
+        for arg in args:
+            if not _check_uniform(arg):
+                raise ValueError(f'Batch too small for {length} workers, some ranks have no data. '
+                                 f'Please increase batch size to at least {length}.')
+        for v in kwargs.values():
+            if not _check_uniform(v):
+                raise ValueError(f'Batch too small for {length} workers, some ranks have no data. '
+                                 f'Please increase batch size to at least {length}.')
+
         return result
     elif isinstance(dispatch, Callable):
         length = len(workers)
