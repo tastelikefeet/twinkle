@@ -702,6 +702,9 @@ class Template:
             output.append(self.check(trajectory))
         return output
 
+    def format_trajectory(self, trajectory: Trajectory) -> Trajectory:
+        return self._invoke_pre_pipeline([trajectory])[0]
+
     def decode(self, token_ids: List[int], **kwargs) -> str:
         return self.processor.decode(token_ids, **kwargs)
 
