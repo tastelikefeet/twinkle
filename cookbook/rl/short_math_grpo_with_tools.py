@@ -334,9 +334,10 @@ def create_hotpotqa_dataset() -> Dataset:
     ``dataset.encode(num_proc=HOTPOTQA_NUM_PROC)`` uses a
     ``multiprocess.Pool`` whose start method has already been forced to
     ``spawn`` by ``twinkle.dataset.base`` at import time.  Spawn workers boot
-    fresh interpreters, so they do NOT inherit the parent's CUDA state and
-    unpickle the template (which carries a full Qwen3.5 ``dummy_model`` for
-    rope-index extraction) without tripping ``torch.cuda._lazy_init``.
+    fresh interpreters, so they do NOT inherit the parent's CUDA state.
+    ``Qwen3_5Template`` also caches its rope-index function at module level
+    rather than on the instance, so the template pickles deterministically and
+    ``load_from_cache_file=True`` can actually hit on re-runs.
     """
     dataset = Dataset()
     dataset.add_dataset(DatasetMeta(
@@ -495,9 +496,9 @@ def main():
 
     # Build and encode the HotpotQA dataset in-process.  Safe because
     # ``twinkle.dataset.base`` has already forced the ``multiprocess`` start
-    # method to ``spawn`` at import time -- forked workers would crash on
-    # unpickle of the Qwen3.5 template's dummy_model, but spawn workers boot
-    # fresh interpreters and never inherit parent CUDA state.
+    # method to ``spawn`` at import time, and ``Qwen3_5Template`` now caches
+    # its rope-index function at module level rather than on the instance so
+    # the template pickles deterministically for HF datasets fingerprinting.
     logger.info('Building HotpotQA dataset (num_proc=%d, max_length=%d)',
                 HOTPOTQA_NUM_PROC, HOTPOTQA_MAX_LENGTH)
     _prebuilt_dataset = create_hotpotqa_dataset()
