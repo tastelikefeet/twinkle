@@ -89,7 +89,7 @@ LORA_RANK = int(os.environ.get('LORA_RANK', 16))
 MAX_TURNS = int(os.environ.get('MAX_TURNS', 4))            # hard cap on tool-call turns
 CHUNK_SIZE = int(os.environ.get('CHUNK_SIZE', 512))        # chars per chunk (NativeChunker)
 CHUNK_OVERLAP = int(os.environ.get('CHUNK_OVERLAP', 0))    # sliding-window overlap
-KEEP_RATIO = float(os.environ.get('KEEP_RATIO', 0.5))      # NativeCondenser target ratio
+KEEP_RATIO = float(os.environ.get('KEEP_RATIO', 0.3))      # NativeCondenser target ratio
 
 # ---- HotpotQA dataset encode knobs ----
 HOTPOTQA_NUM_PROC = int(os.environ.get('HOTPOTQA_NUM_PROC', 16))
@@ -557,7 +557,7 @@ def main():
     # Chunker / condenser live on the driver (pure-Python, no GPU).
     chunker = NativeChunker(
         model_id=MODEL_ID, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
-    condenser = NativeCondenser(keep_ratio=KEEP_RATIO)
+    condenser = NativeCondenser(keep_ratio=(0.1, KEEP_RATIO))
 
     GLOBAL_BATCH_SIZE = BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS
     dataloader = DataLoader(
