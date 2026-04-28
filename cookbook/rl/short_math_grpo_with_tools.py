@@ -1,8 +1,13 @@
-"""GRPO training with context compression + tool-augmented multi-turn rollouts.
+"""HotpotQA GRPO training with context compression + tool-augmented multi-turn rollouts.
 
-Built on top of ``short_math_grpo.py``.  The only difference is the sampling
-phase: instead of a single ``sampler.sample()`` producing one response per
-prompt, every prompt runs through an **agentic rollout loop**:
+Built on top of ``short_math_grpo.py`` (the math variant).  Task has been
+swapped from GSM8K math to **HotpotQA multi-hop QA** because that is where
+context compression + extract tool actually earn their reward: each example
+ships 10 paragraphs, only 2 are gold, so compressing distractors and
+extracting the right blocks gives a real training signal.
+
+The sampling phase runs an **agentic rollout loop** (unchanged from the
+math variant):
 
     while not done:
         1. Chunk the current multi-turn trajectory (NativeChunker).
@@ -32,6 +37,8 @@ prompt) identical to the non-agentic baseline.
 import json
 import os
 import re
+import string
+from collections import Counter
 from typing import Any, Dict, List, Tuple
 
 from peft import LoraConfig
@@ -40,16 +47,15 @@ import twinkle
 from twinkle import DeviceMesh, DeviceGroup, get_device_placement, get_logger
 from twinkle.advantage import GRPOAdvantage
 from twinkle.checkpoint_engine import CheckpointEngineManager
-from twinkle.data_format import SamplingParams
+from twinkle.data_format import Message, SamplingParams, Trajectory
 from twinkle.dataloader import DataLoader
 from twinkle.dataset import Dataset, DatasetMeta
 from twinkle.metric import CompletionRewardMetric
 from twinkle.model import TransformersModel
+from twinkle.preprocessor.base import Preprocessor
 from twinkle.processor import InputProcessor
-from twinkle.reward import GSM8KAccuracyReward
 from twinkle.reward.base import Reward
 from twinkle.sampler import vLLMSampler
-from twinkle.preprocessor.llm import GSM8KProcessor
 
 from twinkle_agentic.chunker.native import NativeChunker
 from twinkle_agentic.condenser.native import NativeCondenser
@@ -87,14 +93,16 @@ KEEP_RATIO = float(os.environ.get('KEEP_RATIO', 0.5))      # NativeCondenser tar
 
 # ========== System Prompt ==========
 SYSTEM_PROMPT = (
-    'You are a helpful math assistant. Solve the problem with minimal but correct '
-    'reasoning and put your final answer within \\boxed{}.\n\n'
-    'CONTEXT COMPRESSION: Earlier parts of the conversation may be shown with '
+    'You are a careful multi-hop QA assistant. Answer the user\'s question '
+    'using the provided paragraphs. Give a short factual answer (a name, '
+    'entity, date, or "yes"/"no") inside \\boxed{}. Do not include extra '
+    'words in the box.\n\n'
+    'CONTEXT COMPRESSION: The provided paragraphs may be shown with '
     '<block_N>...</block_N> markers around each chunk. Some chunks have been '
-    'shortened to save context. If you need the original (un-shortened) text of '
-    'one or more blocks, call the tool below. Otherwise, answer directly.\n\n'
-    'TOOL CALL FORMAT: Emit tool calls inside a single fenced block like this, '
-    'then stop generating and wait for the tool result:\n'
+    'shortened to save context. If you need the original (un-shortened) text '
+    'of one or more blocks, call the tool below. Otherwise, answer directly.\n\n'
+    'TOOL CALL FORMAT: Emit tool calls inside a single fenced block like '
+    'this, then stop generating and wait for the tool result:\n'
     '<tool_call>\n'
     '{"name": "extract_compressed", "arguments": {"blocks": [1, 3]}}\n'
     '</tool_call>\n\n'
@@ -102,17 +110,26 @@ SYSTEM_PROMPT = (
     'already sufficient -- each tool call reduces your reward.')
 
 # ========== Tool-call parsing (Hermes / Qwen3 style) ==========
-_TOOL_CALL_RE = re.compile(r'<tool_call>\s*(\{.*?\})\s*</tool_call>', re.DOTALL)
+# Tolerant of a missing closing tag: vLLM strips the ``stop`` string from the
+# decoded output by default, so a tool-calling turn ends at ``<tool_call>{...}``
+# with the closing tag gone.  We accept either ``</tool_call>`` or end-of-string
+# as the right boundary so the parser still works.
+_TOOL_CALL_RE = re.compile(
+    r'<tool_call>\s*(\{.*?\})\s*(?:</tool_call>|\Z)', re.DOTALL)
 
 
-def parse_tool_calls(text: str) -> List[Dict[str, str]]:
+def parse_tool_calls(text: str) -> List[Dict[str, Any]]:
     """Extract ``<tool_call>{...}</tool_call>`` blocks from an LLM completion.
 
-    Robust to duplicated blocks, spurious whitespace, and Qwen's ``name`` vs
-    the internal ``tool_name`` key.  Malformed JSON blocks are silently
-    skipped rather than crashing the rollout.
+    Robust to a missing trailing ``</tool_call>`` (vLLM stop-string stripping),
+    duplicated blocks, spurious whitespace, and Qwen's ``name`` vs the internal
+    ``tool_name`` key.  Malformed JSON blocks are silently skipped rather than
+    crashing the rollout.
+
+    ``arguments`` is returned as a dict (or empty dict) -- :class:`ToolManager`
+    accepts dicts directly, so there is no need to re-serialise to a string.
     """
-    calls: List[Dict[str, str]] = []
+    calls: List[Dict[str, Any]] = []
     for m in _TOOL_CALL_RE.finditer(text):
         try:
             data = json.loads(m.group(1))
@@ -121,59 +138,204 @@ def parse_tool_calls(text: str) -> List[Dict[str, str]]:
         if not isinstance(data, dict):
             continue
         name = data.get('name') or data.get('tool_name')
+        if not name:
+            continue
         args = data.get('arguments', {})
-        if isinstance(args, dict):
-            args = json.dumps(args, ensure_ascii=False)
-        elif not isinstance(args, str):
-            args = str(args)
-        if name:
-            calls.append({'tool_name': name, 'arguments': args})
+        if isinstance(args, str):
+            try:
+                args = json.loads(args) if args.strip() else {}
+            except json.JSONDecodeError:
+                args = {}
+        elif not isinstance(args, dict):
+            args = {}
+        calls.append({'tool_name': name, 'arguments': args})
     return calls
 
 
+# Strip tool-call spans (open tag through close tag OR EOS) from the assistant
+# text before we stash it on the trajectory, so next-turn rendering does not
+# double-print them (once from the raw text, once from the ``tool_calls`` field).
+_TOOL_CALL_STRIP_RE = re.compile(
+    r'<tool_call>.*?(?:</tool_call>|\Z)', re.DOTALL)
+
+
+def _strip_tool_call_spans(text: str) -> str:
+    return _TOOL_CALL_STRIP_RE.sub('', text or '').rstrip()
+
+
+# ========== HotpotQA preprocessor ==========
+_BOXED_RE = re.compile(r'\\boxed\{([^}]*)\}')
+
+
+def _extract_final_answer(completion: str) -> str:
+    """Pull the predicted answer out of a completion.
+
+    Prefers the last ``\\boxed{...}`` span; falls back to the last non-empty
+    line (stripped) so partially-formatted completions still get a graded F1.
+    """
+    matches = _BOXED_RE.findall(completion or '')
+    if matches:
+        return matches[-1].strip()
+    for line in reversed((completion or '').splitlines()):
+        line = line.strip()
+        if line:
+            return line
+    return ''
+
+
+def _last_assistant_text(traj: Dict[str, Any]) -> str:
+    for msg in reversed(traj.get('messages', [])):
+        if msg.get('role') != 'assistant':
+            continue
+        content = msg.get('content') or ''
+        if isinstance(content, str):
+            return content
+        # Structured content -> concat text parts.
+        return '\n'.join(
+            p.get('text', '') for p in content
+            if isinstance(p, dict) and p.get('type') == 'text')
+    return ''
+
+
+class HotpotQAProcessor(Preprocessor):
+    """Render a HotpotQA row into a prompt-only Trajectory.
+
+    HotpotQA schema (after HF ``datasets`` flattening)::
+
+        id:                str
+        question:          str
+        answer:            str                    (may be 'yes' / 'no')
+        type:              'bridge' | 'comparison'
+        level:             'easy' | 'medium' | 'hard'
+        supporting_facts:  {'title': List[str], 'sent_id': List[int]}
+        context:           {'title': List[str], 'sentences': List[List[str]]}
+
+    We ship the ten (title, paragraph) pairs to the model as a numbered list
+    so that ``NativeChunker`` naturally slices them into one block per
+    paragraph, and the ``extract_compressed`` tool can recall a specific
+    paragraph by its block id.
+
+    ``ground_truth`` (for the F1/EM reward) and ``support_titles`` (for any
+    supporting-fact auxiliary reward) are stashed in ``user_data``.
+    """
+
+    def __init__(self, system: str = SYSTEM_PROMPT):
+        self.system = system
+
+    def __call__(self, rows: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
+        rows = self.map_col_to_row(rows)
+        rows = [self.preprocess(row) for row in rows]
+        rows = self.map_row_to_col(rows)
+        return rows
+
+    @staticmethod
+    def _format_context(context: Dict[str, Any]) -> str:
+        titles = context.get('title', []) or []
+        sentences = context.get('sentences', []) or []
+        lines = []
+        for i, (title, sents) in enumerate(zip(titles, sentences), start=1):
+            body = ''.join(sents) if isinstance(sents, list) else str(sents)
+            lines.append(f'[{i}] {title}: {body.strip()}')
+        return '\n'.join(lines)
+
+    def preprocess(self, row: Dict[str, Any]) -> Trajectory:
+        question = row['question']
+        answer = row.get('answer', '') or ''
+        context_block = self._format_context(row.get('context', {}) or {})
+        support_titles = (row.get('supporting_facts') or {}).get('title', []) or []
+
+        user_msg = (
+            f'Question: {question}\n\n'
+            f'Context:\n{context_block}')
+
+        messages = [
+            Message(role='system', content=self.system),
+            Message(role='user', content=user_msg),
+        ]
+        return Trajectory(
+            messages=messages,
+            user_data=[
+                ('ground_truth', answer.strip()),
+                ('support_titles', list(support_titles)),
+            ],
+        )
+
+
+# Reward instances are stateless once constructed; build once at import time.
+_F1_REWARD = None
+_FORMAT_REWARD = None
+_EXTRACT_REWARD = None
+
+
 # ========== Reward Functions ==========
-class GSM8KBrevityReward(Reward):
-    """Brevity reward: rewards shorter final answers that contain a valid answer."""
+def _normalize_answer(s: str) -> str:
+    """SQuAD-style normalization: lowercase, strip punct/articles/extra ws."""
+    s = (s or '').lower()
+    s = ''.join(ch for ch in s if ch not in set(string.punctuation))
+    s = re.sub(r'\b(a|an|the)\b', ' ', s)
+    return ' '.join(s.split())
+
+
+def _f1_score(prediction: str, gold: str) -> Tuple[float, float]:
+    """Word-level F1 and EM between normalized prediction and gold."""
+    pred_tokens = _normalize_answer(prediction).split()
+    gold_tokens = _normalize_answer(gold).split()
+    if not pred_tokens or not gold_tokens:
+        em = float(pred_tokens == gold_tokens)
+        return em, em
+    em = float(pred_tokens == gold_tokens)
+    common = Counter(pred_tokens) & Counter(gold_tokens)
+    num_same = sum(common.values())
+    if num_same == 0:
+        return 0.0, em
+    p = num_same / len(pred_tokens)
+    r = num_same / len(gold_tokens)
+    return 2 * p * r / (p + r), em
+
+
+class HotpotQAF1Reward(Reward):
+    """Token-level F1 on the extracted \\boxed{} answer vs ground truth.
+
+    Uses F1 rather than strict EM so partial matches still provide a gradient
+    during RL.  Returns 0 if no answer was produced.
+    """
 
     def __call__(self, trajectories: List[Dict[str, Any]], **kwargs) -> List[float]:
         rewards = []
         for traj in trajectories:
-            messages = traj.get('messages', [])
-            completion = ''
-            for msg in reversed(messages):
-                if msg.get('role') == 'assistant':
-                    completion = msg.get('content') or ''
-                    if not isinstance(completion, str):
-                        # structured content -> concat text parts
-                        completion = '\n'.join(
-                            p.get('text', '') for p in completion
-                            if isinstance(p, dict) and p.get('type') == 'text')
+            gold = ''
+            for key, val in traj.get('user_data', []) or []:
+                if key == 'ground_truth':
+                    gold = val or ''
                     break
-
-            has_answer = bool(
-                re.search(r'\\boxed\{[^}]+\}', completion)
-                or re.search(r'####\s*[\-\d,\.]+', completion)
-            )
-
-            if not has_answer:
-                rewards.append(0.0)
-            else:
-                length = len(completion)
-                if length <= 300:
-                    rewards.append(1.0)
-                else:
-                    rewards.append(max(0.0, 1.0 - (length - 300) / 3000))
+            pred = _extract_final_answer(_last_assistant_text(traj))
+            f1, _em = _f1_score(pred, gold)
+            rewards.append(f1)
         return rewards
 
 
+class HotpotQAFormatReward(Reward):
+    """+1 if the final assistant turn contains a \\boxed{...} span, else 0.
+
+    Keeps the signal that taught GSM8K models to respect the answer schema.
+    """
+
+    def __call__(self, trajectories: List[Dict[str, Any]], **kwargs) -> List[float]:
+        return [
+            1.0 if _BOXED_RE.search(_last_assistant_text(t) or '') else 0.0
+            for t in trajectories
+        ]
+
+
 # ========== Dataset ==========
-def create_gsm8k_dataset():
+def create_hotpotqa_dataset():
     dataset = Dataset()
-    dataset.add_dataset(DatasetMeta('ms://modelscope/gsm8k', subset_name='main', split='train'))
+    dataset.add_dataset(DatasetMeta(
+        'hf://hotpotqa/hotpot_qa', subset_name='fullwiki', split='train'))
     dataset.set_template(
         'Qwen3_5Template', model_id=MODEL_ID, max_length=4096,
         truncation_strategy='delete', enable_thinking=False)
-    dataset.map(GSM8KProcessor(system=SYSTEM_PROMPT))
+    dataset.map(HotpotQAProcessor(system=SYSTEM_PROMPT))
     dataset.encode(add_generation_prompt=True)
     return dataset
 
@@ -181,17 +343,22 @@ def create_gsm8k_dataset():
 def compute_rewards(
     trajectories: List[Dict[str, Any]],
 ) -> Tuple[List[float], List[float], List[float], List[float]]:
-    """Sum of accuracy + brevity + extract-usage rewards.
+    """Sum of F1 + format + extract-usage rewards.
 
     ``ExtractReward`` is the behavioural regulariser paired with
     :class:`ExtractCompressed`; it counts assistant ``tool_calls`` entries
     and applies a reverse-sigmoid decay.
     """
-    accuracy = GSM8KAccuracyReward()(trajectories)
-    brevity = GSM8KBrevityReward()(trajectories)
-    extract = ExtractReward(midpoint=3.0, steepness=1.5)(trajectories)
-    total = [a + b + e for a, b, e in zip(accuracy, brevity, extract)]
-    return total, brevity, accuracy, extract
+    global _F1_REWARD, _FORMAT_REWARD, _EXTRACT_REWARD
+    if _F1_REWARD is None:
+        _F1_REWARD = HotpotQAF1Reward()
+        _FORMAT_REWARD = HotpotQAFormatReward()
+        _EXTRACT_REWARD = ExtractReward(midpoint=3.0, steepness=1.5)
+    accuracy = _F1_REWARD(trajectories)
+    fmt = _FORMAT_REWARD(trajectories)
+    extract = _EXTRACT_REWARD(trajectories)
+    total = [a + f + e for a, f, e in zip(accuracy, fmt, extract)]
+    return total, fmt, accuracy, extract
 
 
 # ========== Agentic rollout ==========
@@ -217,14 +384,25 @@ def _append_terminal(r: _Rollout, decoded: str) -> None:
 def _append_tool_turn(
     r: _Rollout,
     decoded: str,
-    tool_calls: List[Dict[str, str]],
+    tool_calls: List[Dict[str, Any]],
     tool_mgr: ToolManager,
     turn_idx: int,
 ) -> None:
+    # Strip the raw <tool_call> spans from the text; the structured
+    # ``tool_calls`` field is the canonical source, and the template re-renders
+    # them into the prompt on the next turn.  Leaving both present would
+    # duplicate (or malform, when the stop tag was stripped) the tool-call
+    # markup.
     r.trajectory['messages'].append({
         'role': 'assistant',
-        'content': decoded,
-        'tool_calls': tool_calls,
+        'content': _strip_tool_call_spans(decoded),
+        'tool_calls': [
+            {'tool_name': tc['tool_name'],
+             'arguments': (tc['arguments']
+                           if isinstance(tc['arguments'], str)
+                           else json.dumps(tc['arguments'], ensure_ascii=False))}
+            for tc in tool_calls
+        ],
     })
     for i, tc in enumerate(tool_calls):
         result = tool_mgr.dispatch(tc)
@@ -280,11 +458,13 @@ def run_agentic_rollouts(
             else:
                 _append_tool_turn(r, decoded, tool_calls, tool_mgr, turn)
 
-    # Anything still not done hit max_turns: accept the last completion as
-    # its terminal answer so reward can still be computed.
+    # Anything still not done hit max_turns with a trailing tool call.  The
+    # assistant message was already appended by ``_append_tool_turn`` in the
+    # final iteration, so we MUST NOT append it again -- just mark the rollout
+    # as done.  Reward functions look up the last assistant message and will
+    # correctly penalise the missing \boxed{} answer.
     for r in rollouts:
-        if not r.done and r.final_sequence is not None:
-            _append_terminal(r, r.final_sequence.decoded or '')
+        r.done = True
 
     return rollouts
 
@@ -358,7 +538,7 @@ def main():
 
     GLOBAL_BATCH_SIZE = BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS
     dataloader = DataLoader(
-        dataset=create_gsm8k_dataset,
+        dataset=create_hotpotqa_dataset,
         batch_size=GLOBAL_BATCH_SIZE,
         min_batch_size=GLOBAL_BATCH_SIZE,
         device_mesh=model_mesh,
@@ -375,7 +555,7 @@ def main():
     )
 
     optim_step = 0
-    logger.info('Starting GSM8K GRPO training (agentic + context compression)')
+    logger.info('Starting HotpotQA GRPO training (agentic + context compression)')
     logger.info(get_device_placement())
 
     for batch in dataloader:
@@ -418,8 +598,8 @@ def main():
             completion_lengths=all_completion_lengths,
             rewards={
                 'total': total_rewards,
-                'brevity': brevity_rewards,
-                'accuracy': accuracy_rewards,
+                'format': brevity_rewards,
+                'f1': accuracy_rewards,
                 'extract': extract_rewards,
             },
         )
@@ -446,7 +626,7 @@ def main():
             if optim_step >= MAX_STEPS:
                 break
             if optim_step % SAVE_STEPS == 0:
-                model.save(f'math-grpo-tools-checkpoint-{optim_step}')
+                model.save(f'hotpotqa-grpo-tools-checkpoint-{optim_step}')
 
         log_dict = metrics.calculate()
         log_dict.update(model.calculate_metric(is_training=True))
@@ -458,7 +638,7 @@ def main():
         logger.info(f'[Step {optim_step}/{MAX_STEPS}] {log_dict}')
 
     logger.info(f'Training completed. optim_steps={optim_step}')
-    model.save('math-grpo-tools-final')
+    model.save('hotpotqa-grpo-tools-final')
 
 
 if __name__ == '__main__':
