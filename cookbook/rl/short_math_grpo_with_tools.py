@@ -202,6 +202,14 @@ def _last_assistant_text(traj: Dict[str, Any]) -> str:
 
 
 # ========== Reward Functions ==========
+# Module-level singletons lazily instantiated by ``compute_rewards`` on first
+# call.  Declared here (rather than inside the function) so the ``global``
+# statement's ``if _F1_REWARD is None`` read does not ``NameError`` on step 1.
+_F1_REWARD = None
+_FORMAT_REWARD = None
+_EXTRACT_REWARD = None
+
+
 def _normalize_answer(s: str) -> str:
     """SQuAD-style normalization: lowercase, strip punct/articles/extra ws."""
     s = (s or '').lower()
@@ -434,12 +442,21 @@ def run_agentic_rollouts(
     chunker: NativeChunker,
     condenser: NativeCondenser,
     max_turns: int,
+    min_batch_size: int = 1,
 ) -> List[_Rollout]:
     """Batched multi-turn rollout with chunk-compress-tool loop.
 
     At each iteration we process only the rollouts that are still active,
     shrinking the batch as trajectories finish (either via a terminal
     response or by hitting ``max_turns``).
+
+    ``min_batch_size`` guards against the late-turn case where ``active``
+    shrinks below the sampler's DP world size.  The infra-side
+    ``_check_uniform`` raises ``ValueError('Batch too small for N workers,
+    some ranks have no data')`` when any sampler rank would otherwise get
+    zero items, so we pad ``displays`` up to ``min_batch_size`` with the
+    first live display (a safe no-op: we slice the padded responses off
+    before using them).
     """
     rollouts = [_Rollout(p) for p in prompts]
 
@@ -458,7 +475,17 @@ def run_agentic_rollouts(
             # block numbers the model sees in the prompt resolve correctly.
             tool_mgrs.append(ToolManager([ExtractCompressed(full_chunks)]))
 
+        # Pad up to ``min_batch_size`` so every sampler DP rank receives at
+        # least one prompt.  The padded entries are throw-away duplicates of
+        # the first live display; we slice them off from ``responses`` below.
+        n_active = len(displays)
+        if n_active < min_batch_size:
+            pad = displays[0]
+            displays = displays + [pad] * (min_batch_size - n_active)
+
         responses = sampler.sample(displays, sampling_params)
+        # Drop padded responses before pairing with real rollouts.
+        responses = responses[:n_active]
 
         for r, resp, tool_mgr in zip(active, responses, tool_mgrs):
             seq = resp.sequences[0]
@@ -558,7 +585,7 @@ def main():
     # Chunker / condenser live on the driver (pure-Python, no GPU).
     chunker = NativeChunker(
         model_id=MODEL_ID, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
-    condenser = NativeCondenser(keep_ratio=(0.1, KEEP_RATIO))
+    condenser = NativeCondenser(keep_ratio=(0.1, KEEP_RATIO), skip_system=True)
 
     GLOBAL_BATCH_SIZE = BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS
     dataloader = DataLoader(
@@ -595,7 +622,8 @@ def main():
         # ---- Multi-turn rollout (the agentic heart of this script) ----
         rollouts = run_agentic_rollouts(
             expand_prompts, sampler, sampling_params,
-            chunker, condenser, max_turns=MAX_TURNS)
+            chunker, condenser, max_turns=MAX_TURNS,
+            min_batch_size=GLOBAL_BATCH_SIZE)
 
         all_input_data: List[Dict[str, Any]] = []
         all_old_logps: List[List[float]] = []

@@ -1,5 +1,6 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 import inspect
+import json
 import numpy as np
 import os
 from collections.abc import Mapping
@@ -19,6 +20,80 @@ if TYPE_CHECKING:
 ImageInput = Union[str, 'Image.Image', 'torch.Tensor']
 VideoInput = Union[str, List['Image.Image'], 'torch.Tensor']
 AudioInput = Union[str, np.ndarray, 'torch.Tensor']
+
+
+def _parse_arguments(args: Any) -> Any:
+    if isinstance(args, str):
+        try:
+            parsed = json.loads(args)
+            return parsed
+        except (TypeError, ValueError):
+            return {}
+    return args
+
+
+def _normalize_tool_call_for_template(tc: Any) -> Any:
+    """Translate Twinkle ``ToolCall`` shape to OpenAI-style for chat templates.
+
+    Twinkle internal:  ``{'tool_name': str, 'arguments': json-str}``
+    Chat-template:     ``{'type': 'function',
+                          'function': {'name': str, 'arguments': dict}}``
+
+    Calls already in OpenAI shape (have ``function.name`` or a top-level
+    ``name``) pass through untouched so this adapter is idempotent.
+    """
+    if not isinstance(tc, dict):
+        return tc
+    # Already OpenAI-nested: ensure arguments is a mapping.
+    if isinstance(tc.get('function'), dict) and 'name' in tc['function']:
+        fn = dict(tc['function'])
+        if 'arguments' in fn:
+            fn['arguments'] = _parse_arguments(fn['arguments'])
+        out = dict(tc)
+        out['function'] = fn
+        out.setdefault('type', 'function')
+        return out
+    # Already flat OpenAI (``name`` at top-level): just normalize arguments.
+    if 'name' in tc and 'tool_name' not in tc:
+        out = dict(tc)
+        if 'arguments' in out:
+            out['arguments'] = _parse_arguments(out['arguments'])
+        return out
+    # Twinkle shape: lift ``tool_name`` to ``function.name``.
+    name = tc.get('tool_name')
+    if not name:
+        return tc
+    return {
+        'type': 'function',
+        'function': {
+            'name': name,
+            'arguments': _parse_arguments(tc.get('arguments', {})),
+        },
+    }
+
+
+def _normalize_tool_for_template(tool: Any) -> Any:
+    """Translate Twinkle :class:`~twinkle.data_format.message.Tool` advertisement.
+
+    Twinkle:       ``{'tool_name', 'description', 'parameters': json-str}``
+    Chat-template: ``{'type': 'function',
+                     'function': {'name', 'description', 'parameters': dict}}``
+    """
+    if not isinstance(tool, dict):
+        return tool
+    if isinstance(tool.get('function'), dict) and 'name' in tool['function']:
+        return tool
+    if 'name' in tool and 'tool_name' not in tool:
+        return tool
+    name = tool.get('tool_name')
+    if not name:
+        return tool
+    fn: Dict[str, Any] = {'name': name}
+    if 'description' in tool:
+        fn['description'] = tool['description']
+    if 'parameters' in tool:
+        fn['parameters'] = _parse_arguments(tool['parameters'])
+    return {'type': 'function', 'function': fn}
 
 
 class Template:
@@ -458,7 +533,17 @@ class Template:
                 k: v
                 for k, v in b.items() if v is not None
             } for b in msg['content'] if isinstance(b, dict)]
-        tools = [dict(tool) for tool in trajectory.get('tools', [])]
+
+        for msg in messages:
+            tcs = msg.get('tool_calls')
+            if isinstance(tcs, list) and tcs:
+                msg['tool_calls'] = [
+                    _normalize_tool_call_for_template(tc) for tc in tcs
+                ]
+        tools = [
+            _normalize_tool_for_template(tool)
+            for tool in trajectory.get('tools', [])
+        ]
 
         # Use inspect to get apply_chat_template signature params
         sig = inspect.signature(self.processor.apply_chat_template)

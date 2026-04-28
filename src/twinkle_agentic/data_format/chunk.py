@@ -60,9 +60,13 @@ class Chunks:
                 wrapping each text chunk's ``content`` with block markers;
                 ``{n}`` is substituted with the chunk's 0-based index in
                 ``self.chunks``.  Pass ``None`` to disable wrapping.  Only
-                text chunks are wrapped -- multi-modal URLs / paths and
-                tool-call structural payloads are left untouched.  Defaults
-                to ``('<block_{n}>', '</block_{n}>')``.
+                **condensed** text chunks (those carrying
+                ``raw['condensed'] = True``) are wrapped -- unchanged text
+                chunks, multi-modal URLs / paths and tool-call structural
+                payloads are left untouched, since ``<block_N>`` markers
+                only make sense for text whose original form can be recalled
+                via :class:`~twinkle_agentic.tools.extract.ExtractCompressed`.
+                Defaults to ``('<block_{n}>', '</block_{n}>')``.
 
         Returns:
             A dict with keys ``messages`` (always present) and optionally
@@ -112,8 +116,15 @@ class Chunks:
                 media[c['type']].append(c.get('content'))
                 continue
             if block_wrapper and c.get('type') == 'text':
+                # Only wrap chunks that were actually shortened by the
+                # condenser (``raw['condensed'] = True``). Unchanged chunks
+                # need no ``<block_N>`` marker because there is no original
+                # text to recall via ``ExtractCompressed`` -- wrapping them
+                # would invite wasted tool calls against pristine content.
+                raw = c.get('raw')
+                is_condensed = isinstance(raw, dict) and raw.get('condensed')
                 content = c.get('content')
-                if isinstance(content, str) and content:
+                if is_condensed and isinstance(content, str) and content:
                     prefix = block_wrapper[0].format(n=idx)
                     suffix = block_wrapper[1].format(n=idx)
                     c = {**c, 'content': f'{prefix}{content}{suffix}'}
