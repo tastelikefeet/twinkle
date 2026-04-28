@@ -2,6 +2,13 @@
 import os.path
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+
+try:
+    import multiprocess as _multiprocess
+    _multiprocess.set_start_method('spawn', force=True)
+except RuntimeError:
+    pass
+
 from datasets import DatasetDict, IterableDataset, concatenate_datasets, interleave_datasets, load_dataset
 from torch.utils.data import Dataset as TorchDataset
 from typing import Any, Callable, Dict, Type, Union

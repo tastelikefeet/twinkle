@@ -661,18 +661,10 @@ class Template:
 
         # Process List[Trajectory]
         trajectories = self._invoke_pre_pipeline(trajectories)
-
-        # Use thread pool for parallel encoding
-        from concurrent.futures import ThreadPoolExecutor
-        from functools import partial
-        encode_fn = partial(
-            self._encode_messages,
-            add_generation_prompt=add_generation_prompt,
-            **kwargs,
-        )
-        with ThreadPoolExecutor() as executor:
-            output = list(executor.map(encode_fn, trajectories))
-
+        output = [
+            self._encode_messages(t, add_generation_prompt=add_generation_prompt, **kwargs)
+            for t in trajectories
+        ]
         output = self._invoke_post_pipeline(output)
 
         if _transfer:

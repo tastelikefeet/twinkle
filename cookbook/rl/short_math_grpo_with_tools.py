@@ -91,6 +91,10 @@ CHUNK_SIZE = int(os.environ.get('CHUNK_SIZE', 512))        # chars per chunk (Na
 CHUNK_OVERLAP = int(os.environ.get('CHUNK_OVERLAP', 0))    # sliding-window overlap
 KEEP_RATIO = float(os.environ.get('KEEP_RATIO', 0.5))      # NativeCondenser target ratio
 
+# ---- HotpotQA dataset encode knobs ----
+HOTPOTQA_NUM_PROC = int(os.environ.get('HOTPOTQA_NUM_PROC', 16))
+HOTPOTQA_MAX_LENGTH = int(os.environ.get('HOTPOTQA_MAX_LENGTH', 64000))
+
 # ========== System Prompt ==========
 SYSTEM_PROMPT = (
     'You are a careful multi-hop QA assistant. Answer the user\'s question '
@@ -197,76 +201,6 @@ def _last_assistant_text(traj: Dict[str, Any]) -> str:
     return ''
 
 
-class HotpotQAProcessor(Preprocessor):
-    """Render a HotpotQA row into a prompt-only Trajectory.
-
-    HotpotQA schema (after HF ``datasets`` flattening)::
-
-        id:                str
-        question:          str
-        answer:            str                    (may be 'yes' / 'no')
-        type:              'bridge' | 'comparison'
-        level:             'easy' | 'medium' | 'hard'
-        supporting_facts:  {'title': List[str], 'sent_id': List[int]}
-        context:           {'title': List[str], 'sentences': List[List[str]]}
-
-    We ship the ten (title, paragraph) pairs to the model as a numbered list
-    so that ``NativeChunker`` naturally slices them into one block per
-    paragraph, and the ``extract_compressed`` tool can recall a specific
-    paragraph by its block id.
-
-    ``ground_truth`` (for the F1/EM reward) and ``support_titles`` (for any
-    supporting-fact auxiliary reward) are stashed in ``user_data``.
-    """
-
-    def __init__(self, system: str = SYSTEM_PROMPT):
-        self.system = system
-
-    def __call__(self, rows: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
-        rows = self.map_col_to_row(rows)
-        rows = [self.preprocess(row) for row in rows]
-        rows = self.map_row_to_col(rows)
-        return rows
-
-    @staticmethod
-    def _format_context(context: Dict[str, Any]) -> str:
-        titles = context.get('title', []) or []
-        sentences = context.get('sentences', []) or []
-        lines = []
-        for i, (title, sents) in enumerate(zip(titles, sentences), start=1):
-            body = ''.join(sents) if isinstance(sents, list) else str(sents)
-            lines.append(f'[{i}] {title}: {body.strip()}')
-        return '\n'.join(lines)
-
-    def preprocess(self, row: Dict[str, Any]) -> Trajectory:
-        question = row['question']
-        answer = row.get('answer', '') or ''
-        context_block = self._format_context(row.get('context', {}) or {})
-        support_titles = (row.get('supporting_facts') or {}).get('title', []) or []
-
-        user_msg = (
-            f'Question: {question}\n\n'
-            f'Context:\n{context_block}')
-
-        messages = [
-            Message(role='system', content=self.system),
-            Message(role='user', content=user_msg),
-        ]
-        return Trajectory(
-            messages=messages,
-            user_data=[
-                ('ground_truth', answer.strip()),
-                ('support_titles', list(support_titles)),
-            ],
-        )
-
-
-# Reward instances are stateless once constructed; build once at import time.
-_F1_REWARD = None
-_FORMAT_REWARD = None
-_EXTRACT_REWARD = None
-
-
 # ========== Reward Functions ==========
 def _normalize_answer(s: str) -> str:
     """SQuAD-style normalization: lowercase, strip punct/articles/extra ws."""
@@ -328,15 +262,94 @@ class HotpotQAFormatReward(Reward):
 
 
 # ========== Dataset ==========
-def create_hotpotqa_dataset():
+class HotpotQAProcessor(Preprocessor):
+    """Render a HotpotQA row into a prompt-only Trajectory.
+
+    HotpotQA schema (after HF ``datasets`` flattening)::
+
+        id:                str
+        question:          str
+        answer:            str                    (may be 'yes' / 'no')
+        type:              'bridge' | 'comparison'
+        level:             'easy' | 'medium' | 'hard'
+        supporting_facts:  {'title': List[str], 'sent_id': List[int]}
+        context:           {'title': List[str], 'sentences': List[List[str]]}
+
+    We ship the ten (title, paragraph) pairs to the model as a numbered list
+    so that ``NativeChunker`` naturally slices them into one block per
+    paragraph, and the ``extract_compressed`` tool can recall a specific
+    paragraph by its block id.
+
+    ``ground_truth`` (for the F1/EM reward) is stashed in ``user_data``.
+
+    Note: ``user_data`` is flattened into an Arrow table downstream, so every
+    tuple value in it must have the *same* primitive type across rows --
+    heterogeneous types (e.g. mixing ``str`` with ``list[str]``) trigger
+    ``ArrowTypeError`` during ``dataset.map``.  That is why we do NOT stash
+    ``supporting_facts.title`` here; if a supporting-fact auxiliary reward is
+    ever added, JSON-encode the list to a string first.
+    """
+
+    def __init__(self, system: str = SYSTEM_PROMPT):
+        self.system = system
+
+    def __call__(self, rows: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
+        rows = self.map_col_to_row(rows)
+        rows = [self.preprocess(row) for row in rows]
+        rows = self.map_row_to_col(rows)
+        return rows
+
+    @staticmethod
+    def _format_context(context: Dict[str, Any]) -> str:
+        titles = context.get('title', []) or []
+        sentences = context.get('sentences', []) or []
+        lines = []
+        for i, (title, sents) in enumerate(zip(titles, sentences), start=1):
+            body = ''.join(sents) if isinstance(sents, list) else str(sents)
+            lines.append(f'[{i}] {title}: {body.strip()}')
+        return '\n'.join(lines)
+
+    def preprocess(self, row: Dict[str, Any]) -> Trajectory:
+        question = row['question']
+        answer = row.get('answer', '') or ''
+        context_block = self._format_context(row.get('context', {}) or {})
+
+        user_msg = (
+            f'Question: {question}\n\n'
+            f'Context:\n{context_block}')
+
+        messages = [
+            Message(role='system', content=self.system),
+            Message(role='user', content=user_msg),
+        ]
+        return Trajectory(
+            messages=messages,
+            user_data=[('ground_truth', answer.strip())],
+        )
+
+
+def create_hotpotqa_dataset() -> Dataset:
+    """Build + encode the HotpotQA dataset in-process.
+
+    ``dataset.encode(num_proc=HOTPOTQA_NUM_PROC)`` uses a
+    ``multiprocess.Pool`` whose start method has already been forced to
+    ``spawn`` by ``twinkle.dataset.base`` at import time.  Spawn workers boot
+    fresh interpreters, so they do NOT inherit the parent's CUDA state and
+    unpickle the template (which carries a full Qwen3.5 ``dummy_model`` for
+    rope-index extraction) without tripping ``torch.cuda._lazy_init``.
+    """
     dataset = Dataset()
     dataset.add_dataset(DatasetMeta(
         'hf://hotpotqa/hotpot_qa', subset_name='fullwiki', split='train'))
     dataset.set_template(
-        'Qwen3_5Template', model_id=MODEL_ID, max_length=4096,
+        'Qwen3_5Template', model_id=MODEL_ID, max_length=HOTPOTQA_MAX_LENGTH,
         truncation_strategy='delete', enable_thinking=False)
     dataset.map(HotpotQAProcessor(system=SYSTEM_PROMPT))
-    dataset.encode(add_generation_prompt=True)
+    dataset.encode(
+        add_generation_prompt=True,
+        load_from_cache_file=True,
+        num_proc=HOTPOTQA_NUM_PROC,
+    )
     return dataset
 
 
@@ -480,6 +493,16 @@ def main():
     sampler_mesh = DeviceMesh.from_sizes(world_size=SAMPLER_GPUS, dp_size=SAMPLER_GPUS)
     twinkle.initialize(mode='ray', nproc_per_node=NUM_GPUS, groups=device_groups, lazy_collect=False)
 
+    # Build and encode the HotpotQA dataset in-process.  Safe because
+    # ``twinkle.dataset.base`` has already forced the ``multiprocess`` start
+    # method to ``spawn`` at import time -- forked workers would crash on
+    # unpickle of the Qwen3.5 template's dummy_model, but spawn workers boot
+    # fresh interpreters and never inherit parent CUDA state.
+    logger.info('Building HotpotQA dataset (num_proc=%d, max_length=%d)',
+                HOTPOTQA_NUM_PROC, HOTPOTQA_MAX_LENGTH)
+    _prebuilt_dataset = create_hotpotqa_dataset()
+    logger.info('Dataset ready: %d rows', len(_prebuilt_dataset))
+
     lora_config = LoraConfig(
         target_modules='all-linear',
         r=LORA_RANK,
@@ -538,11 +561,9 @@ def main():
 
     GLOBAL_BATCH_SIZE = BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS
     dataloader = DataLoader(
-        dataset=create_hotpotqa_dataset,
+        dataset=lambda: _prebuilt_dataset,
         batch_size=GLOBAL_BATCH_SIZE,
         min_batch_size=GLOBAL_BATCH_SIZE,
-        device_mesh=model_mesh,
-        remote_group='model',
     )
 
     advantage_fn = GRPOAdvantage()
