@@ -17,7 +17,9 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
-from typing import Dict, List, Sequence, Set, Tuple
+from typing import Dict, List, Sequence, Tuple, Union
+
+RatioLike = Union[float, Tuple[float, float], List[float]]
 
 from twinkle_agentic.data_format import Chunks
 from twinkle_agentic.data_format.chunk import Chunk
@@ -56,8 +58,21 @@ class NativeCondenser(Condenser):
 
     Args:
         keep_ratio: Target character ratio per text chunk after compression,
-            in ``(0.0, 1.0]``.  ``1.0`` disables compression.  Defaults to
-            ``0.5``.
+            in ``(0.0, 1.0]``.  ``1.0`` disables compression.  May be either
+
+            * a single ``float`` -- uniform ratio applied to every
+              compressible chunk, or
+            * a ``(min_keep_ratio, max_keep_ratio)`` tuple -- a gradient that
+              **linearly interpolates** across the sequence of compressible
+              chunks.  Because early context is typically stale / less
+              valuable than recent context, the first compressible chunk gets
+              ``min_keep_ratio`` (most aggressive compression) and the last
+              gets ``max_keep_ratio`` (most preserved).  Non-compressible
+              chunks (protected kinds / multi-modal) are skipped when counting
+              positions, so the gradient spans only the chunks actually being
+              shortened.
+
+            Defaults to ``0.5`` (uniform).
         min_sentences: Lower bound on sentences retained per chunk regardless
             of the character budget.  Defaults to ``1``.
         min_chars: Chunks with content shorter than this threshold are kept
@@ -129,57 +144,85 @@ class NativeCondenser(Condenser):
 
     def __init__(
         self,
-        keep_ratio: float = 0.5,
+        keep_ratio: RatioLike = 0.5,
         min_sentences: int = 1,
         min_chars: int = 40,
     ) -> None:
-        if not 0 < keep_ratio <= 1:
-            raise ValueError(f'keep_ratio must be in (0, 1], got {keep_ratio}')
-        if min_sentences < 1:
-            raise ValueError(f'min_sentences must be >= 1, got {min_sentences}')
-        if min_chars < 0:
-            raise ValueError(f'min_chars must be >= 0, got {min_chars}')
-        self.keep_ratio = keep_ratio
+        low, high = self._normalize_ratio(keep_ratio)
+        if min_sentences < 1 or min_chars < 0:
+            raise ValueError(
+                f'invalid params: min_sentences={min_sentences} (expect >=1), '
+                f'min_chars={min_chars} (expect >=0)')
+        self.min_keep_ratio = low
+        self.max_keep_ratio = high
+        # Backward-compat attribute: equals ``max_keep_ratio`` when uniform.
+        self.keep_ratio = high if low == high else (low, high)
         self.min_sentences = min_sentences
         self.min_chars = min_chars
+
+    @staticmethod
+    def _normalize_ratio(keep_ratio: RatioLike) -> Tuple[float, float]:
+        """Coerce ``keep_ratio`` to a ``(low, high)`` tuple and validate."""
+        if isinstance(keep_ratio, (tuple, list)):
+            if len(keep_ratio) != 2:
+                raise ValueError(
+                    f'invalid keep_ratio={keep_ratio!r}: expect 2-element '
+                    f'(min, max) tuple')
+            low, high = float(keep_ratio[0]), float(keep_ratio[1])
+        else:
+            low = high = float(keep_ratio)
+        if not (0 < low <= 1) or not (0 < high <= 1) or low > high:
+            raise ValueError(
+                f'invalid keep_ratio={keep_ratio!r}: expect float in (0, 1] '
+                f'or (min, max) with 0 < min <= max <= 1')
+        return low, high
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def condense(self, chunks: Chunks, **kwargs) -> Chunks:
-        keep_ratio = kwargs.get('keep_ratio', self.keep_ratio)
+        if 'keep_ratio' in kwargs:
+            low, high = self._normalize_ratio(kwargs['keep_ratio'])
+        else:
+            low, high = self.min_keep_ratio, self.max_keep_ratio
         min_sentences = kwargs.get('min_sentences', self.min_sentences)
         min_chars = kwargs.get('min_chars', self.min_chars)
 
         items = list(chunks.chunks)
-        if not items or keep_ratio >= 1.0:
+        if not items or (low >= 1.0 and high >= 1.0):
             return Chunks(chunks=items)
 
-        # 1. Build corpus-wide IDF over all compressible text chunks.
-        corpus = [c.get('content', '') for c in items if self._is_compressible(c)]
-        idf = self._compute_idf(corpus)
+        # Locate compressible chunks; the gradient spans only these positions.
+        compressible_indices = [
+            i for i, c in enumerate(items) if self._is_compressible(c)
+        ]
+        idf = self._compute_idf(
+            [items[i].get('content', '') for i in compressible_indices])
 
-        # 2. Compress each text chunk individually; pass-through the rest.
-        result: List[Chunk] = []
-        for chunk in items:
-            if not self._is_compressible(chunk):
-                result.append(chunk)
-                continue
-            content = chunk.get('content', '')
-            if len(content) <= min_chars:
-                result.append(chunk)
-                continue
-            compressed = self._compress_text(content, idf, keep_ratio, min_sentences)
-            if compressed and compressed != content:
-                result.append(self._replace_content(chunk, compressed))
+        # Linear interpolation across compressible chunks:
+        #   rank 0 -> low  (earliest, most aggressive compression),
+        #   rank N-1 -> high (latest, most preserved).
+        # Non-compressible chunks get ratio 1.0 (a no-op; they are skipped by
+        # ``_try_compress`` anyway, but keeps the call site uniform).
+        ratio_by_index: Dict[int, float] = {}
+        total = len(compressible_indices)
+        for rank, idx in enumerate(compressible_indices):
+            if total <= 1:
+                ratio_by_index[idx] = high
             else:
-                result.append(chunk)
-        return Chunks(chunks=result)
+                t = rank / (total - 1)
+                ratio_by_index[idx] = low + (high - low) * t
 
-    # ── Eligibility ──────────────────────────────────────────────────────────
+        return Chunks(chunks=[
+            self._try_compress(c, idf, ratio_by_index.get(i, 1.0),
+                               min_sentences, min_chars)
+            for i, c in enumerate(items)
+        ])
+
+    # ── Eligibility & rewriting ──────────────────────────────────────────────
 
     @staticmethod
     def _is_compressible(chunk: Chunk) -> bool:
-        """A chunk is compressible iff it is text, non-empty, and not protected."""
+        """True iff chunk is non-empty text and not structurally protected."""
         if chunk.get('type') in _PROTECTED_TYPES:
             return False
         raw = chunk.get('raw')
@@ -188,11 +231,18 @@ class NativeCondenser(Condenser):
         content = chunk.get('content')
         return isinstance(content, str) and bool(content.strip())
 
-    @staticmethod
-    def _replace_content(chunk: Chunk, content: str) -> Chunk:
-        """Return a shallow copy of ``chunk`` with a new ``content`` string."""
+    @classmethod
+    def _try_compress(cls, chunk: Chunk, idf: Dict[str, float],
+                      keep_ratio: float, min_sentences: int, min_chars: int) -> Chunk:
+        """Compress ``chunk`` if eligible; otherwise return it unchanged."""
+        content = chunk.get('content', '')
+        if not cls._is_compressible(chunk) or len(content) <= min_chars:
+            return chunk
+        compressed = cls._compress_text(content, idf, keep_ratio, min_sentences)
+        if not compressed or compressed == content:
+            return chunk
         new_chunk: Chunk = dict(chunk)  # type: ignore[assignment]
-        new_chunk['content'] = content
+        new_chunk['content'] = compressed
         raw = new_chunk.get('raw')
         if isinstance(raw, dict):
             new_chunk['raw'] = {**raw, 'condensed': True}
@@ -203,25 +253,17 @@ class NativeCondenser(Condenser):
     @classmethod
     def _compute_idf(cls, docs: Sequence[str]) -> Dict[str, float]:
         """Smoothed IDF: ``log((N + 1) / (df + 1)) + 1``."""
-        n_docs = max(1, len(docs))
+        n = max(1, len(docs))
         df: Counter = Counter()
         for doc in docs:
             df.update(set(cls._tokenize(doc)))
-        return {term: math.log((n_docs + 1) / (count + 1)) + 1 for term, count in df.items()}
+        return {t: math.log((n + 1) / (c + 1)) + 1 for t, c in df.items()}
 
     @classmethod
     def _score_unit(cls, text: str, idf: Dict[str, float]) -> float:
-        """Sub-linear TF × IDF aggregation over unique terms.
-
-        Terms unseen in ``idf`` receive a minimal default weight so that
-        rare-but-novel vocabulary does not get zero credit.
-        """
-        tokens = cls._tokenize(text)
-        if not tokens:
-            return 0.0
-        tf = Counter(tokens)
-        default = 1.0
-        return sum((1 + math.log(count)) * idf.get(term, default) for term, count in tf.items())
+        """Sub-linear TF × IDF over unique terms; OOV terms get weight 1.0."""
+        tf = Counter(cls._tokenize(text))
+        return sum((1 + math.log(c)) * idf.get(t, 1.0) for t, c in tf.items())
 
     @staticmethod
     def _tokenize(text: str) -> List[str]:
@@ -231,53 +273,39 @@ class NativeCondenser(Condenser):
     # ── Per-chunk compression ─────────────────────────────────────────────────
 
     @classmethod
-    def _compress_text(
-        cls,
-        text: str,
-        idf: Dict[str, float],
-        keep_ratio: float,
-        min_sentences: int,
-    ) -> str:
-        """Extractive compression that respects code fences and ordering."""
+    def _compress_text(cls, text: str, idf: Dict[str, float],
+                       keep_ratio: float, min_sentences: int) -> str:
+        """Greedy extractive compression respecting code fences and ordering."""
         units = cls._split_into_units(text)
         if len(units) <= min_sentences:
             return text
 
-        target_chars = max(1, math.ceil(len(text) * keep_ratio))
+        target = max(1, math.ceil(len(text) * keep_ratio))
         # Code blocks get +inf so they are picked first and never dropped.
         scored = [
-            (math.inf if is_code else cls._score_unit(unit, idf), i, unit)
-            for i, (unit, is_code) in enumerate(units)
+            (math.inf if is_code else cls._score_unit(u, idf), i, u)
+            for i, (u, is_code) in enumerate(units)
         ]
 
-        # Greedy selection by score descending; tie-broken by original order.
-        selected: Set[int] = set()
+        # Pick units by descending score until both budget and min are satisfied.
+        selected: set = set()
         used = 0
-        for score, i, unit in sorted(scored, key=lambda x: (-x[0], x[1])):
+        for _, i, u in sorted(scored, key=lambda x: (-x[0], x[1])):
             selected.add(i)
-            used += len(unit) + 1  # +1 for the joining space
-            if used >= target_chars and len(selected) >= min_sentences:
+            used += len(u) + 1  # +1 for the joining space
+            if used >= target and len(selected) >= min_sentences:
                 break
-
-        parts = [unit for i, (unit, _) in enumerate(units) if i in selected]
-        return ' '.join(parts).strip()
+        return ' '.join(u for i, (u, _) in enumerate(units) if i in selected).strip()
 
     @staticmethod
     def _split_into_units(text: str) -> List[Tuple[str, bool]]:
-        """Split content into ``(unit_text, is_code_block)`` preserving order.
-
-        Fenced code blocks remain single indivisible units; non-code parts
-        are further split on sentence boundaries.
-        """
+        """Yield ``(unit, is_code_block)`` preserving order; code stays atomic."""
         units: List[Tuple[str, bool]] = []
         for part in _CODE_FENCE_RE.split(text):
             if not part:
                 continue
             if part.startswith('```'):
                 units.append((part.strip(), True))
-                continue
-            for sent in _SENT_SPLIT_RE.split(part):
-                sent = sent.strip()
-                if sent:
-                    units.append((sent, False))
+            else:
+                units.extend((s.strip(), False) for s in _SENT_SPLIT_RE.split(part) if s.strip())
         return units

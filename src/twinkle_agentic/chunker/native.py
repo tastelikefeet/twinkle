@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, Iterator, List
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 
 from twinkle.data_format import Trajectory
 from twinkle.data_format.message import Message, ToolCall
+from twinkle.template import Template
 from twinkle_agentic.data_format import Chunks
 from twinkle_agentic.data_format.chunk import Chunk
 
@@ -32,6 +33,8 @@ _SENTENCE_RE = re.compile(r'(?<=[.!?。！？])\s+|\n+')
 
 # Multi-modal keys on a Trajectory map 1:1 to Chunk.type values.
 _MEDIA_KEYS = (('images', 'image'), ('videos', 'video'), ('audios', 'audio'))
+_MEDIA_PART_TYPES = frozenset(
+    {'image', 'image_url', 'video', 'video_url', 'audio', 'audio_url'})
 
 
 class NativeChunker(Chunker):
@@ -104,11 +107,10 @@ class NativeChunker(Chunker):
     """
 
     def __init__(self, model_id: str, chunk_size: int = 1024, chunk_overlap: int = 50) -> None:
-        if chunk_size <= 0:
-            raise ValueError(f'chunk_size must be positive, got {chunk_size}')
-        if not 0 <= chunk_overlap < chunk_size:
+        if chunk_size <= 0 or not 0 <= chunk_overlap < chunk_size:
             raise ValueError(
-                f'chunk_overlap must satisfy 0 <= overlap < chunk_size, got {chunk_overlap}')
+                f'invalid params: chunk_size={chunk_size} (expect >0), '
+                f'chunk_overlap={chunk_overlap} (expect 0<=overlap<chunk_size)')
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.template = Template(model_id)
@@ -116,11 +118,10 @@ class NativeChunker(Chunker):
     # ── Public API ────────────────────────────────────────────────────────────
 
     def chunk(self, trajectory: Trajectory) -> Chunks:
-        chunks: List[Chunk] = []
         trajectory = self.template.format_trajectory(trajectory)
+        chunks: List[Chunk] = []
         for message in trajectory.get('messages') or []:
             chunks.extend(self._chunk_message(message))
-
         chunks.extend(self._multimodal_chunks(trajectory))
         return Chunks(chunks=chunks)
 
@@ -129,78 +130,79 @@ class NativeChunker(Chunker):
     def _chunk_message(self, message: Message) -> Iterator[Chunk]:
         """Expand a single message into chunks for each of its payloads."""
         role = message.get('role', 'user')
+        # Preserve OpenAI-style ``tool_call_id`` (present on ``role='tool'`` messages)
+        # so ``Chunks.to_trajectory`` can re-pair tool results with their calls.
+        tool_call_id = message.get('tool_call_id')
 
-        reasoning = message.get('reasoning_content')
-        if reasoning:
-            yield from self._chunk_text(reasoning, role=role, kind='reasoning_content')
+        if reasoning := message.get('reasoning_content'):
+            yield from self._chunk_text(
+                reasoning, role=role, kind='reasoning_content', tool_call_id=tool_call_id)
 
         content = message.get('content')
         if isinstance(content, str):
-            yield from self._chunk_text(content, role=role, kind='content')
+            yield from self._chunk_text(
+                content, role=role, kind='content', tool_call_id=tool_call_id)
         elif isinstance(content, list):
-            yield from self._chunk_structured_content(content, role=role)
+            yield from self._chunk_structured_content(
+                content, role=role, tool_call_id=tool_call_id)
 
         for tool_call in message.get('tool_calls') or []:
             yield self._tool_call_to_chunk(tool_call, role=role)
 
-    def _chunk_structured_content(self, parts: List[Any], role: str) -> Iterator[Chunk]:
+    def _chunk_structured_content(
+        self,
+        parts: List[Any],
+        role: str,
+        *,
+        tool_call_id: Optional[str] = None,
+    ) -> Iterator[Chunk]:
         """Handle OpenAI-style list content: ``[{'type': 'text', 'text': ...}, ...]``."""
         for part in parts:
             if isinstance(part, str):
-                yield from self._chunk_text(part, role=role, kind='content')
+                yield from self._chunk_text(
+                    part, role=role, kind='content', tool_call_id=tool_call_id)
                 continue
             if not isinstance(part, dict):
                 continue
-
             p_type = part.get('type')
             if p_type == 'text':
-                yield from self._chunk_text(part.get('text', ''), role=role, kind='content')
-            elif p_type in {'image', 'image_url', 'video', 'video_url', 'audio', 'audio_url'}:
+                yield from self._chunk_text(
+                    part.get('text', ''), role=role, kind='content',
+                    tool_call_id=tool_call_id)
+            elif p_type in _MEDIA_PART_TYPES:
                 media_type = p_type.split('_', 1)[0]
                 media_value = part.get(f'{media_type}_url') or part.get(media_type) or part
                 yield Chunk(type=media_type, content=media_value, raw=part, role=role)
 
     # ── Text chunking ─────────────────────────────────────────────────────────
 
-    def _chunk_text(self, text: str, *, role: str, kind: str = 'content') -> Iterator[Chunk]:
+    def _chunk_text(
+        self,
+        text: str,
+        *,
+        role: str,
+        kind: str = 'content',
+        tool_call_id: Optional[str] = None,
+    ) -> Iterator[Chunk]:
         text = (text or '').strip()
         if not text:
             return
         for segment in self._iter_semantic_segments(text):
-            yield Chunk(
-                type='text',
-                content=segment,
-                raw={'kind': kind, 'text': segment},
-                role=role,
-            )
+            # ``content`` is the single source of truth; do not duplicate it in ``raw``
+            # so downstream condensers that rewrite ``content`` cannot leave a stale
+            # ``raw['text']`` behind.
+            raw: Dict[str, Any] = {'kind': kind}
+            if tool_call_id:
+                raw['tool_call_id'] = tool_call_id
+            yield Chunk(type='text', content=segment, raw=raw, role=role)
 
     def _iter_semantic_segments(self, text: str) -> Iterator[str]:
-        """Yield text segments that honour paragraph and code-fence boundaries."""
-        buffer: List[str] = []
-        buffer_len = 0
-
-        def flush() -> Iterator[str]:
-            nonlocal buffer, buffer_len
-            if buffer:
-                yield '\n\n'.join(buffer)
-                buffer, buffer_len = [], 0
-
-        for paragraph in self._split_preserving_code(text):
-            # Oversized non-code paragraph: flush buffer, then hard-split.
-            # Code blocks are always kept intact to preserve semantics.
-            if len(paragraph) > self.chunk_size and not self._is_code_block(paragraph):
-                yield from flush()
-                yield from self._hard_split(paragraph)
-                continue
-
-            separator_cost = 2 if buffer else 0
-            if buffer and buffer_len + separator_cost + len(paragraph) > self.chunk_size:
-                yield from flush()
-
-            buffer.append(paragraph)
-            buffer_len += len(paragraph) + (2 if len(buffer) > 1 else 0)
-
-        yield from flush()
+        """Pack paragraphs into segments; hard-split oversized non-code ones."""
+        def on_oversize(p: str) -> Iterator[str]:
+            # Atomic code blocks are preserved even when they exceed chunk_size.
+            yield from ([p] if self._is_code_block(p) else self._hard_split(p))
+        yield from self._greedy_pack(
+            self._split_preserving_code(text), separator='\n\n', on_oversize=on_oversize)
 
     @staticmethod
     def _split_preserving_code(text: str) -> List[str]:
@@ -220,30 +222,45 @@ class NativeChunker(Chunker):
         return segment.startswith('```') and segment.rstrip().endswith('```')
 
     def _hard_split(self, text: str) -> Iterator[str]:
-        """Fallback splitter for segments exceeding ``chunk_size``.
+        """Split oversized text on sentence boundaries; sliding window if still too long."""
+        sentences = [s.strip() for s in _SENTENCE_RE.split(text) if s and s.strip()] \
+            or [text.strip()]
+        yield from self._greedy_pack(
+            sentences, separator=' ', on_oversize=self._sliding_window)
 
-        Splits on sentence boundaries first; falls back to a sliding window
-        (with optional overlap) when a single sentence is still too long.
+    def _greedy_pack(
+        self,
+        items: Iterable[str],
+        *,
+        separator: str,
+        on_oversize: Callable[[str], Iterator[str]],
+    ) -> Iterator[str]:
+        """Greedily pack ``items`` into segments of at most ``chunk_size`` chars.
+
+        Items individually exceeding ``chunk_size`` are routed through
+        ``on_oversize`` after flushing the current buffer.
         """
-        sentences = [s for s in _SENTENCE_RE.split(text) if s and s.strip()] or [text]
-        buffer = ''
+        buf: List[str] = []
+        buf_len = 0
+        sep_len = len(separator)
 
-        for sentence in sentences:
-            if len(sentence) > self.chunk_size:
-                if buffer:
-                    yield buffer
-                    buffer = ''
-                yield from self._sliding_window(sentence)
+        for item in items:
+            if len(item) > self.chunk_size:
+                if buf:
+                    yield separator.join(buf)
+                    buf, buf_len = [], 0
+                yield from on_oversize(item)
                 continue
-
-            if buffer and len(buffer) + 1 + len(sentence) > self.chunk_size:
-                yield buffer
-                buffer = sentence
+            need = len(item) + (sep_len if buf else 0)
+            if buf_len + need > self.chunk_size:
+                yield separator.join(buf)
+                buf, buf_len = [item], len(item)
             else:
-                buffer = f'{buffer} {sentence}' if buffer else sentence
+                buf.append(item)
+                buf_len += need
 
-        if buffer:
-            yield buffer
+        if buf:
+            yield separator.join(buf)
 
     def _sliding_window(self, text: str) -> Iterator[str]:
         step = max(1, self.chunk_size - self.chunk_overlap)
@@ -261,13 +278,12 @@ class NativeChunker(Chunker):
         arguments = tool_call.get('arguments', '')
         try:
             parsed = json.loads(arguments) if isinstance(arguments, str) else arguments
-            rendered_args = json.dumps(parsed, ensure_ascii=False, indent=2)
+            rendered = json.dumps(parsed, ensure_ascii=False, indent=2)
         except (TypeError, ValueError):
-            rendered_args = str(arguments)
-
+            rendered = str(arguments)
         return Chunk(
             type='text',
-            content=f'[tool_call:{name}]\n{rendered_args}',
+            content=f'[tool_call:{name}]\n{rendered}',
             raw={'kind': 'tool_call', 'tool_call': dict(tool_call)},
             role=role,
         )
