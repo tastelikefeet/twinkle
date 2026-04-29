@@ -68,6 +68,18 @@ _PUNCT_SPLIT_RE = re.compile(
     r'|\n+',
 )
 
+# Relative pronouns / adverbs that open a subordinate clause.  After the
+# aggressive comma-split, a fragment beginning with one of these tokens is a
+# *dependent* clause whose antecedent lives in the preceding main clause.
+# Emitting it as a standalone unit produces grammatically dangling output
+# (``"which reached number 13..."`` with no referent for "which"), which is
+# especially bad for extractive summarisers: TF-IDF happily picks the
+# subordinate clause for its rare tokens (``Billboard``/``RIAA``/etc.) and
+# drops the low-scoring main clause, leaving a readable-but-ungrounded
+# sentence.  Force-glue such fragments back to the predecessor.
+_SUBORDINATE_START_RE = re.compile(
+    r'^(which|that|who|whom|whose|where|when)\b', re.IGNORECASE)
+
 # Chunks that bypass compression entirely.
 _PROTECTED_KINDS: Tuple[str, ...] = ('tool_call',)
 _PROTECTED_TYPES: Tuple[str, ...] = ('image', 'video', 'audio')
@@ -423,20 +435,28 @@ class NativeCondenser(Condenser):
         """
         return sum(3 if '\u4e00' <= c <= '\u9fff' else 1 for c in text)
 
-    @staticmethod
-    def _split_into_units(text: str, min_unit_chars: int = 20) -> List[Tuple[str, bool]]:
+    @classmethod
+    def _split_into_units(cls, text: str,
+                          min_unit_chars: int = 20) -> List[Tuple[str, bool]]:
         """Yield ``(unit, is_code_block)`` preserving order; code stays atomic.
 
-        Splits aggressively at every punctuation boundary, then **merges
+        Splits aggressively at every punctuation boundary, then merges
         fragments whose weighted length is below ``min_unit_chars`` back into
-        a neighbour**. This replaces a hand-curated transition-conjunction
-        list with a purely length-driven rule that handles appositives,
-        enumerations, and short dependent clauses uniformly across languages
-        (CJK chars count ×3 via :meth:`_weighted_len`).
+        a neighbour. Purely length-driven, so appositives, enumerations and
+        short dependent clauses are handled uniformly (CJK chars count ×3).
 
-        Merge policy: accumulate short fragments into a forward buffer until
-        they reach ``min_unit_chars``; a trailing short fragment at the end is
-        glued back onto the previous emitted unit.
+        Two cohesion rules override the plain length-merge:
+
+        * **Subordinate clauses** opened by relative pronouns
+          (``which``/``that``/``who``/...) must attach to their antecedent,
+          otherwise TF-IDF will happily keep the dangling clause and drop
+          the main clause that grounds it. When the buffer is empty the
+          subordinate fragment is glued directly onto the last emitted unit;
+          when the buffer is non-empty the normal length-merge path already
+          does the gluing for free.
+        * **Trailing short fragment**: a final buffer below ``min_unit_chars``
+          is attached to the previous emitted unit instead of being emitted
+          on its own.
         """
         units: List[Tuple[str, bool]] = []
         for part in _CODE_FENCE_RE.split(text):
@@ -445,22 +465,25 @@ class NativeCondenser(Condenser):
             if part.startswith('```'):
                 units.append((part.strip(), True))
                 continue
-            raw = [s.strip() for s in _PUNCT_SPLIT_RE.split(part) if s and s.strip()]
-            if not raw:
-                continue
+            frags = [s.strip() for s in _PUNCT_SPLIT_RE.split(part) if s and s.strip()]
             merged: List[str] = []
-            buffer = ''
-            for r in raw:
-                combined = (buffer + ' ' + r).strip() if buffer else r
-                if NativeCondenser._weighted_len(combined) < min_unit_chars:
-                    buffer = combined
-                else:
-                    merged.append(combined)
-                    buffer = ''
-            if buffer:
+            buf = ''
+            for f in frags:
+                # Subordinate with empty buffer: attach to predecessor in
+                # ``merged`` (nothing to accumulate into).  All other cases --
+                # including subordinate-with-nonempty-buffer -- fall through
+                # to the uniform accumulate-then-flush path below.
+                if not buf and merged and _SUBORDINATE_START_RE.match(f):
+                    merged[-1] = f'{merged[-1]} {f}'
+                    continue
+                buf = f'{buf} {f}' if buf else f
+                if cls._weighted_len(buf) >= min_unit_chars:
+                    merged.append(buf)
+                    buf = ''
+            if buf:
                 if merged:
-                    merged[-1] = (merged[-1] + ' ' + buffer).strip()
+                    merged[-1] = f'{merged[-1]} {buf}'
                 else:
-                    merged.append(buffer)
+                    merged.append(buf)
             units.extend((m, False) for m in merged)
         return units

@@ -59,6 +59,7 @@ from twinkle.sampler import vLLMSampler
 
 from twinkle_agentic.chunker.native import NativeChunker
 from twinkle_agentic.condenser.native import NativeCondenser
+from twinkle_agentic.data_format.chunk import Chunk, Chunks
 from twinkle_agentic.reward.extract_reward import ExtractReward
 from twinkle_agentic.tools.extract import ExtractCompressed
 from twinkle_agentic.tools.tool_manager import ToolManager
@@ -156,15 +157,35 @@ def parse_tool_calls(text: str) -> List[Dict[str, Any]]:
     return calls
 
 
-# Strip tool-call spans (open tag through close tag OR EOS) from the assistant
-# text before we stash it on the trajectory, so next-turn rendering does not
-# double-print them (once from the raw text, once from the ``tool_calls`` field).
-_TOOL_CALL_STRIP_RE = re.compile(
-    r'<tool_call>.*?(?:</tool_call>|\Z)', re.DOTALL)
+# ── Assistant output sanitisation ──────────────────────────────────────────
+# Three transforms run unconditionally before any assistant-generated text is
+# committed to the trajectory.  Applying them together is safe and idempotent
+# on clean text, and collapsing the three historically-separate helpers into
+# one entry point removes the risk of forgetting one at a new call site.
+#
+#   1. Drop raw ``<tool_call>...</tool_call>`` spans.  The structured
+#      ``tool_calls`` field is the canonical source; leaving both present
+#      would duplicate (or malform, when the stop tag was stripped) the
+#      markup on the next turn's re-render.
+#   2. Unwrap ``<block_N>...</block_N>`` markers that the model sometimes
+#      echoes back from the user prompt into its own reasoning.  The inner
+#      text is preserved; only the wrappers are dropped.  Keeping them would
+#      (a) pollute the training signal by teaching the model to emit these
+#      tags, and (b) leave stale references in later turns where the re-
+#      chunker would have assigned ``block_N`` to something different.
+#   3. Drop ``[[#N]]`` pseudo-citations, which no tool or prompt in this
+#      pipeline defines -- pure hallucinations that should not survive into
+#      the training data.
+_TOOL_CALL_STRIP_RE = re.compile(r'<tool_call>.*?(?:</tool_call>|\Z)', re.DOTALL)
+_BLOCK_TAG_STRIP_RE = re.compile(r'<block_(\d+)>\s*([\s\S]*?)\s*</block_\1>')
+_FAKE_CITE_RE = re.compile(r'\[\[#\d+\]\]')
 
 
-def _strip_tool_call_spans(text: str) -> str:
-    return _TOOL_CALL_STRIP_RE.sub('', text or '').rstrip()
+def _clean_assistant_output(text: str) -> str:
+    text = _TOOL_CALL_STRIP_RE.sub('', text or '')
+    text = _BLOCK_TAG_STRIP_RE.sub(lambda m: m.group(2), text)
+    text = _FAKE_CITE_RE.sub('', text)
+    return text.rstrip()
 
 
 # ========== HotpotQA preprocessor ==========
@@ -315,7 +336,16 @@ class HotpotQAProcessor(Preprocessor):
         for i, (title, sents) in enumerate(zip(titles, sentences), start=1):
             body = ''.join(sents) if isinstance(sents, list) else str(sents)
             lines.append(f'[{i}] {title}: {body.strip()}')
-        return '\n'.join(lines)
+        # Join passages with a BLANK line (``\n\n``) rather than a single
+        # ``\n``.  :class:`NativeChunker._split_preserving_code` uses
+        # ``_PARAGRAPH_RE = r'\n\s*\n'`` as the paragraph boundary, so only a
+        # blank line prevents adjacent passages from being fused into one
+        # "mega-paragraph" that then gets sentence-hard-split across passage
+        # boundaries.  The visible artefact of that bug: a single chunk whose
+        # head belongs to ``[N]`` and whose tail belongs to ``[N+1]``, with
+        # only the tail's anchor preserved by the condenser -- the head
+        # passage becomes invisible to ``extract_compressed``.
+        return '\n\n'.join(lines)
 
     def preprocess(self, row: Dict[str, Any]) -> Trajectory:
         question = row['question']
@@ -324,7 +354,7 @@ class HotpotQAProcessor(Preprocessor):
 
         user_msg = (
             f'Question: {question}\n\n'
-            f'Context:\n{context_block}')
+            f'Context:\n\n{context_block}')
 
         messages = [
             Message(role='system', content=self.system),
@@ -384,22 +414,115 @@ def compute_rewards(
 
 
 # ========== Agentic rollout ==========
+# Trajectory-level media fields that may ride on a prompt.  Defined once so
+# ``_Rollout.__init__`` and ``_FrozenContext.freeze_delta`` agree on the set.
+_MEDIA_KEYS = ('images', 'videos', 'audios')
+
+
+class _FrozenContext:
+    """Per-rollout monotone-append cache for chunked+condensed context.
+
+    Multi-turn rollouts re-render the *entire* trajectory at each turn, which
+    naively would run the chunker + condenser over the whole history every
+    time -- compressing already-compressed content, silently drifting
+    ``<block_N>`` numbering, and potentially shredding the
+    ``<block_N>...</block_N>`` tag pair across sentence splits.
+
+    Solution: **freeze-and-append**.  Each call to :meth:`freeze_delta` only
+    chunks and condenses the messages NEW since the last freeze, appending
+    the results to :attr:`full_chunks` and :attr:`compressed_chunks`.
+    Because the trajectory is append-only (see ``_append_terminal`` /
+    ``_append_tool_turn``), the newly chunked range never overlaps the
+    frozen range, so ``block_N`` stays bound to the same underlying text
+    across all rounds: a model tool call to ``extract_compressed(N)`` emitted
+    in round 3 still resolves to the exact same original passage that
+    ``<block_N>`` wrapped in round 1.
+
+    Trajectory-level media are processed **only on the first freeze**;
+    subsequent freezes route the partial trajectory WITHOUT those fields to
+    avoid duplicate media chunks.
+    """
+    __slots__ = ('frozen_msg_count', 'full_chunks',
+                 'compressed_chunks', 'media_frozen')
+
+    def __init__(self) -> None:
+        self.frozen_msg_count: int = 0
+        self.full_chunks: List[Chunk] = []
+        self.compressed_chunks: List[Chunk] = []
+        self.media_frozen: bool = False
+
+    def freeze_delta(self, trajectory: Dict[str, Any],
+                      chunker: NativeChunker,
+                      condenser: NativeCondenser) -> None:
+        """Chunk + condense only unfrozen messages/media; append to cache.
+
+        The first freeze applies the full ``keep_ratio`` gradient (early
+        chunks compressed hard, late chunks gently).  Subsequent freezes
+        contain only the latest assistant/tool turns, which semantically sit
+        at the tail of the gradient -- we pin them to the gentler
+        ``max_keep_ratio`` rather than re-applying a local gradient that
+        would mistakenly over-compress their first sub-chunk.
+        """
+        total_msgs = trajectory['messages']
+        new_msgs = total_msgs[self.frozen_msg_count:]
+        needs_media = (not self.media_frozen and
+                        any(trajectory.get(k) for k in _MEDIA_KEYS))
+        if not (new_msgs or needs_media):
+            return
+
+        delta: Dict[str, Any] = {
+            'messages': list(new_msgs),
+            'user_data': trajectory.get('user_data', []),
+        }
+        if needs_media:
+            for k in _MEDIA_KEYS:
+                if trajectory.get(k):
+                    delta[k] = trajectory[k]
+            self.media_frozen = True
+
+        new_full = chunker.chunk(delta)
+        if self.frozen_msg_count == 0:
+            new_compressed = condenser.condense(new_full)
+        else:
+            new_compressed = condenser.condense(
+                new_full, keep_ratio=condenser.max_keep_ratio)
+
+        self.full_chunks.extend(new_full.chunks)
+        self.compressed_chunks.extend(new_compressed.chunks)
+        self.frozen_msg_count = len(total_msgs)
+
+    def render_display(self) -> Dict[str, Any]:
+        """Emit the accumulated compressed state as a sampler-ready dict."""
+        return Chunks(chunks=list(self.compressed_chunks)).to_trajectory()
+
+    def render_full(self) -> Chunks:
+        """Emit the accumulated pre-compression chunks for ExtractCompressed."""
+        return Chunks(chunks=list(self.full_chunks))
+
+
 class _Rollout:
     """Mutable bookkeeping for one prompt's multi-turn unroll."""
-    __slots__ = ('trajectory', 'final_sequence', 'turns', 'done')
+    __slots__ = ('trajectory', 'final_sequence', 'turns', 'done', 'frozen')
 
     def __init__(self, prompt_trajectory: Dict[str, Any]) -> None:
         self.trajectory: Dict[str, Any] = {
             'messages': list(prompt_trajectory.get('messages', [])),
             'user_data': prompt_trajectory.get('user_data', []),
         }
+        # Preserve trajectory-level media so the first freeze can chunk them;
+        # later freezes are skipped via ``frozen.media_frozen``.
+        for _k in _MEDIA_KEYS:
+            if prompt_trajectory.get(_k):
+                self.trajectory[_k] = list(prompt_trajectory[_k])
         self.final_sequence = None  # SampledSequence of the terminal turn
         self.turns = 0
         self.done = False
+        self.frozen: _FrozenContext = _FrozenContext()
 
 
 def _append_terminal(r: _Rollout, decoded: str) -> None:
-    r.trajectory['messages'].append({'role': 'assistant', 'content': decoded})
+    r.trajectory['messages'].append(
+        {'role': 'assistant', 'content': _clean_assistant_output(decoded)})
     r.done = True
 
 
@@ -410,14 +533,9 @@ def _append_tool_turn(
     tool_mgr: ToolManager,
     turn_idx: int,
 ) -> None:
-    # Strip the raw <tool_call> spans from the text; the structured
-    # ``tool_calls`` field is the canonical source, and the template re-renders
-    # them into the prompt on the next turn.  Leaving both present would
-    # duplicate (or malform, when the stop tag was stripped) the tool-call
-    # markup.
     r.trajectory['messages'].append({
         'role': 'assistant',
-        'content': _strip_tool_call_spans(decoded),
+        'content': _clean_assistant_output(decoded),
         'tool_calls': [
             {'tool_name': tc['tool_name'],
              'arguments': (tc['arguments']
@@ -427,10 +545,9 @@ def _append_tool_turn(
         ],
     })
     for i, tc in enumerate(tool_calls):
-        result = tool_mgr.dispatch(tc)
         r.trajectory['messages'].append({
             'role': 'tool',
-            'content': result,
+            'content': tool_mgr.dispatch(tc),
             'tool_call_id': f'call_t{turn_idx}_i{i}',
         })
 
@@ -468,12 +585,14 @@ def run_agentic_rollouts(
         displays: List[Dict[str, Any]] = []
         tool_mgrs: List[ToolManager] = []
         for r in active:
-            full_chunks = chunker.chunk(r.trajectory)
-            compressed = condenser.condense(full_chunks)
-            displays.append(compressed.to_trajectory())
-            # Re-bind extract tool to *this* turn's pre-compression chunks so
-            # block numbers the model sees in the prompt resolve correctly.
-            tool_mgrs.append(ToolManager([ExtractCompressed(full_chunks)]))
+            # Incrementally chunk+condense only the messages new since last
+            # freeze; the accumulated state is then rendered as a sampler
+            # display + bound to a fresh ExtractCompressed so ``block_N``
+            # resolves identically across rounds.
+            r.frozen.freeze_delta(r.trajectory, chunker, condenser)
+            displays.append(r.frozen.render_display())
+            tool_mgrs.append(ToolManager(
+                [ExtractCompressed(r.frozen.render_full())]))
 
         # Pad up to ``min_batch_size`` so every sampler DP rank receives at
         # least one prompt.  The padded entries are throw-away duplicates of
@@ -583,8 +702,14 @@ def main():
     ckpt_manager = CheckpointEngineManager(model=model, sampler=sampler)
 
     # Chunker / condenser live on the driver (pure-Python, no GPU).
+    # ``passage_boundary_re=r'^\[\d+\]\s+'`` makes each numbered HotpotQA
+    # passage its own chunk, so ``<block_N>`` index == passage index ``[N]``
+    # and ``ExtractCompressed(N)`` returns exactly that passage's original
+    # text (not a mixed blob of 3-4 passages that happened to greedy-pack
+    # into the same window).
     chunker = NativeChunker(
-        model_id=MODEL_ID, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
+        model_id=MODEL_ID, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP,
+        passage_boundary_re=r'^\[\d+\]\s+')
     condenser = NativeCondenser(keep_ratio=(0.1, KEEP_RATIO), skip_system=True)
 
     GLOBAL_BATCH_SIZE = BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS

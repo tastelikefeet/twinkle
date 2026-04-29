@@ -106,13 +106,22 @@ class NativeChunker(Chunker):
             message; those chunks are attributed to ``user``.
     """
 
-    def __init__(self, model_id: str, chunk_size: int = 1024, chunk_overlap: int = 50) -> None:
+    def __init__(self, model_id: str, chunk_size: int = 1024, chunk_overlap: int = 50,
+                 passage_boundary_re: Optional[str] = None) -> None:
         if chunk_size <= 0 or not 0 <= chunk_overlap < chunk_size:
             raise ValueError(
                 f'invalid params: chunk_size={chunk_size} (expect >0), '
                 f'chunk_overlap={chunk_overlap} (expect 0<=overlap<chunk_size)')
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        # Optional passage-level hard-boundary regex.  Paragraphs whose first
+        # character matches this pattern are guaranteed to start a FRESH chunk
+        # rather than being greedy-packed next to earlier paragraphs.  Typical
+        # use: retrieval corpora that number their passages -- set to
+        # ``r'^\[\d+\]\s+'`` so ``[N] Title: body`` aligns 1:1 with chunks and
+        # ``ExtractCompressed(idx)`` returns exactly that passage's text.
+        self.passage_boundary_re = (
+            re.compile(passage_boundary_re) if passage_boundary_re else None)
         self.template = Template(model_id)
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -197,12 +206,54 @@ class NativeChunker(Chunker):
             yield Chunk(type='text', content=segment, raw=raw, role=role)
 
     def _iter_semantic_segments(self, text: str) -> Iterator[str]:
-        """Pack paragraphs into segments; hard-split oversized non-code ones."""
-        def on_oversize(p: str) -> Iterator[str]:
-            # Atomic code blocks are preserved even when they exceed chunk_size.
-            yield from ([p] if self._is_code_block(p) else self._hard_split(p))
+        """Pack paragraphs into segments; hard-split oversized non-code ones.
+
+        When ``passage_boundary_re`` is set, any paragraph whose prefix
+        matches is forced to start a fresh segment so numbered passages
+        (``[N] ...``) align 1:1 with chunks -- that alignment is what lets
+        ``<block_N>`` and ``extract_compressed(N)`` refer to the exact same
+        passage text.
+        """
+        boundary = self.passage_boundary_re
+        is_boundary = (lambda p: bool(boundary.match(p))) if boundary else None
         yield from self._greedy_pack(
-            self._split_preserving_code(text), separator='\n\n', on_oversize=on_oversize)
+            self._split_preserving_code(text),
+            separator='\n\n',
+            on_oversize=self._split_oversize_paragraph,
+            is_boundary=is_boundary,
+        )
+
+    def _split_oversize_paragraph(self, p: str) -> Iterator[str]:
+        """Route an over-size paragraph through the right splitter.
+
+        Fenced code blocks are atomic even when they exceed ``chunk_size``
+        (splitting them would break syntax).  Everything else goes through
+        ``_hard_split`` which sentence-packs, with the ``[N] Title:`` prefix
+        (if any) threaded in so continuation pieces carry a ``(cont.)`` anchor
+        rather than becoming orphan chunks invisible to ``extract_compressed``.
+        """
+        if self._is_code_block(p):
+            yield p
+            return
+        yield from self._hard_split(p, anchor_prefix=self._extract_anchor_prefix(p))
+
+    def _extract_anchor_prefix(self, paragraph: str) -> Optional[str]:
+        """Return ``[N] Title:``-style anchor if paragraph opens with one.
+
+        Used by the hard-split path to prefix every continuation piece with
+        ``<anchor> (cont.) ...`` so the passage stays identifiable end-to-end.
+        Cap the prefix length so a colon-less first line (e.g. a whole
+        paragraph on one line) cannot end up as the "anchor".
+        """
+        boundary = self.passage_boundary_re
+        if boundary is None or not boundary.match(paragraph):
+            return None
+        first_line = paragraph.split('\n', 1)[0]
+        colon_idx = first_line.find(':')
+        if 0 < colon_idx <= 120:
+            return first_line[:colon_idx + 1].strip()
+        m = boundary.match(paragraph)
+        return m.group(0).strip() if m else None
 
     @staticmethod
     def _split_preserving_code(text: str) -> List[str]:
@@ -221,12 +272,31 @@ class NativeChunker(Chunker):
     def _is_code_block(segment: str) -> bool:
         return segment.startswith('```') and segment.rstrip().endswith('```')
 
-    def _hard_split(self, text: str) -> Iterator[str]:
-        """Split oversized text on sentence boundaries; sliding window if still too long."""
+    def _hard_split(self, text: str, *,
+                    anchor_prefix: Optional[str] = None) -> Iterator[str]:
+        """Split oversized text on sentence boundaries; sliding window if still too long.
+
+        When ``anchor_prefix`` is provided (e.g. ``"[3] Echosmith:"`` from a
+        passage-boundary paragraph that overflowed ``chunk_size``), every
+        piece *after the first* is rewritten as ``<anchor> (cont.) <piece>``
+        so the passage identifier never gets orphaned.
+        """
         sentences = [s.strip() for s in _SENTENCE_RE.split(text) if s and s.strip()] \
             or [text.strip()]
-        yield from self._greedy_pack(
-            sentences, separator=' ', on_oversize=self._sliding_window)
+        pieces = list(self._greedy_pack(
+            sentences, separator=' ', on_oversize=self._sliding_window))
+        if not anchor_prefix or len(pieces) <= 1:
+            yield from pieces
+            return
+        # First piece already carries the anchor (it starts with the passage
+        # header sentence).  Later pieces get a continuation marker so they
+        # remain attributable to the same passage.
+        yield pieces[0]
+        for p in pieces[1:]:
+            if p.startswith(anchor_prefix):
+                yield p
+            else:
+                yield f'{anchor_prefix} (cont.) {p}'
 
     def _greedy_pack(
         self,
@@ -234,17 +304,24 @@ class NativeChunker(Chunker):
         *,
         separator: str,
         on_oversize: Callable[[str], Iterator[str]],
+        is_boundary: Optional[Callable[[str], bool]] = None,
     ) -> Iterator[str]:
         """Greedily pack ``items`` into segments of at most ``chunk_size`` chars.
 
         Items individually exceeding ``chunk_size`` are routed through
-        ``on_oversize`` after flushing the current buffer.
+        ``on_oversize`` after flushing the current buffer.  When
+        ``is_boundary`` is provided, any item for which it returns ``True``
+        forces the current buffer to flush first -- used to keep numbered
+        passages (``[N] ...``) atomic at the chunk level.
         """
         buf: List[str] = []
         buf_len = 0
         sep_len = len(separator)
 
         for item in items:
+            if buf and is_boundary is not None and is_boundary(item):
+                yield separator.join(buf)
+                buf, buf_len = [], 0
             if len(item) > self.chunk_size:
                 if buf:
                     yield separator.join(buf)
