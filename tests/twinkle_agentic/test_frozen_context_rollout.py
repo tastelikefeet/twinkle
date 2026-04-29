@@ -15,6 +15,11 @@ simulated rounds and checks:
                and ``[[#N]]`` fake citations before the assistant content
                enters the trajectory (so they do not survive into the next
                freeze as naked-text block tags waiting to be shredded).
+  Invariant E: query-aware condensation preserves the answer-critical fact
+               sentence.  Given the question "Which magazine was started
+               first ...", the ``[8] First for Women`` chunk must keep the
+               ``1989`` date sentence rather than drop it in favour of
+               the higher-raw-TF-IDF filler sentence.
 
 Re-defining ``_FrozenContext`` / ``_strip_block_tags`` inline here rather
 than importing the cookbook script, because the cookbook module pulls in
@@ -46,13 +51,14 @@ def _strip_block_tags(text: str) -> str:
 
 class _FrozenContext:
     __slots__ = ('frozen_msg_count', 'full_chunks',
-                 'compressed_chunks', 'media_frozen')
+                 'compressed_chunks', 'media_frozen', 'query_hint')
 
     def __init__(self) -> None:
         self.frozen_msg_count: int = 0
         self.full_chunks: List[Dict[str, Any]] = []
         self.compressed_chunks: List[Dict[str, Any]] = []
         self.media_frozen: bool = False
+        self.query_hint: str = ''
 
 
 class _Rollout:
@@ -105,15 +111,21 @@ def main() -> None:
         '[3] Echosmith: Echosmith is an American indie pop band formed in '
         'February 2009 in Chino, California. They are best known for their '
         'hit song Cool Kids, which reached number 13 on the Billboard Hot 100.',
-        '[4] Milhouse Van Houten: Milhouse Mussolini van Houten is a '
-        'fictional character in The Simpsons. He is the best friend of Bart '
-        'Simpson and named after Richard Nixon\'s middle name.',
+        '[4] Arthur\'s Magazine: Arthur\'s Magazine (1844-1846) was an '
+        'American literary periodical published in Philadelphia in the 19th '
+        'century. In May 1846 it was merged into Godey\'s Lady\'s Book.',
+        '[5] First for Women: First for Women is a woman\'s magazine '
+        'published by Bauer Media Group in the USA. The magazine was '
+        'started in 1989. It is based in Englewood Cliffs, New Jersey.',
     ])
+    question = (
+        'Which magazine was started first, Arthur\'s Magazine or '
+        'First for Women?')
     prompt = {
         'messages': [
             {'role': 'system', 'content': 'You are a HotpotQA assistant.'},
             {'role': 'user', 'content':
-                f'{passages}\n\nQuestion: Who was Milhouse named after?'},
+                f'Question: {question}\n\nContext:\n\n{passages}'},
         ],
         'user_data': [],
     }
@@ -132,6 +144,19 @@ def main() -> None:
             r.trajectory.get(k) for k in ('images', 'videos', 'audios'))
         if not (new_msgs or needs_media_freeze):
             return
+        if not frozen.query_hint:
+            # Mirror of ``_extract_query_hint``: slice off the passages and
+            # drop the ``Question:`` marker so question tokens don't leak
+            # into the query-boost for unrelated context sentences.
+            for msg in total_msgs:
+                if msg.get('role') != 'user':
+                    continue
+                content = msg.get('content') or ''
+                head = content.split('\n\nContext:', 1)[0]
+                frozen.query_hint = re.sub(
+                    r'^\s*Question\s*:\s*', '', head,
+                    flags=re.IGNORECASE).strip()
+                break
         delta_traj: Dict[str, Any] = {
             'messages': list(new_msgs),
             'user_data': r.trajectory.get('user_data', []),
@@ -143,11 +168,10 @@ def main() -> None:
                     delta_traj[k] = v
             frozen.media_frozen = True
         new_full = chunker.chunk(delta_traj)
-        if frozen.frozen_msg_count == 0:
-            new_compressed = condenser.condense(new_full)
-        else:
-            new_compressed = condenser.condense(
-                new_full, keep_ratio=condenser.max_keep_ratio)
+        condense_kwargs: Dict[str, Any] = {'query_hint': frozen.query_hint}
+        if frozen.frozen_msg_count > 0:
+            condense_kwargs['keep_ratio'] = condenser.max_keep_ratio
+        new_compressed = condenser.condense(new_full, **condense_kwargs)
         frozen.full_chunks.extend(new_full.chunks)
         frozen.compressed_chunks.extend(new_compressed.chunks)
         frozen.frozen_msg_count = len(total_msgs)
@@ -157,8 +181,28 @@ def main() -> None:
     snap0_full = [c['content'] for c in r.frozen.full_chunks]
     snap0_compressed = [c['content'] for c in r.frozen.compressed_chunks]
     n0 = len(snap0_full)
-    print(f'[R0] freeze produced {n0} chunks')
-    assert n0 >= 4, f'Expected >=4 chunks (4 passages + system), got {n0}'
+    print(f'[R0] freeze produced {n0} chunks; '
+          f'query_hint={r.frozen.query_hint!r}')
+    assert n0 >= 5, f'Expected >=5 chunks (5 passages + system), got {n0}'
+    assert 'magazine' in r.frozen.query_hint.lower(), (
+        f'[prep] query_hint missing "magazine": {r.frozen.query_hint!r}')
+
+    # --- Invariant E: answer-critical "1989" survives in compressed
+    # ``[8] First for Women`` chunk.  Pre-fix, the anchor sentence alone
+    # would saturate keep_ratio and "The magazine was started in 1989."
+    # would be dropped.  Query-aware scoring + force-keep cap must retain it.
+    ffw_compressed = [
+        c['content'] for c in r.frozen.compressed_chunks
+        if '[5] First for Women' in c.get('content', '')
+    ]
+    assert ffw_compressed, (
+        '[E] no compressed chunk matched "[5] First for Women"; '
+        f'contents={[c["content"][:60] for c in r.frozen.compressed_chunks]}')
+    ffw_text = ffw_compressed[0]
+    assert '1989' in ffw_text, (
+        f'[E] query-aware condensation lost the "1989" fact:\n'
+        f'  compressed: {ffw_text!r}')
+    print(f'[E] query-aware condensation preserved "1989": {ffw_text!r}')
 
     # --- Round 1: simulate assistant tool call + echoed <block_3> ---
     decoded_r0 = (
@@ -179,10 +223,10 @@ def main() -> None:
     })
     r.trajectory['messages'].append({
         'role': 'tool',
-        'content': '[4] Milhouse Van Houten: Milhouse Mussolini van Houten is '
-                   'a fictional character in The Simpsons. He is the best '
-                   'friend of Bart Simpson and named after Richard Nixon\'s '
-                   'middle name.',
+        'content': '[4] Arthur\'s Magazine: Arthur\'s Magazine (1844-1846) '
+                   'was an American literary periodical published in '
+                   'Philadelphia in the 19th century. In May 1846 it was '
+                   'merged into Godey\'s Lady\'s Book.',
         'tool_call_id': 'call_t0_i0',
     })
     freeze_round(r)
@@ -208,8 +252,8 @@ def main() -> None:
     print(f'[B] compressed_chunks byte-identical for all {n0} frozen indices')
 
     # --- Round 2: terminal answer ---
-    decoded_r1 = ('Based on [4], Milhouse was named after [[#1]] '
-                  'Richard Nixon. \\boxed{Richard Nixon}')
+    decoded_r1 = ('Based on [4], Arthur\'s Magazine started in 1844, so it '
+                  'was started first. [[#1]]\\boxed{Arthur\'s Magazine}')
     r.trajectory['messages'].append(
         {'role': 'assistant', 'content': _strip_block_tags(decoded_r1)})
     r.done = True
@@ -241,7 +285,7 @@ def main() -> None:
     # --- Final sanity: [[#1]] did not leak into the terminal message ---
     final_msg = r.trajectory['messages'][-1]['content']
     assert '[[#1]]' not in final_msg, f'[D2] fake cite leaked: {final_msg!r}'
-    assert '\\boxed{Richard Nixon}' in final_msg
+    assert '\\boxed{Arthur\'s Magazine}' in final_msg
     print('[D2] fake [[#N]] citations stripped from terminal message')
 
     print('\nAll invariants satisfied. Frozen-and-append rollout is correct.')

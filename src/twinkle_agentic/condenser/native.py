@@ -18,7 +18,7 @@ import math
 import random
 import re
 from collections import Counter
-from typing import Dict, List, Sequence, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
 
 RatioLike = Union[float, Tuple[float, float], List[float]]
 
@@ -84,6 +84,22 @@ _SUBORDINATE_START_RE = re.compile(
 _PROTECTED_KINDS: Tuple[str, ...] = ('tool_call',)
 _PROTECTED_TYPES: Tuple[str, ...] = ('image', 'video', 'audio')
 
+# Conservative stop-token list for query-aware boosting: articles, copulas,
+# pronouns, question words and high-frequency prepositions.  We intentionally
+# keep content-bearing tokens like ``first`` / ``when`` in the query side
+# (they often co-occur with the answer-critical fact, e.g. ``started in
+# 1989``) and only drop the purely grammatical noise that would otherwise
+# inflate the query-boost for near-every unit.
+_QUERY_STOP_TOKENS: frozenset = frozenset([
+    'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+    'of', 'to', 'in', 'on', 'at', 'by', 'as', 'for', 'from', 'with',
+    'and', 'or', 'but', 'if', 'then', 'so',
+    'it', 'its', 'this', 'that', 'these', 'those', 'such',
+    'do', 'does', 'did', 'have', 'has', 'had', 'will', 'would',
+    'can', 'could', 'should', 'may', 'might', 'must', 'not', 'no',
+    's', 't', 'd', 'm', 'll', 're', 've',
+])
+
 
 class NativeCondenser(Condenser):
     """Extractive per-chunk TF-IDF condenser.
@@ -131,6 +147,18 @@ class NativeCondenser(Condenser):
             gradient / IDF corpus. System prompts typically carry tool
             schemas and load-bearing instructions that should not be
             summarised. Set to ``False`` to also compress system chunks.
+        query_boost: Additive score bonus per distinct query token matched
+            in a candidate unit, scaled by that token's IDF weight.  Only
+            takes effect when ``query_hint`` is supplied to :meth:`condense`.
+            Defaults to ``2.0`` (roughly "an extra mention of the token
+            counted twice").  Set to ``0.0`` to disable query-aware scoring
+            without removing the hint.
+        query_keep_cap: Upper bound on the number of non-anchor units per
+            chunk that are force-kept because they overlap with the query,
+            independent of the character budget.  Prevents the case where a
+            passage's ``[N]`` anchor alone saturates ``keep_ratio`` and every
+            body sentence -- including the one carrying the answer-critical
+            fact -- gets dropped.  Defaults to ``2``.
         strategy: Per-unit scoring policy. Must be one of:
 
             * ``'tfidf'`` (default) -- sub-linear TF x IDF over the
@@ -220,6 +248,8 @@ class NativeCondenser(Condenser):
         min_unit_chars: int = 20,
         skip_system: bool = True,
         strategy: str = 'tfidf',
+        query_boost: float = 2.0,
+        query_keep_cap: int = 2,
     ) -> None:
         low, high = self._normalize_ratio(keep_ratio)
         if min_sentences < 1 or min_chars < 0 or min_unit_chars < 0:
@@ -230,6 +260,10 @@ class NativeCondenser(Condenser):
         if strategy not in ('tfidf', 'random'):
             raise ValueError(
                 f'invalid strategy={strategy!r}: expect "tfidf" or "random"')
+        if query_boost < 0 or query_keep_cap < 0:
+            raise ValueError(
+                f'invalid params: query_boost={query_boost} (expect >=0), '
+                f'query_keep_cap={query_keep_cap} (expect >=0)')
         self.min_keep_ratio = low
         self.max_keep_ratio = high
         # Backward-compat attribute: equals ``max_keep_ratio`` when uniform.
@@ -245,6 +279,8 @@ class NativeCondenser(Condenser):
         # trajectory. Default to pass-through.
         self.skip_system = skip_system
         self.strategy = strategy
+        self.query_boost = query_boost
+        self.query_keep_cap = query_keep_cap
 
     @staticmethod
     def _normalize_ratio(keep_ratio: RatioLike) -> Tuple[float, float]:
@@ -275,6 +311,9 @@ class NativeCondenser(Condenser):
         min_unit_chars = kwargs.get('min_unit_chars', self.min_unit_chars)
         skip_system = kwargs.get('skip_system', self.skip_system)
         strategy = kwargs.get('strategy', self.strategy)
+        query_boost = kwargs.get('query_boost', self.query_boost)
+        query_keep_cap = kwargs.get('query_keep_cap', self.query_keep_cap)
+        query_tokens = self._query_tokens(kwargs.get('query_hint', ''))
         if strategy not in ('tfidf', 'random'):
             raise ValueError(
                 f'invalid strategy={strategy!r}: expect "tfidf" or "random"')
@@ -313,7 +352,10 @@ class NativeCondenser(Condenser):
         return Chunks(chunks=[
             self._try_compress(c, idf, ratio_by_index.get(i, 1.0),
                                min_sentences, min_chars, min_unit_chars,
-                               skip_system=skip_system, strategy=strategy)
+                               skip_system=skip_system, strategy=strategy,
+                               query_tokens=query_tokens,
+                               query_boost=query_boost,
+                               query_keep_cap=query_keep_cap)
             for i, c in enumerate(items)
         ])
 
@@ -341,14 +383,20 @@ class NativeCondenser(Condenser):
                       keep_ratio: float, min_sentences: int, min_chars: int,
                       min_unit_chars: int,
                       skip_system: bool = True,
-                      strategy: str = 'tfidf') -> Chunk:
+                      strategy: str = 'tfidf',
+                      query_tokens: Optional[Set[str]] = None,
+                      query_boost: float = 0.0,
+                      query_keep_cap: int = 0) -> Chunk:
         """Compress ``chunk`` if eligible; otherwise return it unchanged."""
         content = chunk.get('content', '')
         if (not cls._is_compressible(chunk, skip_system=skip_system)
                 or len(content) <= min_chars):
             return chunk
         compressed = cls._compress_text(content, idf, keep_ratio, min_sentences,
-                                        min_unit_chars, strategy=strategy)
+                                        min_unit_chars, strategy=strategy,
+                                        query_tokens=query_tokens,
+                                        query_boost=query_boost,
+                                        query_keep_cap=query_keep_cap)
         if not compressed or compressed == content:
             return chunk
         new_chunk: Chunk = dict(chunk)  # type: ignore[assignment]
@@ -380,43 +428,103 @@ class NativeCondenser(Condenser):
         """Lowercased bilingual tokenizer (Latin words + CJK unigrams)."""
         return _TOKEN_RE.findall(text.lower())
 
+    @classmethod
+    def _query_tokens(cls, query_hint: str) -> Set[str]:
+        """Distill a question string into a set of content-bearing tokens.
+
+        Drops purely grammatical noise (articles, copulas, pronouns,
+        high-frequency prepositions, contraction remnants like ``s`` / ``t``)
+        so the query bonus in :meth:`_compress_text` concentrates on
+        entity / action tokens (``magazine``, ``started``, ``arthur``,
+        ``women``).  A missing or whitespace-only hint yields an empty set,
+        which disables all query-aware behaviour downstream.
+        """
+        if not query_hint or not query_hint.strip():
+            return set()
+        return {t for t in cls._tokenize(query_hint)
+                if t not in _QUERY_STOP_TOKENS}
+
     # ── Per-chunk compression ─────────────────────────────────────────────────
 
     @classmethod
     def _compress_text(cls, text: str, idf: Dict[str, float],
                        keep_ratio: float, min_sentences: int,
                        min_unit_chars: int,
-                       strategy: str = 'tfidf') -> str:
+                       strategy: str = 'tfidf',
+                       query_tokens: Optional[Set[str]] = None,
+                       query_boost: float = 0.0,
+                       query_keep_cap: int = 0) -> str:
         """Greedy extractive compression respecting code fences and ordering."""
         units = cls._split_into_units(text, min_unit_chars)
         if len(units) <= min_sentences:
             return text
 
         target = max(1, math.ceil(len(text) * keep_ratio))
+
+        # Query overlap bonus: reuses the corpus-level IDF so rare query
+        # tokens (entity names) outweigh common ones (``started``/``year``).
+        # Tokens are cached per unit so the forced-keep pass below can reuse
+        # them without re-tokenising.
+        qtokens = query_tokens or set()
+        unit_tokens: List[Set[str]] = [
+            set(cls._tokenize(u)) if not is_code else set()
+            for u, is_code in units
+        ]
+
         # Scoring priority (shared across strategies):
         #   1. Code fences & segment-header anchors  -> +inf (never dropped)
-        #   2. Body units                            -> TF-IDF or random
-        def _score(u: str, is_code: bool) -> float:
+        #   2. Body units                            -> TF-IDF (+ query bonus)
+        #                                            -- or random baseline
+        def _score(idx: int) -> float:
+            u, is_code = units[idx]
             if is_code or _ANCHOR_RE.search(u):
                 return math.inf
             if strategy == 'random':
                 return random.random()
-            return cls._score_unit(u, idf)
+            base = cls._score_unit(u, idf)
+            if qtokens and query_boost > 0:
+                matched = qtokens & unit_tokens[idx]
+                if matched:
+                    base += query_boost * sum(
+                        idf.get(t, 1.0) for t in matched)
+            return base
 
-        scored = [(_score(u, is_code), i, u)
-                  for i, (u, is_code) in enumerate(units)]
+        scored = [(_score(i), i, units[i][0]) for i in range(len(units))]
 
-        # Pick units by descending score until both budget and min are satisfied.
-        # ``+inf`` units (anchors + code fences) are *always* kept, even when
-        # doing so pushes ``used`` past ``target`` -- losing a late-index
-        # anchor because an earlier one already saturated the budget would
-        # recreate exactly the "invisible hole" we added anchors to prevent.
+        # Force-keep up to ``query_keep_cap`` non-anchor units that overlap
+        # with the query.  Without this, a passage whose anchor alone
+        # saturates ``target`` would drop every body sentence -- including
+        # the one carrying the answer-critical fact (e.g. the ``1989`` in
+        # ``First for Women ... was started in 1989``).  We rank by score so
+        # the cap prefers units that combine high TF-IDF *and* query overlap.
+        forced: set = set()
+        if qtokens and query_keep_cap > 0 and query_boost > 0:
+            ranked = sorted(
+                (s for s in scored
+                 if s[0] != math.inf and (qtokens & unit_tokens[s[1]])),
+                key=lambda x: (-x[0], x[1]))
+            forced = {i for _, i, _ in ranked[:query_keep_cap]}
+
+        # Two-pass selection:
+        #   Pass 1 -- must-keep: anchors / code fences (+inf) and the
+        #     top-K query-matched units (``forced``) are added unconditionally,
+        #     *regardless* of where they sit in the score ranking.  A single
+        #     score-descending loop with an early ``break`` would skip forced
+        #     items whose score is below the budget cutoff (e.g. ``The
+        #     magazine was started in 1989.`` can easily score lower than a
+        #     noisy ``In 2011 the circulation...`` sentence that happens to
+        #     win on raw TF-IDF), re-introducing the exact answer-fact-loss
+        #     failure mode ``forced`` exists to prevent.
+        #   Pass 2 -- budget fill: remaining units in score-descending order
+        #     until both ``target`` and ``min_sentences`` are satisfied.
         selected: set = set()
         used = 0
-        for score, i, u in sorted(scored, key=lambda x: (-x[0], x[1])):
-            if score == math.inf:
+        for score, i, u in scored:
+            if score == math.inf or i in forced:
                 selected.add(i)
                 used += len(u) + 1  # +1 for the joining space
+        for score, i, u in sorted(scored, key=lambda x: (-x[0], x[1])):
+            if i in selected:
                 continue
             if used >= target and len(selected) >= min_sentences:
                 break
@@ -445,7 +553,7 @@ class NativeCondenser(Condenser):
         a neighbour. Purely length-driven, so appositives, enumerations and
         short dependent clauses are handled uniformly (CJK chars count ×3).
 
-        Two cohesion rules override the plain length-merge:
+        Three cohesion rules override the plain length-merge:
 
         * **Subordinate clauses** opened by relative pronouns
           (``which``/``that``/``who``/...) must attach to their antecedent,
@@ -454,6 +562,13 @@ class NativeCondenser(Condenser):
           subordinate fragment is glued directly onto the last emitted unit;
           when the buffer is non-empty the normal length-merge path already
           does the gluing for free.
+        * **Short fragment with a prior unit**: once ``merged`` is non-empty,
+          a short fragment glues *backward* to the previous emitted unit
+          rather than accumulating forward.  Without this, a short
+          interstitial (``New Jersey.`` between ``...Englewood Cliffs,`` and
+          ``In 2011 the circulation...``) would be prepended to the *next*
+          sentence, producing a readable-looking but misleading sandwich
+          once the next sentence gets retained by force-keep.
         * **Trailing short fragment**: a final buffer below ``min_unit_chars``
           is attached to the previous emitted unit instead of being emitted
           on its own.
@@ -469,11 +584,14 @@ class NativeCondenser(Condenser):
             merged: List[str] = []
             buf = ''
             for f in frags:
-                # Subordinate with empty buffer: attach to predecessor in
-                # ``merged`` (nothing to accumulate into).  All other cases --
-                # including subordinate-with-nonempty-buffer -- fall through
-                # to the uniform accumulate-then-flush path below.
-                if not buf and merged and _SUBORDINATE_START_RE.match(f):
+                # Buffer is empty and a previous unit exists: try to glue
+                # ``f`` backward before accumulating forward.  Subordinate
+                # clauses and short fragments both prefer backward cohesion;
+                # the normal accumulate-then-flush path still handles every
+                # other case (including mid-buffer subordinate fragments).
+                if not buf and merged and (
+                        _SUBORDINATE_START_RE.match(f)
+                        or cls._weighted_len(f) < min_unit_chars):
                     merged[-1] = f'{merged[-1]} {f}'
                     continue
                 buf = f'{buf} {f}' if buf else f

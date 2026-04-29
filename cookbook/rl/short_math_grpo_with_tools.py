@@ -90,7 +90,7 @@ LORA_RANK = int(os.environ.get('LORA_RANK', 16))
 MAX_TURNS = int(os.environ.get('MAX_TURNS', 4))            # hard cap on tool-call turns
 CHUNK_SIZE = int(os.environ.get('CHUNK_SIZE', 512))        # chars per chunk (NativeChunker)
 CHUNK_OVERLAP = int(os.environ.get('CHUNK_OVERLAP', 0))    # sliding-window overlap
-KEEP_RATIO = float(os.environ.get('KEEP_RATIO', 0.3))      # NativeCondenser target ratio
+KEEP_RATIO = float(os.environ.get('KEEP_RATIO', 0.5))      # NativeCondenser target ratio
 
 # ---- HotpotQA dataset encode knobs ----
 HOTPOTQA_NUM_PROC = int(os.environ.get('HOTPOTQA_NUM_PROC', 16))
@@ -186,6 +186,58 @@ def _clean_assistant_output(text: str) -> str:
     text = _BLOCK_TAG_STRIP_RE.sub(lambda m: m.group(2), text)
     text = _FAKE_CITE_RE.sub('', text)
     return text.rstrip()
+
+
+# ``HotpotQAProcessor`` renders the user turn as
+# ``'Question: {q}\n\nContext:\n\n{passages}'``.  Query-aware condensation
+# only needs the question half: feeding the full turn (which includes every
+# passage) would give near-every token a query-match, neutralising the bonus.
+# We therefore slice off everything from ``\n\nContext:`` onward, and drop
+# the ``Question:`` prefix so ``question`` itself does not become a
+# boost-inducing token on unrelated sentences.
+_QUESTION_PREFIX_RE = re.compile(r'^\s*Question\s*:\s*', re.IGNORECASE)
+
+
+def _extract_query_hint(messages: List[Dict[str, Any]]) -> str:
+    """Return the question text from the first user message, if any.
+
+    Degrades gracefully for non-HotpotQA preprocessors: when the
+    ``Question:`` marker is absent we fall back to the first user message's
+    first blank-line block (or the whole content if there are no blank
+    lines).  Returns ``''`` when no user message carries text content,
+    which disables query-aware scoring downstream.
+
+    User-message content may arrive either as a plain ``str`` or as a
+    multimodal list of ``{'type': 'text', 'text': ...}`` / ``{'type':
+    'image', ...}`` dicts (the HotpotQA preprocessor emits the latter).
+    We flatten the list form by concatenating every ``text`` fragment so
+    the ``Question:`` prefix and the question body are stitched back
+    together before the split-on-``\n\nContext:`` logic runs.  Without
+    this, the list-content case silently yields an empty hint and
+    disables force-keep (losing answer-critical facts like ``started in
+    1989``).
+    """
+    for msg in messages:
+        if msg.get('role') != 'user':
+            continue
+        raw = msg.get('content')
+        if isinstance(raw, str):
+            content = raw
+        elif isinstance(raw, list):
+            parts: List[str] = []
+            for item in raw:
+                if isinstance(item, dict) and item.get('type') == 'text':
+                    t = item.get('text')
+                    if isinstance(t, str) and t:
+                        parts.append(t)
+            content = '\n'.join(parts)
+        else:
+            continue
+        if not content or not content.strip():
+            continue
+        head = content.split('\n\nContext:', 1)[0]
+        return _QUESTION_PREFIX_RE.sub('', head).strip()
+    return ''
 
 
 # ========== HotpotQA preprocessor ==========
@@ -443,13 +495,18 @@ class _FrozenContext:
     avoid duplicate media chunks.
     """
     __slots__ = ('frozen_msg_count', 'full_chunks',
-                 'compressed_chunks', 'media_frozen')
+                 'compressed_chunks', 'media_frozen', 'query_hint')
 
     def __init__(self) -> None:
         self.frozen_msg_count: int = 0
         self.full_chunks: List[Chunk] = []
         self.compressed_chunks: List[Chunk] = []
         self.media_frozen: bool = False
+        # Cached on the first freeze (the question is part of the prompt's
+        # user message and never changes across rounds); subsequent freezes
+        # reuse it to keep biasing TF-IDF on tool-output chunks toward
+        # answer-critical facts.
+        self.query_hint: str = ''
 
     def freeze_delta(self, trajectory: Dict[str, Any],
                       chunker: NativeChunker,
@@ -462,6 +519,11 @@ class _FrozenContext:
         at the tail of the gradient -- we pin them to the gentler
         ``max_keep_ratio`` rather than re-applying a local gradient that
         would mistakenly over-compress their first sub-chunk.
+
+        The question extracted from the initial user message is threaded
+        through as ``query_hint`` so answer-critical sentences (e.g. the
+        ``started in 1989`` line in ``First for Women``) win out over
+        filler sentences that happen to have higher raw TF-IDF mass.
         """
         total_msgs = trajectory['messages']
         new_msgs = total_msgs[self.frozen_msg_count:]
@@ -469,6 +531,9 @@ class _FrozenContext:
                         any(trajectory.get(k) for k in _MEDIA_KEYS))
         if not (new_msgs or needs_media):
             return
+
+        if not self.query_hint:
+            self.query_hint = _extract_query_hint(total_msgs)
 
         delta: Dict[str, Any] = {
             'messages': list(new_msgs),
@@ -481,11 +546,10 @@ class _FrozenContext:
             self.media_frozen = True
 
         new_full = chunker.chunk(delta)
-        if self.frozen_msg_count == 0:
-            new_compressed = condenser.condense(new_full)
-        else:
-            new_compressed = condenser.condense(
-                new_full, keep_ratio=condenser.max_keep_ratio)
+        condense_kwargs: Dict[str, Any] = {'query_hint': self.query_hint}
+        if self.frozen_msg_count > 0:
+            condense_kwargs['keep_ratio'] = condenser.max_keep_ratio
+        new_compressed = condenser.condense(new_full, **condense_kwargs)
 
         self.full_chunks.extend(new_full.chunks)
         self.compressed_chunks.extend(new_compressed.chunks)
@@ -710,7 +774,7 @@ def main():
     chunker = NativeChunker(
         model_id=MODEL_ID, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP,
         passage_boundary_re=r'^\[\d+\]\s+')
-    condenser = NativeCondenser(keep_ratio=(0.1, KEEP_RATIO), skip_system=True)
+    condenser = NativeCondenser(keep_ratio=(0.2, KEEP_RATIO), skip_system=True)
 
     GLOBAL_BATCH_SIZE = BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS
     dataloader = DataLoader(
