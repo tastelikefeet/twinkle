@@ -121,10 +121,21 @@ class Chunks:
                 # need no ``<block_N>`` marker because there is no original
                 # text to recall via ``ExtractCompressed`` -- wrapping them
                 # would invite wasted tool calls against pristine content.
+                #
+                # ``role='tool'`` chunks are never wrapped, regardless of
+                # condensation: a tool message typically IS the response
+                # produced by ``ExtractCompressed`` and already carries its
+                # own ``<block_N>...</block_N>`` markers for the passages
+                # it recalled.  Adding an outer ``<block_K>`` around that
+                # text would (a) nest block tags (malformed markup) and
+                # (b) let the model call ``extract_compressed(K)`` on a
+                # tool response that has no corresponding entry in
+                # ``full_chunks`` -- both are observed failure modes.
                 raw = c.get('raw')
                 is_condensed = isinstance(raw, dict) and raw.get('condensed')
                 content = c.get('content')
-                if is_condensed and isinstance(content, str) and content:
+                if (is_condensed and isinstance(content, str) and content
+                        and c.get('role') != 'tool'):
                     prefix = block_wrapper[0].format(n=idx)
                     suffix = block_wrapper[1].format(n=idx)
                     c = {**c, 'content': f'{prefix}{content}{suffix}'}

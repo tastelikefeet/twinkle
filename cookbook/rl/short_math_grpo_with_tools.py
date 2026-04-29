@@ -64,6 +64,11 @@ from twinkle_agentic.reward.extract_reward import ExtractReward
 from twinkle_agentic.tools.extract import ExtractCompressed
 from twinkle_agentic.tools.tool_manager import ToolManager
 
+import swanlab
+swanlab.init(
+    project='twinkle',
+)
+
 logger = get_logger()
 
 # ========== Configuration ==========
@@ -88,9 +93,9 @@ LORA_RANK = int(os.environ.get('LORA_RANK', 16))
 
 # ---- Agentic rollout knobs ----
 MAX_TURNS = int(os.environ.get('MAX_TURNS', 4))            # hard cap on tool-call turns
-CHUNK_SIZE = int(os.environ.get('CHUNK_SIZE', 512))        # chars per chunk (NativeChunker)
+CHUNK_SIZE = int(os.environ.get('CHUNK_SIZE', 1024))        # chars per chunk (NativeChunker)
 CHUNK_OVERLAP = int(os.environ.get('CHUNK_OVERLAP', 0))    # sliding-window overlap
-KEEP_RATIO = float(os.environ.get('KEEP_RATIO', 0.5))      # NativeCondenser target ratio
+KEEP_RATIO = float(os.environ.get('KEEP_RATIO', 0.3))      # NativeCondenser target ratio
 
 # ---- HotpotQA dataset encode knobs ----
 HOTPOTQA_NUM_PROC = int(os.environ.get('HOTPOTQA_NUM_PROC', 16))
@@ -193,29 +198,49 @@ def _clean_assistant_output(text: str) -> str:
 # only needs the question half: feeding the full turn (which includes every
 # passage) would give near-every token a query-match, neutralising the bonus.
 # We therefore slice off everything from ``\n\nContext:`` onward, and drop
-# the ``Question:`` prefix so ``question`` itself does not become a
-# boost-inducing token on unrelated sentences.
-_QUESTION_PREFIX_RE = re.compile(r'^\s*Question\s*:\s*', re.IGNORECASE)
+# the ``Question:`` / ``Q:`` / ``问题：`` / ... prefix so the framing word
+# itself does not become a boost-inducing token on unrelated sentences.
+_QUESTION_PREFIX_RE = re.compile(
+    r'^\s*(?:question|query|q|问题|提问|问)\s*[:：]\s*',
+    re.IGNORECASE)
+# Common delimiters separating a short question from a longer attached
+# context / document block.  Checked in order; first hit wins.
+_CONTEXT_DELIMITERS: Tuple[str, ...] = (
+    '\n\nContext:', '\n\ncontext:', '\n\nCONTEXT:',
+    '\n\nPassages:', '\n\nDocuments:', '\n\nReference:',
+    '\n\n上下文：', '\n\n文档：', '\n\n材料：',
+)
+# Cap the hint length so long-form datasets (entire-document-as-question)
+# cannot explode token overlap and neutralise query-aware scoring.
+_QUERY_HINT_MAX_CHARS = 512
 
 
 def _extract_query_hint(messages: List[Dict[str, Any]]) -> str:
     """Return the question text from the first user message, if any.
 
-    Degrades gracefully for non-HotpotQA preprocessors: when the
-    ``Question:`` marker is absent we fall back to the first user message's
-    first blank-line block (or the whole content if there are no blank
-    lines).  Returns ``''`` when no user message carries text content,
-    which disables query-aware scoring downstream.
+    Designed to degrade gracefully across datasets rather than lock to the
+    HotpotQA ``Question: ... \n\nContext: ...`` template:
 
-    User-message content may arrive either as a plain ``str`` or as a
-    multimodal list of ``{'type': 'text', 'text': ...}`` / ``{'type':
-    'image', ...}`` dicts (the HotpotQA preprocessor emits the latter).
-    We flatten the list form by concatenating every ``text`` fragment so
-    the ``Question:`` prefix and the question body are stitched back
-    together before the split-on-``\n\nContext:`` logic runs.  Without
-    this, the list-content case silently yields an empty hint and
-    disables force-keep (losing answer-critical facts like ``started in
-    1989``).
+      1. Flatten the user message content.  It may arrive either as a
+         plain ``str`` or as a multimodal list of ``{'type': 'text',
+         'text': ...}`` / ``{'type': 'image', ...}`` dicts; we concatenate
+         every ``text`` fragment.
+      2. Split off any trailing context / document block.  Multiple
+         markers are tried (``Context:`` / ``Passages:`` / ``上下文：`` /
+         ...) so other preprocessors that follow the same pattern with a
+         different label still work out of the box.
+      3. If no explicit delimiter is found, fall back to the first
+         blank-line block -- covers prompts where the question is the
+         opening paragraph and supporting text follows.
+      4. Strip a leading ``Question:`` / ``Q:`` / ``问题：`` prefix so the
+         framing word does not bias query-token matching.
+      5. Cap the result at ``_QUERY_HINT_MAX_CHARS``.  Without this cap,
+         datasets whose user message *is* a long document would yield a
+         "hint" that matches almost every passage, destroying the point
+         of query-awareness.
+
+    Returns ``''`` when no user message carries text content, which
+    disables query-aware scoring downstream.
     """
     for msg in messages:
         if msg.get('role') != 'user':
@@ -235,8 +260,18 @@ def _extract_query_hint(messages: List[Dict[str, Any]]) -> str:
             continue
         if not content or not content.strip():
             continue
-        head = content.split('\n\nContext:', 1)[0]
-        return _QUESTION_PREFIX_RE.sub('', head).strip()
+        head = content
+        for delim in _CONTEXT_DELIMITERS:
+            if delim in head:
+                head = head.split(delim, 1)[0]
+                break
+        else:
+            # No explicit context delimiter -- use first blank-line block.
+            head = head.split('\n\n', 1)[0]
+        head = _QUESTION_PREFIX_RE.sub('', head).strip()
+        if len(head) > _QUERY_HINT_MAX_CHARS:
+            head = head[:_QUERY_HINT_MAX_CHARS].rstrip()
+        return head
     return ''
 
 
@@ -873,6 +908,7 @@ def main():
         # the policy has stopped using tools entirely.
         if n_turns_per_rollout:
             log_dict['avg_turns'] = sum(n_turns_per_rollout) / len(n_turns_per_rollout)
+        swanlab.log(log_dict)
         metrics.reset()
         logger.info(f'[Step {optim_step}/{MAX_STEPS}] {log_dict}')
 

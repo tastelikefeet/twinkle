@@ -26,6 +26,20 @@ from .base import Chunker
 # ── Split helpers ─────────────────────────────────────────────────────────────
 # Keep fenced code blocks (``` ... ```) intact when splitting.
 _CODE_FENCE_RE = re.compile(r'(```[\s\S]*?```)', re.MULTILINE)
+# Keep ``<block_N>...</block_N>`` spans intact.  These markers are emitted
+# by :meth:`Chunks.to_trajectory` and by :class:`ExtractCompressed` to
+# label previously-compressed passages; when such text re-enters the
+# chunker (e.g. a tool response produced by ``ExtractCompressed``),
+# splitting through the tag pair on a sentence boundary would corrupt the
+# markup (closing tag ends up in a different chunk, producing nested /
+# unbalanced ``<block_N>`` when downstream re-rendering wraps each chunk
+# again).  Treating the whole span as atomic prevents that.
+_BLOCK_TAG_RE = re.compile(r'(<block_\d+>[\s\S]*?</block_\d+>)')
+# Ordered union: a line is either a code fence OR a block-tag span OR
+# normal text.  Used by ``_split_preserving_code`` to carve out the atomic
+# regions before paragraph-level splitting.
+_ATOMIC_SPAN_RE = re.compile(
+    r'(```[\s\S]*?```|<block_\d+>[\s\S]*?</block_\d+>)', re.MULTILINE)
 # Paragraph boundary = blank line.
 _PARAGRAPH_RE = re.compile(r'\n\s*\n')
 # Sentence boundary = end-of-sentence punctuation (CN+EN) or hard newline.
@@ -226,13 +240,16 @@ class NativeChunker(Chunker):
     def _split_oversize_paragraph(self, p: str) -> Iterator[str]:
         """Route an over-size paragraph through the right splitter.
 
-        Fenced code blocks are atomic even when they exceed ``chunk_size``
-        (splitting them would break syntax).  Everything else goes through
-        ``_hard_split`` which sentence-packs, with the ``[N] Title:`` prefix
-        (if any) threaded in so continuation pieces carry a ``(cont.)`` anchor
-        rather than becoming orphan chunks invisible to ``extract_compressed``.
+        Fenced code blocks AND ``<block_N>...</block_N>`` spans are atomic
+        even when they exceed ``chunk_size``.  Splitting a fenced block
+        would break syntax; splitting a block-tag pair would orphan the
+        closing tag into the next chunk (malformed markup).  Everything
+        else goes through ``_hard_split`` which sentence-packs, with the
+        ``[N] Title:`` prefix (if any) threaded in so continuation pieces
+        carry a ``(cont.)`` anchor rather than becoming orphan chunks
+        invisible to ``extract_compressed``.
         """
-        if self._is_code_block(p):
+        if self._is_code_block(p) or _BLOCK_TAG_RE.fullmatch(p):
             yield p
             return
         yield from self._hard_split(p, anchor_prefix=self._extract_anchor_prefix(p))
@@ -257,12 +274,21 @@ class NativeChunker(Chunker):
 
     @staticmethod
     def _split_preserving_code(text: str) -> List[str]:
-        """Split on blank lines while keeping fenced code blocks as one unit."""
+        """Split on blank lines while keeping atomic spans intact.
+
+        Atomic spans that must never be torn across chunks:
+          * Fenced code blocks (``` ... ```) -- splitting would break
+            syntax.
+          * ``<block_N>...</block_N>`` marker pairs -- splitting would
+            orphan the closing tag into a different chunk, producing
+            nested / unbalanced markup when the chunks are later wrapped
+            again by :meth:`Chunks.to_trajectory`.
+        """
         paragraphs: List[str] = []
-        for part in _CODE_FENCE_RE.split(text):
+        for part in _ATOMIC_SPAN_RE.split(text):
             if not part:
                 continue
-            if part.startswith('```'):
+            if part.startswith('```') or _BLOCK_TAG_RE.fullmatch(part):
                 paragraphs.append(part.strip())
             else:
                 paragraphs.extend(p.strip() for p in _PARAGRAPH_RE.split(part) if p.strip())
