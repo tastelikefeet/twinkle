@@ -8,6 +8,7 @@ import os
 import re
 from typing import List, Tuple, Dict, Any
 
+import swanlab
 from peft import LoraConfig
 
 import twinkle
@@ -37,7 +38,7 @@ NUM_GPUS = MODEL_GPUS + SAMPLER_GPUS
 
 NUM_GENERATIONS = int(os.environ.get('NUM_GENERATIONS', 8))
 MAX_NEW_TOKENS = int(os.environ.get('MAX_NEW_TOKENS', 4096))
-LEARNING_RATE = float(os.environ.get('LR', 1e-5))
+LEARNING_RATE = float(os.environ.get('LR', 1e-6))
 MAX_STEPS = int(os.environ.get('MAX_STEPS', 1000))
 BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 8))
 MINI_BATCH_SIZE = int(os.environ.get('MINI_BATCH_SIZE', 8))
@@ -117,6 +118,26 @@ def main():
     sampler_mesh = DeviceMesh.from_sizes(world_size=SAMPLER_GPUS, dp_size=SAMPLER_GPUS)
     twinkle.initialize(mode='ray', nproc_per_node=NUM_GPUS, groups=device_groups, lazy_collect=False)
 
+    swanlab.init(
+        project='twinkle',
+        experiment_name='short_math_grpo',
+        config={
+            'model_id': MODEL_ID,
+            'use_megatron': USE_MEGATRON,
+            'model_gpus': MODEL_GPUS,
+            'sampler_gpus': SAMPLER_GPUS,
+            'num_generations': NUM_GENERATIONS,
+            'max_new_tokens': MAX_NEW_TOKENS,
+            'learning_rate': LEARNING_RATE,
+            'max_steps': MAX_STEPS,
+            'batch_size': BATCH_SIZE,
+            'mini_batch_size': MINI_BATCH_SIZE,
+            'micro_batch_size': MICRO_BATCH_SIZE,
+            'gradient_accumulation_steps': GRADIENT_ACCUMULATION_STEPS,
+            'lora_rank': LORA_RANK,
+        },
+    )
+
     # Since we are training on text-only data, we avoid using 'all-linear' which would include the ViT layers.
     lora_config = LoraConfig(
         target_modules='all-linear',
@@ -159,7 +180,7 @@ def main():
             'gpu_memory_utilization': 0.8,
             'max_model_len': 8192,
             'max_lora_rank': 32, # save as lora_config
-            'enable_lora': True,
+            'enable_lora': False,
             'enable_tower_connector_lora': True,
         },
         device_mesh=sampler_mesh,
@@ -198,7 +219,7 @@ def main():
         # enable_lora=True used with ckpt_manager.sync_weights(merge_and_sync=False)
         # meaning only sync lora weights, if merge_and_sync=True,
         # lora will be merged into the base model and sync all weights to vLLM
-        ckpt_manager.sync_weights(merge_and_sync=False)
+        ckpt_manager.sync_weights(merge_and_sync=True)
         sampler.reset_prefix_cache()
 
         sample_responses = sampler.sample(
@@ -254,9 +275,11 @@ def main():
         log_dict.update(model.calculate_metric(is_training=True))
         metrics.reset()
         logger.info(f'[Step {optim_step}/{MAX_STEPS}] {log_dict}')
+        swanlab.log(log_dict, step=optim_step)
 
     logger.info(f'Training completed. optim_steps={optim_step}')
     model.save('math-grpo-final')
+    swanlab.finish()
 
 
 if __name__ == '__main__':

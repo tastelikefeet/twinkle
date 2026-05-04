@@ -36,8 +36,10 @@ prompt) identical to the non-agentic baseline.
 """
 import json
 import os
+import random
 import re
 import string
+import time
 from collections import Counter
 from typing import Any, Dict, List, Tuple
 
@@ -81,10 +83,10 @@ NUM_GPUS = MODEL_GPUS + SAMPLER_GPUS
 
 NUM_GENERATIONS = int(os.environ.get('NUM_GENERATIONS', 8))
 MAX_NEW_TOKENS = int(os.environ.get('MAX_NEW_TOKENS', 4096))
-LEARNING_RATE = float(os.environ.get('LR', 1e-5))
-MAX_STEPS = int(os.environ.get('MAX_STEPS', 1000))
-BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 8))
-MINI_BATCH_SIZE = int(os.environ.get('MINI_BATCH_SIZE', 8))
+LEARNING_RATE = float(os.environ.get('LR', 5e-8))
+MAX_STEPS = int(os.environ.get('MAX_STEPS', 5000))
+BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 4))
+MINI_BATCH_SIZE = int(os.environ.get('MINI_BATCH_SIZE', 4))
 MICRO_BATCH_SIZE = int(os.environ.get('MICRO_BATCH_SIZE', 2))
 GRADIENT_ACCUMULATION_STEPS = int(os.environ.get('GRADIENT_ACCUMULATION_STEPS', 1))
 ADAPTER_NAME = 'default'
@@ -92,10 +94,80 @@ SAVE_STEPS = int(os.environ.get('SAVE_STEPS', 1000))
 LORA_RANK = int(os.environ.get('LORA_RANK', 16))
 
 # ---- Agentic rollout knobs ----
-MAX_TURNS = int(os.environ.get('MAX_TURNS', 4))            # hard cap on tool-call turns
+MAX_TURNS = int(os.environ.get('MAX_TURNS', 5))            # hard cap on tool-call turns
 CHUNK_SIZE = int(os.environ.get('CHUNK_SIZE', 1024))        # chars per chunk (NativeChunker)
 CHUNK_OVERLAP = int(os.environ.get('CHUNK_OVERLAP', 0))    # sliding-window overlap
 KEEP_RATIO = float(os.environ.get('KEEP_RATIO', 0.3))      # NativeCondenser target ratio
+
+# ---- Reward-balancing knobs (tuned from 2nd crash post-mortem: F1 stagnant) ----
+# Round 1 post-mortem: policy collapsed into repetition loops (fixed via
+# repetition_penalty + length_pen + format gate).
+# Round 2 post-mortem (current): policy stopped collapsing but F1 stagnated
+# at ~0.5 below the base-model baseline of 0.62, with tool-use dropping to
+# 0% across 437/445 rollouts.  Root cause: ``format`` saturated at 1.0 and
+# ``extract`` saturated at 0.99 across ALL rollouts, so GRPO's within-group
+# normalisation zeroed their advantages; meanwhile ``ExtractReward`` is a
+# *penalty* on tool calls, giving the policy no incentive to use tools at
+# all.  Optimal policy: emit a random ``\\boxed{X}`` and collect constants.
+#
+# Fixes applied here:
+#   1. Replace ``ExtractReward`` (penalty) with ``HotpotQAToolUseReward``
+#      (+0.2 bonus for using at least one extract_compressed call).  Creates
+#      within-group variance on ``tool_use`` → GRPO can push policy toward
+#      using tools instead of away from them.
+#   2. Drop ``FORMAT_REWARD_WEIGHT`` to 0.0 -- signal is 100% saturated,
+#      pure noise contribution to GRPO advantages.  Model has already
+#      learned to emit ``\\boxed{}``; no gradient is needed there.
+#   3. Bump ``F1_REWARD_WEIGHT`` 1.0 → 1.5 so the real learning signal
+#      dominates the weighted sum.
+F1_REWARD_WEIGHT = float(os.environ.get('F1_REWARD_WEIGHT', 1.5))
+FORMAT_REWARD_WEIGHT = float(os.environ.get('FORMAT_REWARD_WEIGHT', 0.0))
+# Round-3 bump: 0.2 was too small -- with ~3% tool-call base rate, 76%+
+# of GRPO groups have all-zero tool_use vectors, zeroing advantages.
+# Raising to 1.0 gives the (rare) tool-using rollouts a much larger
+# positive advantage relative to their non-using peers inside each group
+# that *does* have mixed tool-use, so the policy can actually learn from
+# the (still infrequent) exploration.  Pair with temperature bump on
+# SamplingParams for wider exploration.
+TOOL_USE_REWARD_WEIGHT = float(os.environ.get('TOOL_USE_REWARD_WEIGHT', 1.0))
+# Round-4: bonus given ONLY when a rollout BOTH used a tool AND answered
+# correctly (F1 >= threshold).  Needed because Round-3 showed tool-path
+# F1 was ~50% and length_pen could eat the raw tool_use bonus, making
+# "guess a short answer" dominate "explore with tools" again in GRPO.
+# This shifts the equilibrium to: {correct + tool} > {correct, no tool} >
+# {wrong + tool} ~ {wrong, no tool}.
+TOOL_SUCCESS_REWARD_WEIGHT = float(os.environ.get('TOOL_SUCCESS_REWARD_WEIGHT', 0.5))
+TOOL_SUCCESS_F1_THRESHOLD = float(os.environ.get('TOOL_SUCCESS_F1_THRESHOLD', 0.5))
+LENGTH_PENALTY_WEIGHT = float(os.environ.get('LENGTH_PENALTY_WEIGHT', 0.3))
+# Kept for backward compatibility -- no longer consumed by compute_rewards
+# (replaced by TOOL_USE_REWARD_WEIGHT) but still logged as a diagnostic.
+EXTRACT_REWARD_WEIGHT = float(os.environ.get('EXTRACT_REWARD_WEIGHT', 0.0))
+# Format reward is gated: an assistant message longer than this does NOT
+# get the +1 for emitting \boxed{} -- stops the policy from padding garbage
+# around a single \boxed{...} to satisfy both signals.
+# Round-4: 1500 was too strict -- a legitimate "retrieve + reason + answer"
+# rollout takes 2000-4000 chars, getting unfairly penalised and eating the
+# tool-use bonus.  Raised to 5000 so only real repetition loops (>10k chars)
+# still hit the penalty.
+FORMAT_MAX_CHARS = int(os.environ.get('FORMAT_MAX_CHARS', 5000))
+# F1-gate threshold for length_pen (Round-5 fix).  When F1 on a rollout is
+# below this threshold, its length_pen is forced to 0 so long-and-wrong
+# rollouts don't get a free "short-is-better" gradient via GRPO within-group
+# variance.  Set to 0.0 to disable the gate (legacy behaviour: length_pen
+# always active).  See post-mortem in Round-5 diagnosis for why ungated
+# length_pen inflates thinking length and triggers truncation collapse.
+LENGTH_PEN_F1_GATE = float(os.environ.get('LENGTH_PEN_F1_GATE', 0.3))
+# GRPO homogeneous-group filter threshold (Round-5 fix).  Samples whose
+# per-sample max |advantage| is below this are masked out of the loss;
+# prevents KL drift and zero-variance-noise advantage amplification on
+# groups with no reward signal.  Passed to ``GRPOLoss(..., homogeneous_threshold=..)``.
+GRPO_HOMOGENEOUS_THRESHOLD = float(
+    os.environ.get('GRPO_HOMOGENEOUS_THRESHOLD', 1e-4))
+# Curriculum: disable tool-use bonus for the first fraction of MAX_STEPS so
+# the policy first learns to answer (F1-driven) before tool-use pressure.
+# Set to 0.0 to apply the tool-use bonus from step 0 (recommended given
+# the 2nd-round symptom was tool-use already at 0%).
+EXTRACT_WARMUP_FRAC = float(os.environ.get('EXTRACT_WARMUP_FRAC', 0.0))
 
 # ---- HotpotQA dataset encode knobs ----
 HOTPOTQA_NUM_PROC = int(os.environ.get('HOTPOTQA_NUM_PROC', 16))
@@ -107,17 +179,19 @@ SYSTEM_PROMPT = (
     'using the provided paragraphs. Give a short factual answer (a name, '
     'entity, date, or "yes"/"no") inside \\boxed{}. Do not include extra '
     'words in the box.\n\n'
-    'CONTEXT COMPRESSION: The provided paragraphs may be shown with '
+    'CONTEXT COMPRESSION: The provided paragraphs are shown with '
     '<block_N>...</block_N> markers around each chunk. Some chunks have been '
-    'shortened to save context. If you need the original (un-shortened) text '
-    'of one or more blocks, call the tool below. Otherwise, answer directly.\n\n'
+    'shortened to save context. When a block looks relevant but its content '
+    'appears truncated or ambiguous, call ``extract_compressed`` to recover '
+    'the full original passage before answering -- accuracy on multi-hop '
+    'questions typically improves when you retrieve the exact evidence.\n\n'
     'TOOL CALL FORMAT: Emit tool calls inside a single fenced block like '
     'this, then stop generating and wait for the tool result:\n'
     '<tool_call>\n'
     '{"name": "extract_compressed", "arguments": {"blocks": [1, 3]}}\n'
     '</tool_call>\n\n'
-    'Prefer answering without tool calls whenever the compressed content is '
-    'already sufficient -- each tool call reduces your reward.')
+    'If you are confident the compressed content is already sufficient, you '
+    'may answer directly; otherwise prefer retrieving the evidence first.')
 
 # ========== Tool-call parsing (Hermes / Qwen3 style) ==========
 # Tolerant of a missing closing tag: vLLM strips the ``stop`` string from the
@@ -316,6 +390,9 @@ def _last_assistant_text(traj: Dict[str, Any]) -> str:
 _F1_REWARD = None
 _FORMAT_REWARD = None
 _EXTRACT_REWARD = None
+_LENGTH_PENALTY = None
+_TOOL_USE_REWARD = None
+_TOOL_SUCCESS_REWARD = None
 
 
 def _normalize_answer(s: str) -> str:
@@ -367,14 +444,117 @@ class HotpotQAF1Reward(Reward):
 class HotpotQAFormatReward(Reward):
     """+1 if the final assistant turn contains a \\boxed{...} span, else 0.
 
-    Keeps the signal that taught GSM8K models to respect the answer schema.
+    Gated by :data:`FORMAT_MAX_CHARS`: an assistant message whose cleaned
+    text exceeds the cap does NOT get the bonus even if it contains a
+    ``\\boxed{...}`` somewhere inside.  Without this gate the policy can
+    (and did, in the previous collapse run) learn to ramble for 20k chars
+    and slip a single ``\\boxed{garbage}`` at the end, collecting the
+    format bonus while emitting pure repetition loops.
     """
 
     def __call__(self, trajectories: List[Dict[str, Any]], **kwargs) -> List[float]:
-        return [
-            1.0 if _BOXED_RE.search(_last_assistant_text(t) or '') else 0.0
-            for t in trajectories
-        ]
+        rewards = []
+        for t in trajectories:
+            text = _last_assistant_text(t) or ''
+            if _BOXED_RE.search(text) and len(text) <= FORMAT_MAX_CHARS:
+                rewards.append(1.0)
+            else:
+                rewards.append(0.0)
+        return rewards
+
+
+class HotpotQALengthPenalty(Reward):
+    """Negative reward proportional to terminal-message length overflow.
+
+    Returns 0 if the final assistant message is within :data:`FORMAT_MAX_CHARS`,
+    else a linearly growing penalty that reaches -1 when the message is
+    ``MAX_NEW_TOKENS * 4`` chars (empirical 4 chars/token ceiling).  This
+    directly counteracts the "fill the budget with repetition" exploit
+    observed in the crash post-mortem.
+    """
+
+    def __call__(self, trajectories: List[Dict[str, Any]], **kwargs) -> List[float]:
+        # Budget in characters -- picked so the penalty saturates exactly
+        # when the model fills the full MAX_NEW_TOKENS window with ASCII.
+        budget = max(1, MAX_NEW_TOKENS * 4 - FORMAT_MAX_CHARS)
+        rewards = []
+        for t in trajectories:
+            text = _last_assistant_text(t) or ''
+            overflow = max(0, len(text) - FORMAT_MAX_CHARS)
+            rewards.append(-min(1.0, overflow / budget))
+        return rewards
+
+
+class HotpotQAToolUseReward(Reward):
+    """Positive reward for using ``extract_compressed`` at least once.
+
+    Replaces :class:`ExtractReward` (which was a *penalty* that collapsed to
+    a 0.99 constant when the policy learned to stop calling tools).  This
+    variant is binary: +1.0 if any assistant message carries ``tool_calls``,
+    else 0.0.  Multiplied by :data:`TOOL_USE_REWARD_WEIGHT` downstream.
+
+    Binary-ness is intentional: it gives GRPO a *within-group* variance
+    signal (some rollouts used tools, some didn't) that directly rewards
+    the tool-calling branch, unlike a logistic decay whose 0.95–0.99 range
+    is indistinguishable under group-normalised advantages.
+    """
+
+    def __call__(self, trajectories: List[Dict[str, Any]], **kwargs) -> List[float]:
+        rewards = []
+        for t in trajectories:
+            used = False
+            for m in t.get('messages', []) or []:
+                if m.get('role') == 'assistant' and (m.get('tool_calls') or []):
+                    used = True
+                    break
+            rewards.append(1.0 if used else 0.0)
+        return rewards
+
+
+class HotpotQAToolSuccessReward(Reward):
+    """Double-incentive bonus: +1 iff the rollout used a tool AND got F1 >= threshold.
+
+    Motivation (Round-4 post-mortem): with only :class:`HotpotQAToolUseReward`
+    active, tool-calling rollouts paid a ``length_pen`` hit (up to -0.92)
+    because compressed evidence + tool result + reasoning pushes the
+    terminal message past :data:`FORMAT_MAX_CHARS`, which roughly cancels
+    the raw +1 tool-use bonus.  Meanwhile the "guess a short answer"
+    branch collects zero length_pen and keeps the F1 component on average.
+    The GRPO advantage therefore flattens between the two branches and
+    the policy regresses back toward guessing.
+
+    This reward shifts the equilibrium by paying an *extra* bonus only
+    when the tool path actually paid off, i.e. answer F1 >= threshold.
+    That way:
+
+        {tool + correct}  > {no-tool + correct}
+                          > {no-tool + wrong}
+                          ~ {tool + wrong}
+
+    so the policy is pushed to explore tools only when they help, not as
+    a blind behavioural habit.
+    """
+
+    def __call__(self, trajectories: List[Dict[str, Any]], **kwargs) -> List[float]:
+        rewards = []
+        for traj in trajectories:
+            used = False
+            for m in traj.get('messages', []) or []:
+                if m.get('role') == 'assistant' and (m.get('tool_calls') or []):
+                    used = True
+                    break
+            if not used:
+                rewards.append(0.0)
+                continue
+            gold = ''
+            for key, val in traj.get('user_data', []) or []:
+                if key == 'ground_truth':
+                    gold = val or ''
+                    break
+            pred = _extract_final_answer(_last_assistant_text(traj))
+            f1, _em = _f1_score(pred, gold)
+            rewards.append(1.0 if f1 >= TOOL_SUCCESS_F1_THRESHOLD else 0.0)
+        return rewards
 
 
 # ========== Dataset ==========
@@ -481,23 +661,77 @@ def create_hotpotqa_dataset() -> Dataset:
 
 def compute_rewards(
     trajectories: List[Dict[str, Any]],
-) -> Tuple[List[float], List[float], List[float], List[float]]:
-    """Sum of F1 + format + extract-usage rewards.
+    optim_step: int = 0,
+) -> Tuple[List[float], List[float], List[float], List[float], List[float], List[float], List[float]]:
+    """Weighted sum of F1 + format + tool-use + length-penalty (+ extract, diagnostic only).
 
-    ``ExtractReward`` is the behavioural regulariser paired with
-    :class:`ExtractCompressed`; it counts assistant ``tool_calls`` entries
-    and applies a reverse-sigmoid decay.
+    Round-2 rebalance:
+      * ``F1`` weight raised 1.0 → 1.5 -- the only reward with real signal
+        variance, must dominate the sum.
+      * ``format`` weight dropped to 0.0 -- 100% saturated in the last run,
+        contributes pure noise to GRPO within-group advantages.  Kept in
+        the return tuple (and in metrics) as a monitoring-only signal.
+      * ``extract`` (logistic penalty on tool-call count) replaced by
+        ``tool_use`` (binary +1 if any tool call).  The old ``extract``
+        value is still computed and returned for dashboard continuity but
+        no longer enters the weighted sum.
+      * ``tool_use`` multiplied by :data:`TOOL_USE_REWARD_WEIGHT`; zeroed
+        during the first ``EXTRACT_WARMUP_FRAC * MAX_STEPS`` steps so the
+        policy can first learn to answer before being pressured to invoke
+        tools.  Default ``EXTRACT_WARMUP_FRAC=0.0`` disables the warmup.
+      * ``length_pen`` unchanged -- safety net against repetition loops.
+
+    Return tuple order preserved for caller shape stability; the new
+    ``tool_use`` vector is appended at the end.
     """
-    global _F1_REWARD, _FORMAT_REWARD, _EXTRACT_REWARD
+    global _F1_REWARD, _FORMAT_REWARD, _EXTRACT_REWARD, _LENGTH_PENALTY, _TOOL_USE_REWARD, _TOOL_SUCCESS_REWARD
     if _F1_REWARD is None:
         _F1_REWARD = HotpotQAF1Reward()
         _FORMAT_REWARD = HotpotQAFormatReward()
         _EXTRACT_REWARD = ExtractReward(midpoint=3.0, steepness=1.5)
+        _LENGTH_PENALTY = HotpotQALengthPenalty()
+        _TOOL_USE_REWARD = HotpotQAToolUseReward()
+        _TOOL_SUCCESS_REWARD = HotpotQAToolSuccessReward()
     accuracy = _F1_REWARD(trajectories)
     fmt = _FORMAT_REWARD(trajectories)
-    extract = _EXTRACT_REWARD(trajectories)
-    total = [a + f + e for a, f, e in zip(accuracy, fmt, extract)]
-    return total, fmt, accuracy, extract
+    extract = _EXTRACT_REWARD(trajectories)   # diagnostic only
+    length_pen_raw = _LENGTH_PENALTY(trajectories)
+    tool_use = _TOOL_USE_REWARD(trajectories)
+    tool_success = _TOOL_SUCCESS_REWARD(trajectories)
+
+    # Round-5 fix: F1-gated length_pen.  Without this gate, long-and-wrong
+    # rollouts (F1=0, len>>cap, length_pen=-0.8) and short-and-wrong ones
+    # (F1=0, len<cap, length_pen=0) create a within-group advantage that
+    # rewards "short nonsense" over "long nonsense" -- which is exactly the
+    # pathology driving the step-115 collapse to ``Okay<|endoftext|>``.
+    # Gating length_pen by F1 breaks this false signal: only rollouts that
+    # actually answered correctly can incur a length penalty.  The length
+    # penalty therefore becomes a tiebreaker *among correct answers*
+    # (preferring concise) rather than a global "short is better" bias.
+    if LENGTH_PEN_F1_GATE > 0.0:
+        length_pen = [
+            lp if acc > LENGTH_PEN_F1_GATE else 0.0
+            for lp, acc in zip(length_pen_raw, accuracy)
+        ]
+    else:
+        length_pen = length_pen_raw
+
+    # Curriculum: mute tool-use bonus during warmup so F1 alone teaches the
+    # policy to answer before the tool-call incentive kicks in.
+    warmup_steps = int(EXTRACT_WARMUP_FRAC * MAX_STEPS)
+    tool_weight = 0.0 if optim_step < warmup_steps else TOOL_USE_REWARD_WEIGHT
+    tool_success_weight = (
+        0.0 if optim_step < warmup_steps else TOOL_SUCCESS_REWARD_WEIGHT)
+
+    total = [
+        F1_REWARD_WEIGHT * a
+        + FORMAT_REWARD_WEIGHT * f
+        + tool_weight * tu
+        + tool_success_weight * ts
+        + LENGTH_PENALTY_WEIGHT * lp
+        for a, f, tu, ts, lp in zip(accuracy, fmt, tool_use, tool_success, length_pen)
+    ]
+    return total, fmt, accuracy, extract, length_pen, tool_use, tool_success
 
 
 # ========== Agentic rollout ==========
@@ -651,6 +885,141 @@ def _append_tool_turn(
         })
 
 
+# ---- Rollout trace dump (post-mortem crash analysis) ---------------------
+# Append-only JSONL file.  One line per ``run_agentic_rollouts`` turn, each
+# line describing ONE randomly picked active rollout's full state after that
+# turn's sampling.  Designed to be grepped / replayed after a training crash:
+# every line is self-contained JSON with the compressed prompt actually fed
+# to the sampler, the pre-compression chunk list, the cumulative tool-call
+# count and (once the rollout terminates) the final boxed answer.
+#
+# Path is configurable via ``ROLLOUT_TRACE_PATH`` so multiple runs can
+# coexist without clobbering each other; set to empty string to disable.
+_ROLLOUT_TRACE_PATH = os.environ.get(
+    'ROLLOUT_TRACE_PATH', 'rollout_trace.jsonl')
+
+
+def _dump_random_rollout_trace(
+    turn: int,
+    active: List[_Rollout],
+    displays: List[Dict[str, Any]],
+    responses: List[Any],
+) -> None:
+    """Append one random active rollout's post-turn state to JSONL.
+
+    Fields captured:
+      * ``compressed``    -- the sampler-ready display (what the model saw
+        this turn after chunk + condense + ``<block_N>`` rendering).
+      * ``full``          -- the pre-compression chunk list (role + content
+        preview); lets you see whether the condenser dropped an anchor or
+        tore a ``<block_N>`` pair.
+      * ``tool_call_count`` -- cumulative ``tool_calls`` entries across all
+        assistant messages so far; a collapse to 0 across many turns is the
+        "policy stopped exploring" signature.
+      * ``rewards``       -- per-component reward snapshot (``f1``, ``format``,
+        ``extract``, ``length_pen``, ``total``) computed on the trajectory
+        as of this turn.  Non-terminal turns naturally have ``f1=0`` /
+        ``format=0``; the progression from turn N to turn N+1 is what
+        matters, not the absolute value.
+      * ``last_decoded``  -- raw decoded text this turn (before cleaning /
+        tool-call stripping).
+      * ``final_answer``  -- ``\\boxed{...}`` extraction if the rollout
+        terminated on this turn, else ``''``.
+    """
+    if not _ROLLOUT_TRACE_PATH or not active:
+        return
+    idx = random.randrange(len(active))
+    r = active[idx]
+    resp = responses[idx] if idx < len(responses) else None
+
+    tool_call_count = sum(
+        len(m.get('tool_calls') or [])
+        for m in r.trajectory.get('messages', [])
+        if m.get('role') == 'assistant')
+
+    full_chunks_preview = [
+        {'role': c.get('role'),
+         'type': c.get('type'),
+         'content': (c.get('content') if isinstance(c.get('content'), str)
+                     else repr(c.get('content'))[:500])}
+        for c in r.frozen.full_chunks
+    ]
+
+    last_decoded = ''
+    if resp is not None and getattr(resp, 'sequences', None):
+        last_decoded = resp.sequences[0].decoded or ''
+
+    final_answer = ''
+    if r.done:
+        final_answer = _extract_final_answer(_last_assistant_text(r.trajectory))
+
+    # Per-component reward snapshot for the picked rollout.  Computed here
+    # (rather than waiting for the post-batch ``compute_rewards`` call) so
+    # mid-trajectory turns also carry a reward signal, letting you line up
+    # "compression quality" against "reward collected so far" in the trace.
+    # Non-terminal turns will typically have f1=0 / format=0 (no \boxed yet)
+    # and extract=logistic(tool_call_count); that's intended -- we want to
+    # see the reward build up, not only the final value.
+    reward_snapshot: Dict[str, float] = {}
+    try:
+        global _F1_REWARD, _FORMAT_REWARD, _EXTRACT_REWARD, _LENGTH_PENALTY, _TOOL_USE_REWARD, _TOOL_SUCCESS_REWARD
+        if _F1_REWARD is None:
+            _F1_REWARD = HotpotQAF1Reward()
+            _FORMAT_REWARD = HotpotQAFormatReward()
+            _EXTRACT_REWARD = ExtractReward(midpoint=3.0, steepness=1.5)
+            _LENGTH_PENALTY = HotpotQALengthPenalty()
+            _TOOL_USE_REWARD = HotpotQAToolUseReward()
+            _TOOL_SUCCESS_REWARD = HotpotQAToolSuccessReward()
+        traj_list = [r.trajectory]
+        f1_val = _F1_REWARD(traj_list)[0]
+        fmt_val = _FORMAT_REWARD(traj_list)[0]
+        ext_val = _EXTRACT_REWARD(traj_list)[0]
+        len_val = _LENGTH_PENALTY(traj_list)[0]
+        tu_val = _TOOL_USE_REWARD(traj_list)[0]
+        ts_val = _TOOL_SUCCESS_REWARD(traj_list)[0]
+        # Weighted total mirrors ``compute_rewards`` -- minus the curriculum
+        # mute on ``tool_use`` since we do not have ``optim_step`` at rollout
+        # time; the raw components are also emitted for post-hoc inspection.
+        total_val = (
+            F1_REWARD_WEIGHT * f1_val
+            + FORMAT_REWARD_WEIGHT * fmt_val
+            + TOOL_USE_REWARD_WEIGHT * tu_val
+            + TOOL_SUCCESS_REWARD_WEIGHT * ts_val
+            + LENGTH_PENALTY_WEIGHT * len_val)
+        reward_snapshot = {
+            'f1': float(f1_val),
+            'format': float(fmt_val),
+            'extract': float(ext_val),
+            'length_pen': float(len_val),
+            'tool_use': float(tu_val),
+            'tool_success': float(ts_val),
+            'total': float(total_val),
+        }
+    except Exception as e:  # pragma: no cover -- tracing must never crash training
+        logger.warning('rollout trace reward snapshot failed: %s', e)
+        reward_snapshot = {'error': repr(e)}
+
+    record = {
+        'ts': time.time(),
+        'turn': turn,
+        'active_size': len(active),
+        'picked_idx': idx,
+        'rollout_id': id(r),
+        'tool_call_count': tool_call_count,
+        'done': bool(r.done),
+        'rewards': reward_snapshot,
+        'compressed': displays[idx],
+        'full_chunks': full_chunks_preview,
+        'last_decoded': last_decoded,
+        'final_answer': final_answer,
+    }
+    try:
+        with open(_ROLLOUT_TRACE_PATH, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + '\n')
+    except Exception as e:  # pragma: no cover -- tracing must never crash training
+        logger.warning('rollout trace dump failed: %s', e)
+
+
 def run_agentic_rollouts(
     prompts: List[Dict[str, Any]],
     sampler: vLLMSampler,
@@ -717,6 +1086,12 @@ def run_agentic_rollouts(
             else:
                 _append_tool_turn(r, decoded, tool_calls, tool_mgr, turn)
 
+        # Post-mortem trace: dump ONE random active rollout's compressed
+        # display + full chunks + tool-call count + final answer to JSONL.
+        # Kept after the response-processing loop so ``r.done`` / final
+        # answer already reflect this turn's outcome.
+        _dump_random_rollout_trace(turn, active, displays, responses)
+
     # Anything still not done hit max_turns with a trailing tool call.  The
     # assistant message was already appended by ``_append_tool_turn`` in the
     # final iteration, so we MUST NOT append it again -- just mark the rollout
@@ -735,7 +1110,7 @@ def main():
         DeviceGroup(name='sampler', ranks=list(range(MODEL_GPUS, NUM_GPUS)), device_type='GPU'),
     ]
 
-    model_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, dp_size=MODEL_GPUS)
+    model_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, dp_size=2, pp_size=2)
     sampler_mesh = DeviceMesh.from_sizes(world_size=SAMPLER_GPUS, dp_size=SAMPLER_GPUS)
     twinkle.initialize(mode='ray', nproc_per_node=NUM_GPUS, groups=device_groups, lazy_collect=False)
 
@@ -749,12 +1124,12 @@ def main():
     _prebuilt_dataset = create_hotpotqa_dataset()
     logger.info('Dataset ready: %d rows', len(_prebuilt_dataset))
 
-    lora_config = LoraConfig(
-        target_modules='all-linear',
-        r=LORA_RANK,
-        lora_alpha=LORA_RANK * 2,
-        lora_dropout=0.05,
-    )
+    # lora_config = LoraConfig(
+    #     target_modules='all-linear',
+    #     r=LORA_RANK,
+    #     lora_alpha=LORA_RANK * 2,
+    #     lora_dropout=0.05,
+    # )
 
     if USE_MEGATRON:
         from twinkle.model.megatron import MegatronModel
@@ -772,7 +1147,7 @@ def main():
             remote_group='model',
         )
 
-    model.add_adapter_to_model(ADAPTER_NAME, lora_config, gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS)
+    # model.add_adapter_to_model(ADAPTER_NAME, lora_config, gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS)
     if USE_MEGATRON:
         model.set_optimizer('default', lr=LEARNING_RATE)
         model.set_lr_scheduler('default', lr_decay_steps=MAX_STEPS, max_lr=LEARNING_RATE)
@@ -790,7 +1165,7 @@ def main():
             'gpu_memory_utilization': 0.8,
             'max_model_len': 8192,
             'max_lora_rank': 32,
-            'enable_lora': True,
+            #'enable_lora': True,
             'enable_tower_connector_lora': True,
         },
         device_mesh=sampler_mesh,
@@ -822,7 +1197,16 @@ def main():
     metrics = CompletionRewardMetric()
     sampling_params = SamplingParams(
         max_tokens=MAX_NEW_TOKENS, num_samples=1, logprobs=1,
-        temperature=1.0, top_p=0.95,
+        # Round-3 exploration: 1.0 was too conservative (3% tool-call rate),
+        # but 1.3 produced garbage tokens (e.g. Cyrillic chars mixed into
+        # English answers).  1.15 + top_p=0.9 keeps exploration while
+        # tightening the sampling tail.
+        temperature=1.15, top_p=0.9,
+        # Crash post-mortem showed the policy degenerated into 200-char
+        # blocks repeated 90+ times until MAX_NEW_TOKENS.  ``repetition_penalty``
+        # directly suppresses that loop at decode time; pair with the
+        # reward-side length-penalty for defense-in-depth.
+        repetition_penalty=1.1,
         # Stop after a tool_call so we can dispatch before the model keeps rambling.
         stop=['</tool_call>'],
     )
@@ -840,7 +1224,7 @@ def main():
         for prompt in batch:
             expand_prompts.extend([prompt] * NUM_GENERATIONS)
 
-        ckpt_manager.sync_weights(merge_and_sync=False)
+        ckpt_manager.sync_weights(merge_and_sync=True)
         sampler.reset_prefix_cache()
 
         # ---- Multi-turn rollout (the agentic heart of this script) ----
@@ -865,8 +1249,9 @@ def main():
             all_trajectories.append(r.trajectory)
             n_turns_per_rollout.append(r.turns)
 
-        total_rewards, brevity_rewards, accuracy_rewards, extract_rewards = compute_rewards(
-            all_trajectories)
+        (total_rewards, brevity_rewards, accuracy_rewards, extract_rewards,
+         length_penalties, tool_use_rewards, tool_success_rewards) = compute_rewards(
+            all_trajectories, optim_step=optim_step)
 
         metrics.accumulate(
             completion_lengths=all_completion_lengths,
@@ -875,11 +1260,35 @@ def main():
                 'format': brevity_rewards,
                 'f1': accuracy_rewards,
                 'extract': extract_rewards,
+                'length_pen': length_penalties,
+                'tool_use': tool_use_rewards,
+                'tool_success': tool_success_rewards,
             },
         )
 
         advantages = advantage_fn(
             total_rewards, num_generations=NUM_GENERATIONS, scale='group').tolist()
+
+        # Round-5 fix: homogeneous-group filter (script-level).
+        # Zero out advantages for samples from groups where all rewards
+        # are identical (max |adv| < threshold).  Prevents the policy
+        # from drifting on zero-variance groups where the GRPO advantage
+        # is pure numerical noise.
+        if GRPO_HOMOGENEOUS_THRESHOLD > 0.0:
+            n_active = 0
+            for g_start in range(0, len(advantages), NUM_GENERATIONS):
+                g_end = min(g_start + NUM_GENERATIONS, len(advantages))
+                group = advantages[g_start:g_end]
+                max_abs = max(abs(a) for a in group)
+                if max_abs > GRPO_HOMOGENEOUS_THRESHOLD:
+                    n_active += (g_end - g_start)
+                else:
+                    for i in range(g_start, g_end):
+                        advantages[i] = 0.0
+            active_ratio = n_active / len(advantages) if advantages else 1.0
+            logger.info('[Homogeneous filter] active_sample_ratio=%.3f', active_ratio)
+        else:
+            active_ratio = 1.0
 
         total_completions = len(all_input_data)
         for mb_start in range(0, total_completions, MINI_BATCH_SIZE):
@@ -908,6 +1317,8 @@ def main():
         # the policy has stopped using tools entirely.
         if n_turns_per_rollout:
             log_dict['avg_turns'] = sum(n_turns_per_rollout) / len(n_turns_per_rollout)
+        log_dict['active_sample_ratio'] = active_ratio
+        log_dict = {key: value for key, value in log_dict.items() if '_std' not in key}
         swanlab.log(log_dict)
         metrics.reset()
         logger.info(f'[Step {optim_step}/{MAX_STEPS}] {log_dict}')
