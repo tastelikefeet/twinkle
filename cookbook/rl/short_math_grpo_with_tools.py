@@ -135,6 +135,31 @@ REASONING_REWARD_WEIGHT = float(os.environ.get('REASONING_REWARD_WEIGHT', 0.5))
 # (~500-900 chars with full reasoning, ~85 chars at the collapsed state).
 REASONING_FLOOR_CHARS = int(os.environ.get('REASONING_FLOOR_CHARS', 50))
 REASONING_MIN_CHARS = int(os.environ.get('REASONING_MIN_CHARS', 200))
+
+# ---- Cold-start curriculum (Plan B only: tool_use weight; Plan A disabled) ----
+# History: initial A+B (temp 1.3 + weight 1.5) over-shot badly --
+# temperature 1.3 poisoned turn-2 generation with multi-lingual garbage
+# tokens and forced premature EOS; weight 1.5 taught the policy "call
+# tool -> collect 1.5 reward -> stop" (i.e. empty post-tool assistant
+# turns).  Both branches' F1 collapsed from 0.71 to 0.35 within 18 steps.
+# Resolution: kill Plan A entirely (all temperatures pinned at 1.0) and
+# soften Plan B so tool_use weight stays below the F1 weight (1.5).
+# This keeps the F1 channel as the dominant signal while still giving
+# the tool branch a modest head-start during cold start.
+CURRICULUM_COLD_STEPS = int(os.environ.get('CURRICULUM_COLD_STEPS', 15))
+CURRICULUM_TRANSITION_STEPS = int(
+    os.environ.get('CURRICULUM_TRANSITION_STEPS', 40))
+# Plan A disabled: all phases use the same (stable) sampling temperature.
+# Kept as env knobs so they can be re-enabled without a code edit, but
+# their defaults are pinned to the stable value.
+SAMPLING_TEMP_COLD = float(os.environ.get('SAMPLING_TEMP_COLD', 1.0))
+SAMPLING_TEMP_TRANSITION = float(os.environ.get('SAMPLING_TEMP_TRANSITION', 1.0))
+SAMPLING_TEMP_STABLE = float(os.environ.get('SAMPLING_TEMP_STABLE', 1.0))
+# Plan B softened: weight stays strictly below F1_REWARD_WEIGHT (1.5) so
+# "call tool AND answer correctly" dominates "call tool AND skip answer".
+TOOL_USE_WEIGHT_COLD = float(os.environ.get('TOOL_USE_WEIGHT_COLD', 0.7))
+TOOL_USE_WEIGHT_TRANSITION = float(
+    os.environ.get('TOOL_USE_WEIGHT_TRANSITION', 0.55))
 # ``format_reward`` is +1 only if the boxed-answer turn is shorter than
 # this.  Raised to 5000 in Round-4: a legitimate retrieve+reason+answer
 # rollout takes 2000-4000 chars, so tighter gates unfairly punished the
@@ -562,6 +587,45 @@ _TOOL_USE_REWARD = None
 _TOOL_SUCCESS_REWARD = None
 _REASONING_REWARD = None
 
+# ---- Cold-start curriculum runtime state (Plans A + B) ----
+# ``_CURRENT_STEP`` is written by ``main()`` at the start of each training
+# iteration and read by the curriculum accessors below.  Kept at module
+# scope so ``compute_rewards`` and ``_dump_random_rollout_trace`` can both
+# see the same schedule without threading an extra parameter through the
+# rollout pipeline.
+_CURRENT_STEP: int = 0
+
+
+def _curriculum_temperature() -> float:
+    """Sampling temperature accessor (Plan A DISABLED).
+
+    All three phases default to ``SAMPLING_TEMP_STABLE`` (1.0) so the
+    sampler temperature is effectively constant.  The scheduled env
+    knobs are preserved so Plan A can be re-enabled if needed without a
+    code edit, but the active defaults make the function a no-op.
+
+    Rationale: the previous ``temp=1.3`` cold-start poisoned turn-2
+    generation (multi-lingual garbage + premature EOS) and the resulting
+    F1 crash wasn't worth the intra-group variance gain."""
+    if _CURRENT_STEP < CURRICULUM_COLD_STEPS:
+        return SAMPLING_TEMP_COLD
+    if _CURRENT_STEP < CURRICULUM_TRANSITION_STEPS:
+        return SAMPLING_TEMP_TRANSITION
+    return SAMPLING_TEMP_STABLE
+
+
+def _curriculum_tool_use_weight() -> float:
+    """Plan B: amplified ``tool_use`` reward weight during cold start,
+    decaying through the transition window back to the stable value
+    ``TOOL_USE_REWARD_WEIGHT``.  Weight is kept strictly below
+    ``F1_REWARD_WEIGHT`` (1.5) so the policy cannot accumulate more
+    reward by "call tool + skip answer" than by "answer correctly"."""
+    if _CURRENT_STEP < CURRICULUM_COLD_STEPS:
+        return TOOL_USE_WEIGHT_COLD
+    if _CURRENT_STEP < CURRICULUM_TRANSITION_STEPS:
+        return TOOL_USE_WEIGHT_TRANSITION
+    return TOOL_USE_REWARD_WEIGHT
+
 
 def _normalize_answer(s: str) -> str:
     """SQuAD-style normalization: lowercase, strip punct/articles/extra ws."""
@@ -735,10 +799,24 @@ class HotpotQAReasoningReward(Reward):
                 if msg.get('role') != 'assistant':
                     continue
                 content = msg.get('content') or ''
-                if not isinstance(content, str) or '<tool_call>' not in content:
+                if not isinstance(content, str):
+                    continue
+                # vLLM's tool-call parser strips the ``<tool_call>...`` tag
+                # out of the raw decoded text into the structured
+                # ``msg['tool_calls']`` field, leaving ``content`` as
+                # preamble-only.  So we must also accept assistant turns
+                # that carry structured tool_calls (tag already parsed out).
+                has_tc_tag = '<tool_call>' in content
+                has_tc_struct = bool(msg.get('tool_calls'))
+                if not (has_tc_tag or has_tc_struct):
                     continue
                 saw_tool_turn = True
-                pre = content.split('<tool_call>', 1)[0].strip()
+                # If the literal tag is still present, split at it; otherwise
+                # the full ``content`` IS the preamble.
+                if has_tc_tag:
+                    pre = content.split('<tool_call>', 1)[0].strip()
+                else:
+                    pre = content.strip()
                 n = len(pre)
                 if n <= floor:
                     score = 0.0
@@ -909,7 +987,7 @@ def compute_rewards(
         + FORMAT_REWARD_WEIGHT * f
         + EXTRACT_REWARD_WEIGHT * e
         + LENGTH_PENALTY_WEIGHT * lp
-        + TOOL_USE_REWARD_WEIGHT * tu
+        + _curriculum_tool_use_weight() * tu
         + TOOL_SUCCESS_REWARD_WEIGHT * ts
         + REASONING_REWARD_WEIGHT * rs
         for a, f, e, lp, tu, ts, rs in zip(
@@ -1129,7 +1207,7 @@ def _dump_random_rollout_trace(
                 + FORMAT_REWARD_WEIGHT * fmt_val
                 + EXTRACT_REWARD_WEIGHT * ext_val
                 + LENGTH_PENALTY_WEIGHT * len_val
-                + TOOL_USE_REWARD_WEIGHT * tu_val
+                + _curriculum_tool_use_weight() * tu_val
                 + TOOL_SUCCESS_REWARD_WEIGHT * ts_val
                 + REASONING_REWARD_WEIGHT * rs_val)
             reward_snapshot = {
@@ -1358,9 +1436,13 @@ def main():
 
     advantage_fn = GRPOAdvantage()
     metrics = CompletionRewardMetric()
+    # NOTE: ``sampling_params`` is rebuilt inside the training loop because
+    # ``_curriculum_temperature()`` schedules a higher temperature during
+    # the cold-start window (Plan A).  The initial instance here is only a
+    # placeholder used before the first ``optim_step`` advance.
     sampling_params = SamplingParams(
         max_tokens=MAX_NEW_TOKENS, num_samples=1, logprobs=1,
-        temperature=1.0, top_p=0.95,
+        temperature=SAMPLING_TEMP_STABLE, top_p=0.95,
         # Stop after a tool_call so we can dispatch before the model keeps rambling.
         stop=['</tool_call>'],
     )
@@ -1372,6 +1454,18 @@ def main():
     for batch in dataloader:
         if optim_step >= MAX_STEPS:
             break
+
+        # ---- Cold-start curriculum: Plans A + B ----
+        # Write ``_CURRENT_STEP`` BEFORE any ``compute_rewards`` call so the
+        # curriculum accessors see the correct phase.  Then rebuild
+        # ``sampling_params`` with the step-dependent temperature.
+        global _CURRENT_STEP
+        _CURRENT_STEP = optim_step
+        sampling_params = SamplingParams(
+            max_tokens=MAX_NEW_TOKENS, num_samples=1, logprobs=1,
+            temperature=_curriculum_temperature(), top_p=0.95,
+            stop=['</tool_call>'],
+        )
 
         metrics.reset()
         expand_prompts: List[Dict[str, Any]] = []
@@ -1451,6 +1545,11 @@ def main():
         # the policy has stopped using tools entirely.
         if n_turns_per_rollout:
             log_dict['avg_turns'] = sum(n_turns_per_rollout) / len(n_turns_per_rollout)
+        # Curriculum visibility: surface the active temperature / tool_use
+        # weight so the SwanLab chart shows exactly where the schedule
+        # transitions and how it lines up against the reward curves.
+        log_dict['curriculum_temperature'] = _curriculum_temperature()
+        log_dict['curriculum_tool_use_weight'] = _curriculum_tool_use_weight()
         swanlab.log(log_dict)
         metrics.reset()
         logger.info(f'[Step {optim_step}/{MAX_STEPS}] {log_dict}')
