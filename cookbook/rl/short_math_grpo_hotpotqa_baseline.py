@@ -103,7 +103,15 @@ GRPO_HOMOGENEOUS_THRESHOLD = float(
 
 # ---- HotpotQA dataset encode knobs ----
 HOTPOTQA_NUM_PROC = int(os.environ.get('HOTPOTQA_NUM_PROC', 16))
-HOTPOTQA_MAX_LENGTH = int(os.environ.get('HOTPOTQA_MAX_LENGTH', 64000))
+# Full-context baseline: prompt must fit inside ``max_model_len`` with room
+# for ``MAX_NEW_TOKENS`` completion.  Set to ``VLLM_MAX_MODEL_LEN -
+# MAX_NEW_TOKENS`` minus a small safety margin; rows whose encoded prompt
+# exceeds this value are dropped by ``truncation_strategy='delete'``.  The
+# tool-augmented variant can afford a much larger value because compression
+# shrinks the prompt at rollout time -- the baseline has no such relief.
+VLLM_MAX_MODEL_LEN = int(os.environ.get('VLLM_MAX_MODEL_LEN', 16384))
+HOTPOTQA_MAX_LENGTH = int(os.environ.get(
+    'HOTPOTQA_MAX_LENGTH', VLLM_MAX_MODEL_LEN - MAX_NEW_TOKENS - 256))
 
 # ========== System Prompt ==========
 # Kept deliberately short and tool-free: the baseline must NOT see any
@@ -280,8 +288,15 @@ class HotpotQAProcessor(Preprocessor):
         sentences = context.get('sentences', []) or []
         lines = []
         for i, (title, sents) in enumerate(zip(titles, sentences), start=1):
-            body = ''.join(sents) if isinstance(sents, list) else str(sents)
-            lines.append(f'[{i}] {title}: {body.strip()}')
+            if isinstance(sents, list):
+                # HotpotQA sentences sometimes lack trailing spaces; joining
+                # with ``''`` produces ``"Cat.Dog."`` which tokenises to longer
+                # garbage sequences.  Strip + space-join keeps one clean space
+                # between sentences and matches the tool-augmented variant.
+                body = ' '.join(s.strip() for s in sents if s and s.strip())
+            else:
+                body = str(sents).strip()
+            lines.append(f'[{i}] {title}: {body}')
         # Blank-line separator between passages.  Not strictly required for
         # the baseline (no chunker to respect paragraph boundaries), but
         # kept aligned with the tool-augmented variant so that encoded
@@ -513,7 +528,7 @@ def main():
         model_id=MODEL_ID,
         engine_args={
             'gpu_memory_utilization': 0.8,
-            'max_model_len': 8192,
+            'max_model_len': VLLM_MAX_MODEL_LEN,
             'max_lora_rank': 32,
             'enable_tower_connector_lora': True,
         },

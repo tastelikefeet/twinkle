@@ -84,6 +84,18 @@ class ExtractCompressed(Tool):
                     f'<block_{idx}>ERROR: index out of range [0, {n_chunks})</block_{idx}>')
                 continue
             chunk = self.original_chunks.chunks[idx]
+            # Guard: reject structural blocks (system, question, tool)
+            # that carry no passage content and waste a tool turn.  Give a
+            # role-specific hint so the model can recover on the next turn
+            # without re-calling the same useless block.
+            structural_kind = self._structural_kind(chunk)
+            if structural_kind:
+                rendered.append(
+                    f'<block_{idx}>This block is a {structural_kind}, not a '
+                    f'content passage.  Skip it and pick a passage block '
+                    f'(higher index numbers are typically the numbered '
+                    f'``[N] Title: ...`` passages).</block_{idx}>')
+                continue
             content = chunk.get('content')
             if not isinstance(content, str):
                 # Non-text chunks (image / video / audio / structural): describe
@@ -116,6 +128,40 @@ class ExtractCompressed(Tool):
         }
 
     # -- Helpers --------------------------------------------------------------
+
+    @staticmethod
+    def _structural_kind(chunk: Dict[str, Any]) -> str:
+        """Return a human label if the chunk is structural, else ``''``.
+
+        Structural chunks carry no passage content and extracting them
+        wastes a tool turn.  The returned label is used verbatim in the
+        error message so the model can distinguish a re-extracted tool
+        response (``'tool response'``) from a prompt / question block
+        (``'system prompt'`` / ``'question header'``) and pick a
+        different block on the retry.
+        """
+        role = chunk.get('role')
+        if role == 'system':
+            return 'system prompt'
+        if role == 'tool':
+            return 'tool response'
+        raw = chunk.get('raw')
+        if isinstance(raw, dict):
+            kind = raw.get('kind')
+            if kind == 'question':
+                return 'question header'
+            if kind in ('tool_call', 'tool_response'):
+                return 'tool payload'
+        content = chunk.get('content', '')
+        if isinstance(content, str) and content.lstrip().startswith('Question:'):
+            return 'question header'
+        return ''
+
+    # Back-compat alias: ``_is_structural`` remains a truthy-or-empty check
+    # for any external callers that relied on the boolean API.
+    @classmethod
+    def _is_structural(cls, chunk: Dict[str, Any]) -> bool:
+        return bool(cls._structural_kind(chunk))
 
     @staticmethod
     def _parse_blocks(value: Any) -> List[int]:
