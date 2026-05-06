@@ -263,7 +263,7 @@ class HotpotQALengthPenalty(Reward):
 
 class HotpotQAAnswerCommitPenalty(Reward):
     _COMPRESSION_TAG_RE = re.compile(
-        r'\(\s*(?:Facts|Related)\s*:[^)]*\)\s*</?block_\d+>?\s*$', re.IGNORECASE)
+        r'\(\s*(?:Facts|Related)\s*:[^)]*\)\s*(?:</?block_\d+>?)?\s*$', re.IGNORECASE)
 
     def __call__(self, trajectories: List[Dict[str, Any]], **kwargs) -> List[float]:
         rewards = []
