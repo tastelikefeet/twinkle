@@ -48,7 +48,7 @@ NUM_GPUS = MODEL_GPUS + SAMPLER_GPUS
 NUM_GENERATIONS = int(os.environ.get('NUM_GENERATIONS', 8))
 MAX_NEW_TOKENS = int(os.environ.get('MAX_NEW_TOKENS', 4096))
 LEARNING_RATE = float(os.environ.get('LR', 1e-5))
-NUM_EPOCHS = int(os.environ.get('NUM_EPOCHS', 5))
+NUM_EPOCHS = int(os.environ.get('NUM_EPOCHS', 10))
 MAX_STEPS = int(os.environ.get('MAX_STEPS', 0))
 BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 8))
 MINI_BATCH_SIZE = int(os.environ.get('MINI_BATCH_SIZE', 8))
@@ -69,6 +69,7 @@ HOTPOTQA_MAX_LENGTH = int(os.environ.get('HOTPOTQA_MAX_LENGTH', 64000))
 F1_REWARD_WEIGHT = float(os.environ.get('F1_REWARD_WEIGHT', 1.5))
 LENGTH_PENALTY_WEIGHT = float(os.environ.get('LENGTH_PENALTY_WEIGHT', 0.3))
 ANSWER_COMMIT_PENALTY_WEIGHT = float(os.environ.get('ANSWER_COMMIT_PENALTY_WEIGHT', 1.0))
+COT_PENALTY_WEIGHT = float(os.environ.get('COT_PENALTY_WEIGHT', 0.5))
 ANSWER_TOO_LONG_CHARS = int(os.environ.get('ANSWER_TOO_LONG_CHARS', 5000))
 
 _ROLLOUT_TRACE_PATH = os.environ.get('ROLLOUT_TRACE_PATH', 'rollout_trace.jsonl')
@@ -101,7 +102,15 @@ SYSTEM_PROMPT = (
     '</function>\n'
     '</tool_call>\n\n'
     'You may call ``extract_compressed`` again in a later turn if the '
-    'first recall did not contain the answer.')
+    'first recall did not contain the answer.\n\n'
+    'REASONING FORMAT: After extracting blocks, you MUST reason step by '
+    'step before answering. Reference the specific blocks you used:\n'
+    'Step 1: From block X, I learn that [fact A].\n'
+    'Step 2: From block Y, I learn that [fact B].\n'
+    'Step 3: Combining these, the answer is ...\n'
+    '\\boxed{answer}\n'
+    'Do NOT skip reasoning — always explain which blocks gave you '
+    'which facts before writing \\boxed{}.')
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tool-call parsing & text sanitization
@@ -278,25 +287,69 @@ class HotpotQAAnswerCommitPenalty(Reward):
         return rewards
 
 
+class HotpotQACoTReward(Reward):
+    """Reward chain-of-thought reasoning for tool-callers.
+
+    Checks if the final assistant response contains multi-step reasoning
+    of the form "Step N: From block X, ..." before the \\boxed{} answer.
+    Only penalizes rollouts that used tools (tool_call_count > 0) but
+    lack structured reasoning — direct answerers are not affected.
+    """
+    _STEP_RE = re.compile(
+        r'(?:step\s*\d|from\s+block[\s_]*\d|block[\s_]*\[\d|block[\s_]*\d+.*?(?:shows?|mentions?|states?|indicates?|tells?))',
+        re.IGNORECASE)
+    _MIN_STEPS = 2  # require at least 2 evidence references
+
+    def __call__(self, trajectories: List[Dict[str, Any]], **kwargs) -> List[float]:
+        rewards = []
+        for t in trajectories:
+            # Only apply to rollouts that made tool calls
+            msgs = t.get('messages', [])
+            has_tool_call = any(
+                m.get('role') == 'assistant' and m.get('tool_calls')
+                for m in msgs)
+            if not has_tool_call:
+                rewards.append(0.0)
+                continue
+
+            final = (_last_assistant_text(t) or '').strip()
+            # Count evidence-referencing steps before \boxed{}
+            boxed_pos = final.rfind('\\boxed{')
+            reasoning = final[:boxed_pos] if boxed_pos > 0 else final
+            n_steps = len(self._STEP_RE.findall(reasoning))
+
+            if n_steps >= self._MIN_STEPS:
+                rewards.append(0.0)  # good: has CoT
+            elif n_steps == 1:
+                rewards.append(-0.3)  # partial: only 1 evidence ref
+            else:
+                rewards.append(-0.5)  # bad: no reasoning at all
+        return rewards
+
+
 _F1_REWARD: Optional[HotpotQAF1Reward] = None
 _LENGTH_PENALTY: Optional[HotpotQALengthPenalty] = None
 _ANSWER_COMMIT_PENALTY: Optional[HotpotQAAnswerCommitPenalty] = None
+_COT_REWARD: Optional[HotpotQACoTReward] = None
 
 
-def compute_rewards(trajectories: List[Dict[str, Any]]) -> Tuple[List[float], List[float], List[float], List[float]]:
-    global _F1_REWARD, _LENGTH_PENALTY, _ANSWER_COMMIT_PENALTY
+def compute_rewards(trajectories: List[Dict[str, Any]]) -> Tuple[List[float], List[float], List[float], List[float], List[float]]:
+    global _F1_REWARD, _LENGTH_PENALTY, _ANSWER_COMMIT_PENALTY, _COT_REWARD
     if _F1_REWARD is None:
         _F1_REWARD = HotpotQAF1Reward()
         _LENGTH_PENALTY = HotpotQALengthPenalty()
         _ANSWER_COMMIT_PENALTY = HotpotQAAnswerCommitPenalty()
+        _COT_REWARD = HotpotQACoTReward()
     f1 = _F1_REWARD(trajectories)
     length_pen = _LENGTH_PENALTY(trajectories)
     answer_commit = _ANSWER_COMMIT_PENALTY(trajectories)
+    cot = _COT_REWARD(trajectories)
     total = [
-        F1_REWARD_WEIGHT * a + LENGTH_PENALTY_WEIGHT * lp + ANSWER_COMMIT_PENALTY_WEIGHT * ac
-        for a, lp, ac in zip(f1, length_pen, answer_commit)
+        F1_REWARD_WEIGHT * a + LENGTH_PENALTY_WEIGHT * lp
+        + ANSWER_COMMIT_PENALTY_WEIGHT * ac + COT_PENALTY_WEIGHT * c
+        for a, lp, ac, c in zip(f1, length_pen, answer_commit, cot)
     ]
-    return total, f1, length_pen, answer_commit
+    return total, f1, length_pen, answer_commit, cot
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -662,13 +715,14 @@ def main():
             all_trajectories.append(r.trajectory)
             n_turns_per_rollout.append(r.turns)
 
-        total_rewards, f1_rewards, length_pen_rewards, answer_commit_rewards = \
+        total_rewards, f1_rewards, length_pen_rewards, answer_commit_rewards, cot_rewards = \
             compute_rewards(all_trajectories)
 
         metrics.accumulate(
             completion_lengths=all_completion_lengths,
             rewards={'total': total_rewards, 'f1': f1_rewards,
-                     'length_pen': length_pen_rewards, 'answer_commit': answer_commit_rewards})
+                     'length_pen': length_pen_rewards, 'answer_commit': answer_commit_rewards,
+                     'cot': cot_rewards})
 
         advantages = advantage_fn(
             total_rewards, num_generations=NUM_GENERATIONS, scale='group').tolist()
