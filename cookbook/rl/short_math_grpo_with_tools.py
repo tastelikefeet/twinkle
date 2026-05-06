@@ -31,11 +31,7 @@ from twinkle_agentic.tools.tool_manager import ToolManager
 
 import swanlab
 
-try:
-    from nltk.stem import PorterStemmer as _PorterStemmer
-except ImportError as _e:
-    raise ImportError('Requires nltk: pip install nltk') from _e
-
+from nltk.stem import PorterStemmer as _PorterStemmer
 logger = get_logger()
 _STEMMER = _PorterStemmer()
 
@@ -88,8 +84,9 @@ SYSTEM_PROMPT = (
     '"yes"/"no". Do not include extra words in the box.\n\n'
     'CONTEXT FORMAT: The provided paragraphs are wrapped as '
     '<block_N>...</block_N>. For long paragraphs, only the first sentence '
-    'is shown, followed by "(Related: keyword1, keyword2, ...)" listing '
-    'additional terms present in the hidden remainder.\n\n'
+    'is shown, followed by "(Facts: entity1 [rel] entity2; ... | Related: '
+    'keyword1, keyword2, ...)" listing key relationships and additional '
+    'terms present in the hidden remainder.\n\n'
     'Use the first sentence plus the Related-list to decide whether a '
     'block probably contains the fact you need. When it does, call the '
     '``extract_compressed`` tool with the relevant block numbers to recall '
@@ -97,7 +94,11 @@ SYSTEM_PROMPT = (
     'answer immediately without calling the tool.\n\n'
     'TOOL CALL FORMAT:\n'
     '<tool_call>\n'
-    '{"name": "extract_compressed", "arguments": {"blocks": [1, 3]}}\n'
+    '<function=extract_compressed>\n'
+    '<parameter=blocks>\n'
+    '[1, 3]\n'
+    '</parameter>\n'
+    '</function>\n'
     '</tool_call>\n\n'
     'You may call ``extract_compressed`` again in a later turn if the '
     'first recall did not contain the answer.')
@@ -105,34 +106,45 @@ SYSTEM_PROMPT = (
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tool-call parsing & text sanitization
 # ═══════════════════════════════════════════════════════════════════════════════
-_TOOL_CALL_RE = re.compile(r'<tool_call>\s*(\{.*?\})\s*(?:</tool_call>|\Z)', re.DOTALL)
-_TOOL_CALL_STRIP_RE = re.compile(r'<tool_call>.*?(?:</tool_call>|\Z)', re.DOTALL)
+# Qwen3.5 native XML format: <tool_call>\n<function=NAME>\n<parameter=K>\nV\n</parameter>\n</function>\n</tool_call>
+_TOOL_CALL_BLOCK_RE = re.compile(r'<tool_call>\s*([\s\S]*?)\s*(?:</tool_call>|\Z)')
+_FUNCTION_RE = re.compile(r'<function=([^>]+)>([\s\S]*?)</function>')
+_PARAMETER_RE = re.compile(r'<parameter=([^>]+)>\s*([\s\S]*?)\s*</parameter>')
+# Legacy JSON format fallback
+_TOOL_CALL_STRIP_RE = re.compile(r'<tool_call>[\s\S]*?(?:</tool_call>|\Z)')
 _BLOCK_TAG_STRIP_RE = re.compile(r'<block_(\d+)>\s*([\s\S]*?)\s*</block_\1>')
 _BOXED_RE = re.compile(r'\\boxed\{([^}]*)\}')
 
 
 def parse_tool_calls(text: str) -> List[Dict[str, Any]]:
-    """Extract <tool_call>{...}</tool_call> blocks from completion."""
+    """Extract tool calls (Qwen3.5 XML format + JSON fallback)."""
     calls: List[Dict[str, Any]] = []
-    for m in _TOOL_CALL_RE.finditer(text):
-        try:
-            data = json.loads(m.group(1))
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(data, dict):
-            continue
-        name = data.get('name') or data.get('tool_name')
-        if not name:
-            continue
-        args = data.get('arguments', {})
-        if isinstance(args, str):
-            try:
-                args = json.loads(args) if args.strip() else {}
-            except json.JSONDecodeError:
-                args = {}
-        elif not isinstance(args, dict):
+    for block_m in _TOOL_CALL_BLOCK_RE.finditer(text):
+        block = block_m.group(1)
+        func_m = _FUNCTION_RE.search(block)
+        if func_m:
             args = {}
-        calls.append({'tool_name': name, 'arguments': args})
+            for pm in _PARAMETER_RE.finditer(func_m.group(2)):
+                try:
+                    args[pm.group(1).strip()] = json.loads(pm.group(2).strip())
+                except (json.JSONDecodeError, ValueError):
+                    args[pm.group(1).strip()] = pm.group(2).strip()
+            calls.append({'tool_name': func_m.group(1).strip(), 'arguments': args})
+        else:
+            try:
+                data = json.loads(block)
+            except json.JSONDecodeError:
+                continue
+            name = data.get('name') or data.get('tool_name', '')
+            if not name:
+                continue
+            args = data.get('arguments', {})
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args) if args.strip() else {}
+                except json.JSONDecodeError:
+                    args = {}
+            calls.append({'tool_name': name, 'arguments': args if isinstance(args, dict) else {}})
     return calls
 
 
@@ -251,7 +263,7 @@ class HotpotQALengthPenalty(Reward):
 
 class HotpotQAAnswerCommitPenalty(Reward):
     _COMPRESSION_TAG_RE = re.compile(
-        r'\(\s*Related\s*:[^)]*\)\s*</?block_\d+>?\s*$', re.IGNORECASE)
+        r'\(\s*(?:Facts|Related)\s*:[^)]*\)\s*</?block_\d+>?\s*$', re.IGNORECASE)
 
     def __call__(self, trajectories: List[Dict[str, Any]], **kwargs) -> List[float]:
         rewards = []
