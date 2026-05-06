@@ -98,12 +98,37 @@ class PassageIndexCondenser(Condenser):
             if key in seen:
                 continue
             seen.add(key)
-            rel = ' '.join(t.text for t in doc[s.end:o.start]
-                           if t.pos_ in ('VERB', 'ADP', 'PART') and not t.is_stop)[:30] or '-'
+            rel = self._extract_relation(doc, s, o)
+            if not rel:
+                continue  # skip triplets with no meaningful relation
             results.append(f'{s.text} [{rel}] {o.text}')
             if len(results) >= self.max_triplets:
                 break
         return results
+
+    @staticmethod
+    def _extract_relation(doc, subj, obj) -> str:
+        """Extract relation between two entities using multiple strategies."""
+        span = doc[subj.end:obj.start]
+        # Strategy 1: verbs + prepositions (core relation words)
+        rel_tokens = [t.text for t in span
+                      if t.pos_ in ('VERB', 'ADP', 'PART') and not t.is_stop]
+        if rel_tokens:
+            return ' '.join(rel_tokens)[:30]
+        # Strategy 2: include nouns/adjectives if no verbs found
+        rel_tokens = [t.text for t in span
+                      if t.pos_ in ('VERB', 'ADP', 'PART', 'NOUN', 'ADJ', 'ADV')
+                      and not t.is_stop and t.text.lower() not in ('the', 'a', 'an')]
+        if rel_tokens:
+            return ' '.join(rel_tokens)[:30]
+        # Strategy 3: find the dependency root verb of the sentence
+        sent = subj.sent if hasattr(subj, 'sent') else None
+        if sent:
+            root = [t for t in sent if t.dep_ == 'ROOT' and t.pos_ == 'VERB']
+            if root:
+                return root[0].text
+        # No relation found — skip this triplet
+        return ''
 
     def _keywords(self, first: str, rest: str) -> List[str]:
         first_low = first.lower()
