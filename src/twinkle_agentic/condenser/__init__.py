@@ -1,2 +1,2 @@
 from .base import Condenser
-from .native import NativeCondenser
+from .native import NativeCondenser, PassageIndexCondenser
