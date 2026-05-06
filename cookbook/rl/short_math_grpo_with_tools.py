@@ -83,7 +83,16 @@ NUM_GPUS = MODEL_GPUS + SAMPLER_GPUS
 NUM_GENERATIONS = int(os.environ.get('NUM_GENERATIONS', 8))
 MAX_NEW_TOKENS = int(os.environ.get('MAX_NEW_TOKENS', 4096))
 LEARNING_RATE = float(os.environ.get('LR', 1e-5))
-MAX_STEPS = int(os.environ.get('MAX_STEPS', 1000))
+# ``NUM_EPOCHS`` is the primary training-horizon knob.  The 340-question
+# HotpotQA whitelist finishes one epoch in ~42 optim steps at
+# BATCH_SIZE=8.  Total steps (used to size the LR cosine schedule) is
+# derived as ``NUM_EPOCHS * steps_per_epoch`` after the dataset is built
+# (see ``total_steps`` in ``main``).  ``MAX_STEPS`` is kept only as an
+# optional hard cap: when unset (``0``) the scheduler horizon matches
+# the actual run length and LR does not stay pinned near peak for the
+# whole run.  Set ``MAX_STEPS>0`` only for smoke tests / short debug runs.
+NUM_EPOCHS = int(os.environ.get('NUM_EPOCHS', 5))
+MAX_STEPS = int(os.environ.get('MAX_STEPS', 0))  # 0 = auto-derive from NUM_EPOCHS
 BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 8))
 MINI_BATCH_SIZE = int(os.environ.get('MINI_BATCH_SIZE', 8))
 MICRO_BATCH_SIZE = int(os.environ.get('MICRO_BATCH_SIZE', 2))
@@ -621,16 +630,87 @@ _LENGTH_PENALTY = None
 _ANSWER_COMMIT_PENALTY = None
 
 
+# Filler modifier / descriptor tokens that should not penalise F1 when
+# they are the only reason a prediction and gold differ.  HotpotQA gold
+# phrases frequently tack on a unit descriptor (``6.213 km long``,
+# ``12 years old``, ``150 m tall``) or a leading year qualifier
+# (``1963 Pan American Games``) that the policy either omits from or
+# adds to its own shorter answer.  Standard SQuAD F1 treats every such
+# extra / missing token as a mismatch, driving a sizeable slice of
+# round-9 rollouts (class B + class D in the epoch audit, ~190 samples
+# = 7 % of the batch) to sub-0.9 f1 despite being factually correct.
+# Only tokens with no independent factual content are listed here;
+# genuine nouns like ``County`` (``Ulster`` vs ``Ulster County``) must
+# NOT be included -- those are class A partial matches where standard
+# partial-credit F1 still correctly pressures the model to complete the
+# entity phrase.
+_FILLER_TOKENS: frozenset = frozenset([
+    'long', 'tall', 'high', 'wide', 'deep', 'heavy', 'old', 'large',
+    'small', 'big', 'short', 'away', 'ago', 'approximately', 'about',
+    'around', 'over', 'under', 'below', 'above', 'total', 'roughly',
+    'nearly', 'almost', 'exactly',
+])
+
+# Porter stemmer -- normalises surface inflections (``plant`` ↔
+# ``plants``, ``reveal`` ↔ ``revealed``, ``city`` ↔ ``cities``) so the
+# F1 reward stops penalising singular/plural and verb-tense noise.
+# NLTK is a HARD requirement: we refuse to fall back to identity
+# stemming because that silently reintroduces the false-negative class
+# the refactor was designed to close.  Install via ``pip install nltk``.
+# Stemming is skipped for short (<4 chars) or non-alpha tokens so that
+# ``US`` / ``170`` / ``km`` survive intact.
+try:
+    from nltk.stem import PorterStemmer as _PorterStemmer
+except ImportError as _e:  # pragma: no cover
+    raise ImportError(
+        'HotpotQAF1Reward requires nltk for Porter stemming. '
+        'Install it with `pip install nltk`.'
+    ) from _e
+_STEMMER = _PorterStemmer()
+
+
+def _stem(tok: str) -> str:
+    return _STEMMER.stem(tok) if len(tok) >= 4 and tok.isalpha() else tok
+
+
 def _normalize_answer(s: str) -> str:
-    """SQuAD-style normalization: lowercase, strip punct/articles/extra ws."""
+    """SQuAD-style normalisation + Porter stemming.
+
+    Pipeline: lowercase → drop punctuation → drop articles (a/an/the) →
+    collapse whitespace → Porter-stem each alpha token of length ≥ 4.
+    The stemmer step closes the ``plant`` / ``plants`` and ``revealed``
+    / ``reveals`` false-negative classes observed in the epoch audit
+    without inflating single-char / numeric tokens.
+    """
     s = (s or '').lower()
     s = ''.join(ch for ch in s if ch not in set(string.punctuation))
     s = re.sub(r'\b(a|an|the)\b', ' ', s)
-    return ' '.join(s.split())
+    return ' '.join(_stem(t) for t in s.split())
 
 
 def _f1_score(prediction: str, gold: str) -> Tuple[float, float]:
-    """Word-level F1 and EM between normalized prediction and gold."""
+    """Word-level F1 and EM with two HotpotQA-motivated short-circuits.
+
+    Standard SQuAD-style F1 is computed first; on top of that two
+    conservative short-circuits flip the reward to ``1.0`` for
+    factually-equivalent phrasings that would otherwise be penalised:
+
+    * **Over-answer (``gold ⊂ pred``)** — the prediction contains every
+      gold token plus extras that are either numeric (year qualifier)
+      or in :data:`_FILLER_TOKENS`.  Example: gold ``Pan American
+      Games``, pred ``1963 Pan American Games``.  Without this the
+      metric actively discourages the model from providing precise
+      qualifiers.
+    * **Under-answer with filler tail (``pred ⊂ gold``)** — every
+      missing gold token is in :data:`_FILLER_TOKENS`.  Example: gold
+      ``6.213 km long``, pred ``6.213 km``.  The content nouns and
+      numerics are fully covered; only a descriptor tail is missing.
+
+    Both short-circuits are token-set based to avoid duplicate-token
+    inflation and deliberately refuse to match when any content noun
+    is missing, so class A partials (``Ulster`` vs ``Ulster County``)
+    keep their 0.67 gradient and still incentivise the full entity.
+    """
     pred_tokens = _normalize_answer(prediction).split()
     gold_tokens = _normalize_answer(gold).split()
     if not pred_tokens or not gold_tokens:
@@ -643,7 +723,21 @@ def _f1_score(prediction: str, gold: str) -> Tuple[float, float]:
         return 0.0, em
     p = num_same / len(pred_tokens)
     r = num_same / len(gold_tokens)
-    return 2 * p * r / (p + r), em
+    f1 = 2 * p * r / (p + r)
+
+    pred_set = set(pred_tokens)
+    gold_set = set(gold_tokens)
+    # Over-answer: gold ⊆ pred, extras are year / filler only.
+    if gold_set < pred_set:
+        extras = pred_set - gold_set
+        if all(t.isdigit() or t in _FILLER_TOKENS for t in extras):
+            return 1.0, em
+    # Under-answer with filler tail: pred ⊆ gold, missing all filler.
+    if pred_set < gold_set:
+        missing = gold_set - pred_set
+        if all(t in _FILLER_TOKENS for t in missing):
+            return 1.0, em
+    return f1, em
 
 
 class HotpotQAF1Reward(Reward):
@@ -759,7 +853,11 @@ class HotpotQAProcessor(Preprocessor):
 
     def __call__(self, rows: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
         rows = self.map_col_to_row(rows)
+        # ``preprocess`` returns ``None`` for rows that fail the hard-level
+        # filter (see :meth:`preprocess`).  Drop them before ``map_row_to_col``
+        # so the column-major conversion never sees a ``None`` entry.
         rows = [self.preprocess(row) for row in rows]
+        rows = [r for r in rows if r is not None]
         rows = self.map_row_to_col(rows)
         return rows
 
@@ -790,7 +888,29 @@ class HotpotQAProcessor(Preprocessor):
         # "mega-paragraph".
         return '\n\n'.join(lines)
 
-    def preprocess(self, row: Dict[str, Any]) -> Trajectory:
+    def preprocess(self, row: Dict[str, Any]) -> Optional[Trajectory]:
+        # ── Hard-only filter ──────────────────────────────────────────
+        # HotpotQA ``level`` takes values ``easy`` / ``medium`` / ``hard``.
+        # ``hard`` rows are the ones whose answer actually requires 2-hop
+        # reasoning across ≥2 supporting passages; ``easy`` / ``medium``
+        # frequently collapse to a single-passage lookup or yes/no, which
+        # (a) lets the policy win F1 without ever using the compression
+        # index, defeating the A/B contrast we care about, and (b)
+        # over-represents yes/no answers that the "short-and-lucky"
+        # collapse mode exploits.  Returning ``None`` here signals
+        # :meth:`__call__` to drop the row entirely.
+        #
+        # An optional id whitelist (``WRONG_IDS_FILE``) is applied *before*
+        # :meth:`__call__` reaches us -- see :func:`create_hotpotqa_dataset`,
+        # which calls ``dataset.filter`` at the HF columnar layer so the
+        # filtered dataset is dense (no empty batches) by the time ``map``
+        # runs.  Filtering sparsely inside ``preprocess`` would produce
+        # batches whose output-column dict is ``{}`` after all rows are
+        # dropped, and pyarrow rejects that with ``Schema and number of
+        # arrays unequal``.
+        if (row.get('level') or '').strip().lower() != 'hard':
+            return None
+
         question = row['question']
         answer = row.get('answer', '') or ''
         context_block = self._format_context(row.get('context', {}) or {})
@@ -823,10 +943,57 @@ def create_hotpotqa_dataset() -> Dataset:
     dataset = Dataset()
     dataset.add_dataset(DatasetMeta(
         'hf://hotpotqa/hotpot_qa', subset_name='fullwiki', split='train'))
+
+    # ── Optional id whitelist ────────────────────────────────────────
+    # When ``WRONG_IDS_FILE`` points at a file (typically produced by
+    # :mod:`cookbook.rl.extract_wrong_ids`), restrict training to exactly
+    # those ids.  We filter at the HF columnar layer via
+    # ``datasets.Dataset.filter`` -- this keeps the underlying Arrow
+    # table dense (schema + row count stay in lock-step), so the
+    # downstream ``dataset.map`` never sees an empty batch.  Doing the
+    # same filtering inside :meth:`HotpotQAProcessor.preprocess` (which
+    # returns ``None`` for filtered rows) would make most ``map`` batches
+    # collapse to zero rows, and pyarrow would raise
+    # ``Schema and number of arrays unequal`` once the first non-empty
+    # batch has fixed the output schema.
+    _wrong_ids_path = os.environ.get('WRONG_IDS_FILE', '').strip()
+    if _wrong_ids_path:
+        try:
+            with open(_wrong_ids_path, 'r', encoding='utf-8') as fh:
+                _ids = frozenset(ln.strip() for ln in fh if ln.strip())
+        except OSError as exc:
+            # Fail loud: silently training on 90k rows because of a typo
+            # in the env-var path wastes hours.
+            raise RuntimeError(
+                f'WRONG_IDS_FILE={_wrong_ids_path!r} could not be read: '
+                f'{exc}') from exc
+        if _ids:
+            _key = next(iter(dataset.datasets.keys()))
+            _before = len(dataset.datasets[_key])
+            dataset.datasets[_key] = dataset.datasets[_key].filter(
+                lambda row: row.get('id') in _ids)
+            dataset.dataset = dataset.datasets[_key]
+            print(f'[WRONG_IDS_FILE] {_wrong_ids_path}: '
+                  f'{_before} -> {len(dataset.dataset)} rows '
+                  f'(whitelist size={len(_ids)})')
+
     dataset.set_template(
         'Qwen3_5Template', model_id=MODEL_ID, max_length=HOTPOTQA_MAX_LENGTH,
         truncation_strategy='delete', enable_thinking=False)
-    dataset.map(HotpotQAProcessor(system=SYSTEM_PROMPT))
+    # ``HotpotQAProcessor.preprocess`` filters to ``level == 'hard'`` only,
+    # so the batch size returned by ``__call__`` is typically smaller than
+    # the input batch (batched=True is enforced upstream).  HF
+    # ``datasets.map`` pairs the filtered output columns against the
+    # *untouched* original columns by index, which pyarrow rejects with
+    # ``Column ... expected length N but got length K`` as soon as the
+    # sizes disagree.  ``remove_columns`` drops the original HotpotQA
+    # schema before stitching so the filtered size becomes authoritative.
+    _HOTPOTQA_COLS = ['id', 'question', 'answer', 'type', 'level',
+                      'supporting_facts', 'context']
+    dataset.map(
+        HotpotQAProcessor(system=SYSTEM_PROMPT),
+        remove_columns=_HOTPOTQA_COLS,
+    )
     dataset.encode(
         add_generation_prompt=True,
         load_from_cache_file=True,
@@ -1006,97 +1173,115 @@ def _dump_random_rollout_trace(
     displays: List[Dict[str, Any]],
     responses: List[Any],
 ) -> None:
-    """Append ONE randomly-picked active rollout's post-turn state to JSONL.
+    """Append EVERY active rollout's post-turn state to the JSONL trace.
 
-    Fields captured:
-      * ``compressed``    -- sampler-ready display (what the model saw
-        this turn, AFTER Plan-B compression).
-      * ``full_chunks``   -- pre-compression chunk list, so you can diff
-        what was dropped.
-      * ``tool_call_count`` / ``done`` / ``rewards`` -- cumulative state.
-        Non-terminal turns naturally have ``f1=0`` / ``format=0``; the
-        delta turn->turn+1 is the interesting signal, not absolute value.
-      * ``last_decoded``  -- raw decoded text this turn (before cleaning).
-      * ``final_answer``  -- ``\\boxed{...}`` extraction if rollout
-        terminated on this turn, else ``''``.
+    Earlier revisions sampled one random active rollout per turn; that was
+    cheap but made causal claims about tool use impossible (each trace
+    record sat on a *different* prompt, so tcc>0 vs tcc=0 comparisons
+    conflated treatment with question difficulty).  Dumping the full
+    group (``NUM_GENERATIONS`` rollouts per prompt) restores the
+    within-group contrast: all rollouts in a group share the same
+    question, so post-hoc filtering by ``tool_call_count`` isolates the
+    tool-use effect from question-level confounds.
+
+    Per-record fields match the previous single-rollout schema plus a
+    ``group_size`` field giving the active-set size at dump time, which
+    lets post-mortem code re-group records by ``(turn, group_size)``
+    without re-deriving it.  ``picked_idx`` is kept (pointing at the
+    rollout's index inside ``active``) so individual records can still be
+    correlated with the display/response slices they came from.
 
     Must never crash training: the whole body is wrapped in best-effort
-    exception handling.
+    exception handling per record, so one bad rollout does not poison the
+    rest of the group.
     """
     if not _ROLLOUT_TRACE_PATH or not active:
         return
     try:
-        idx = random.randrange(len(active))
-        r = active[idx]
-        resp = responses[idx] if idx < len(responses) else None
+        # One file handle, one sweep -- minimises fsync overhead even on
+        # the largest groups (BATCH_SIZE * NUM_GENERATIONS = 64 records).
+        records: List[str] = []
+        global _F1_REWARD, _LENGTH_PENALTY, _ANSWER_COMMIT_PENALTY
+        if _F1_REWARD is None:
+            _F1_REWARD = HotpotQAF1Reward()
+            _LENGTH_PENALTY = HotpotQALengthPenalty()
+            _ANSWER_COMMIT_PENALTY = HotpotQAAnswerCommitPenalty()
+        group_size = len(active)
+        for idx, r in enumerate(active):
+            try:
+                resp = responses[idx] if idx < len(responses) else None
 
-        tool_call_count = sum(
-            len(m.get('tool_calls') or [])
-            for m in r.trajectory.get('messages', [])
-            if m.get('role') == 'assistant')
+                tool_call_count = sum(
+                    len(m.get('tool_calls') or [])
+                    for m in r.trajectory.get('messages', [])
+                    if m.get('role') == 'assistant')
 
-        full_chunks_preview = [
-            {'role': c.get('role'),
-             'type': c.get('type'),
-             'content': (c.get('content') if isinstance(c.get('content'), str)
-                         else repr(c.get('content'))[:500])}
-            for c in r.frozen.full_chunks
-        ]
+                full_chunks_preview = [
+                    {'role': c.get('role'),
+                     'type': c.get('type'),
+                     'content': (c.get('content') if isinstance(c.get('content'), str)
+                                 else repr(c.get('content'))[:500])}
+                    for c in r.frozen.full_chunks
+                ]
 
-        last_decoded = ''
-        if resp is not None and getattr(resp, 'sequences', None):
-            last_decoded = resp.sequences[0].decoded or ''
+                last_decoded = ''
+                if resp is not None and getattr(resp, 'sequences', None):
+                    last_decoded = resp.sequences[0].decoded or ''
 
-        final_answer = ''
-        if r.done:
-            final_answer = _extract_final_answer(_last_assistant_text(r.trajectory))
+                final_answer = ''
+                if r.done:
+                    final_answer = _extract_final_answer(
+                        _last_assistant_text(r.trajectory))
 
-        # Per-component reward snapshot for the picked rollout.  Computed
-        # mid-trajectory (rather than waiting for the post-batch
-        # ``compute_rewards``) so we can line up trajectory state against
-        # reward collected so far.  Non-terminal turns will typically
-        # have f1=0 (no ``\boxed{}`` yet) -- that's intentional.
-        reward_snapshot: Dict[str, Any] = {}
-        try:
-            global _F1_REWARD, _LENGTH_PENALTY, _ANSWER_COMMIT_PENALTY
-            if _F1_REWARD is None:
-                _F1_REWARD = HotpotQAF1Reward()
-                _LENGTH_PENALTY = HotpotQALengthPenalty()
-                _ANSWER_COMMIT_PENALTY = HotpotQAAnswerCommitPenalty()
-            traj_list = [r.trajectory]
-            f1_val = _F1_REWARD(traj_list)[0]
-            len_val = _LENGTH_PENALTY(traj_list)[0]
-            ac_val = _ANSWER_COMMIT_PENALTY(traj_list)[0]
-            total_val = (
-                F1_REWARD_WEIGHT * f1_val
-                + LENGTH_PENALTY_WEIGHT * len_val
-                + ANSWER_COMMIT_PENALTY_WEIGHT * ac_val)
-            reward_snapshot = {
-                'f1': float(f1_val),
-                'length_pen': float(len_val),
-                'answer_commit': float(ac_val),
-                'total': float(total_val),
-            }
-        except Exception as e:  # pragma: no cover -- tracing must never crash
-            logger.warning('rollout trace reward snapshot failed: %s', e)
-            reward_snapshot = {'error': repr(e)}
+                # Per-component reward snapshot.  Non-terminal turns will
+                # typically have f1=0 (no ``\boxed{}`` yet) -- that's
+                # intentional: the signal of interest is the DELTA from
+                # pre-answer to terminal turn, not the absolute value.
+                reward_snapshot: Dict[str, Any]
+                try:
+                    traj_list = [r.trajectory]
+                    f1_val = _F1_REWARD(traj_list)[0]
+                    len_val = _LENGTH_PENALTY(traj_list)[0]
+                    ac_val = _ANSWER_COMMIT_PENALTY(traj_list)[0]
+                    total_val = (
+                        F1_REWARD_WEIGHT * f1_val
+                        + LENGTH_PENALTY_WEIGHT * len_val
+                        + ANSWER_COMMIT_PENALTY_WEIGHT * ac_val)
+                    reward_snapshot = {
+                        'f1': float(f1_val),
+                        'length_pen': float(len_val),
+                        'answer_commit': float(ac_val),
+                        'total': float(total_val),
+                    }
+                except Exception as e:  # pragma: no cover -- tracing must never crash
+                    logger.warning(
+                        'rollout trace reward snapshot failed: %s', e)
+                    reward_snapshot = {'error': repr(e)}
 
-        record = {
-            'ts': time.time(),
-            'turn': turn,
-            'active_size': len(active),
-            'picked_idx': idx,
-            'rollout_id': id(r),
-            'tool_call_count': tool_call_count,
-            'done': bool(r.done),
-            'rewards': reward_snapshot,
-            'compressed': displays[idx] if idx < len(displays) else None,
-            'full_chunks': full_chunks_preview,
-            'last_decoded': last_decoded,
-            'final_answer': final_answer,
-        }
-        with open(_ROLLOUT_TRACE_PATH, 'a', encoding='utf-8') as f:
-            f.write(json.dumps(record, ensure_ascii=False, default=str) + '\n')
+                record = {
+                    'ts': time.time(),
+                    'turn': turn,
+                    'active_size': group_size,
+                    'group_size': group_size,
+                    'picked_idx': idx,
+                    'rollout_id': id(r),
+                    'tool_call_count': tool_call_count,
+                    'done': bool(r.done),
+                    'rewards': reward_snapshot,
+                    'compressed': displays[idx] if idx < len(displays) else None,
+                    'full_chunks': full_chunks_preview,
+                    'last_decoded': last_decoded,
+                    'final_answer': final_answer,
+                }
+                records.append(
+                    json.dumps(record, ensure_ascii=False, default=str))
+            except Exception as e:  # pragma: no cover -- per-record safety net
+                logger.warning(
+                    'rollout trace record build failed (idx=%d): %s', idx, e)
+
+        if records:
+            with open(_ROLLOUT_TRACE_PATH, 'a', encoding='utf-8') as f:
+                f.write('\n'.join(records) + '\n')
     except Exception as e:  # pragma: no cover -- tracing must never crash
         logger.warning('rollout trace dump failed: %s', e)
 
@@ -1223,6 +1408,48 @@ def main():
     _prebuilt_dataset = create_hotpotqa_dataset()
     logger.info('Dataset ready: %d rows', len(_prebuilt_dataset))
 
+    # Derive the true training horizon from the dataset size and epoch budget.
+    # ``DataLoader`` drops the tail batch (``min_batch_size == GLOBAL_BATCH_SIZE``)
+    # so ``batches_per_epoch = len(dataset) // GLOBAL_BATCH_SIZE``.
+    #
+    # IMPORTANT: the main loop below performs MULTIPLE optimizer steps per
+    # data batch.  Each batch expands into ``BATCH_SIZE * NUM_GENERATIONS``
+    # rollouts, then the inner mini-batch loop slices those rollouts into
+    # chunks of ``MINI_BATCH_SIZE`` and fires ``clip_grad_and_step`` +
+    # ``optim_step += 1`` on EACH chunk.  So the real conversion is:
+    #
+    #     optim_steps_per_batch = BATCH_SIZE * NUM_GENERATIONS // MINI_BATCH_SIZE
+    #     optim_steps_per_epoch = batches_per_epoch * optim_steps_per_batch
+    #
+    # Previous revisions set ``total_steps = NUM_EPOCHS * batches_per_epoch``,
+    # which silently compressed the run by ``optim_steps_per_batch`` (8x under
+    # default envs: NUM_EPOCHS=5 actually produced only ~0.63 epoch of data
+    # coverage before the ``optim_step >= total_steps`` break fired).  The
+    # corrected formula multiplies by ``optim_steps_per_batch`` so ``NUM_EPOCHS``
+    # matches what the user requested, and the LR cosine schedule (sized
+    # against ``total_steps``) decays over the full run instead of stopping
+    # early while LR is still near peak.
+    _global_batch_size = BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS
+    batches_per_epoch = max(1, len(_prebuilt_dataset) // _global_batch_size)
+    optim_steps_per_batch = max(
+        1, (BATCH_SIZE * NUM_GENERATIONS + MINI_BATCH_SIZE - 1) // MINI_BATCH_SIZE)
+    steps_per_epoch = batches_per_epoch * optim_steps_per_batch
+    derived_total_steps = NUM_EPOCHS * steps_per_epoch
+    if MAX_STEPS > 0:
+        total_steps = min(MAX_STEPS, derived_total_steps)
+    else:
+        total_steps = derived_total_steps
+    logger.info(
+        'Training horizon: dataset=%d, global_batch=%d, batches_per_epoch=%d, '
+        'optim_steps_per_batch=%d, optim_steps_per_epoch=%d, num_epochs=%d, '
+        'derived_total_steps=%d, max_steps_cap=%s, effective_total_steps=%d',
+        len(_prebuilt_dataset), _global_batch_size, batches_per_epoch,
+        optim_steps_per_batch, steps_per_epoch,
+        NUM_EPOCHS, derived_total_steps,
+        MAX_STEPS if MAX_STEPS > 0 else 'auto',
+        total_steps,
+    )
+
     lora_config = LoraConfig(
         target_modules='all-linear',
         r=LORA_RANK,
@@ -1249,10 +1476,10 @@ def main():
     model.add_adapter_to_model(ADAPTER_NAME, lora_config, gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS)
     if USE_MEGATRON:
         model.set_optimizer('default', lr=LEARNING_RATE)
-        model.set_lr_scheduler('default', lr_decay_steps=MAX_STEPS, max_lr=LEARNING_RATE)
+        model.set_lr_scheduler('default', lr_decay_steps=total_steps, max_lr=LEARNING_RATE)
     else:
         model.set_optimizer('AdamW', lr=LEARNING_RATE)
-        model.set_lr_scheduler('CosineAnnealingLR', T_max=MAX_STEPS, eta_min=0)
+        model.set_lr_scheduler('CosineAnnealingLR', T_max=total_steps, eta_min=0)
 
     model.set_loss('GRPOLoss', epsilon=0.2)
     model.set_processor(InputProcessor, padding_free=True)
@@ -1304,8 +1531,21 @@ def main():
     logger.info('Starting HotpotQA GRPO training (agentic + context compression)')
     logger.info(get_device_placement())
 
-    for batch in dataloader:
-        if optim_step >= MAX_STEPS:
+    # Re-enter the DataLoader up to ``NUM_EPOCHS`` times so the 340-item
+    # whitelist is cycled.  The inner iterator exhausts after one pass;
+    # without this wrapper, training would stop after a single epoch.
+    # The break on ``optim_step >= total_steps`` caps the run so the LR
+    # schedule (sized against ``total_steps``) and the epoch counter stay
+    # consistent.
+    def _epoch_cycle(dl, n_epochs):
+        for ep in range(1, n_epochs + 1):
+            logger.info(f'=== Epoch {ep}/{n_epochs} '
+                        f'(optim_step={optim_step}/{total_steps}) ===')
+            for batch in dl:
+                yield batch
+
+    for batch in _epoch_cycle(dataloader, NUM_EPOCHS):
+        if optim_step >= total_steps:
             break
 
         metrics.reset()
@@ -1370,7 +1610,7 @@ def main():
             model.clip_grad_and_step()
             optim_step += 1
 
-            if optim_step >= MAX_STEPS:
+            if optim_step >= total_steps:
                 break
             if optim_step % SAVE_STEPS == 0:
                 model.save(f'hotpotqa-grpo-tools-checkpoint-{optim_step}')
@@ -1426,7 +1666,7 @@ def main():
             log_dict['no_boxed_rate'] = n_no_boxed / len(all_trajectories)
         swanlab.log(log_dict)
         metrics.reset()
-        logger.info(f'[Step {optim_step}/{MAX_STEPS}] {log_dict}')
+        logger.info(f'[Step {optim_step}/{total_steps}] {log_dict}')
 
     logger.info(f'Training completed. optim_steps={optim_step}')
     model.save('hotpotqa-grpo-tools-final')

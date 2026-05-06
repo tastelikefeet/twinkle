@@ -47,9 +47,6 @@ from twinkle.reward.base import Reward
 from twinkle.sampler import vLLMSampler
 
 import swanlab
-swanlab.init(
-    project='twinkle',
-)
 
 logger = get_logger()
 
@@ -95,6 +92,21 @@ FORMAT_MAX_CHARS = int(os.environ.get('FORMAT_MAX_CHARS', 5000))
 # advantage cannot reward "short-and-wrong" over "long-and-wrong".  Set
 # to 0.0 to disable (legacy behaviour).
 LENGTH_PEN_F1_GATE = float(os.environ.get('LENGTH_PEN_F1_GATE', 0.3))
+# Round-9 (baseline-only) fix: counter the GRPO collapse-to-minimum-length
+# pathology observed in the first baseline run (median completion length
+# decayed from 145 -> 27 chars, i.e. pure ``\boxed{X}<|im_end|>``).  The
+# F1-only reward cannot distinguish "reasoned and answered" from "guessed
+# and lucky", so GRPO's within-group advantage ranking rewards the shortest
+# rollout that happens to be correct.
+#
+# Fix: add an UNGATED negative reward for over-short completions, forming
+# a length corridor ``[MIN_COMPLETION_CHARS, FORMAT_MAX_CHARS]`` together
+# with ``length_pen``.  Ungated on purpose -- "short-and-correct" must
+# still be discouraged, otherwise the collapse path stays open.  A 200-char
+# floor is ~40 tokens, enough to fit a one-sentence justification plus
+# ``\boxed{}``; tune upward if the model still truncates reasoning.
+MIN_COMPLETION_CHARS = int(os.environ.get('MIN_COMPLETION_CHARS', 200))
+SHORT_PENALTY_WEIGHT = float(os.environ.get('SHORT_PENALTY_WEIGHT', 0.4))
 # GRPO homogeneous-group filter: mask samples whose per-sample max
 # |advantage| is below this threshold.  Prevents KL drift and numerical-
 # noise-level pseudo-advantages on zero-variance groups.
@@ -181,6 +193,7 @@ def _last_assistant_text(traj: Dict[str, Any]) -> str:
 _F1_REWARD = None
 _FORMAT_REWARD = None
 _LENGTH_PENALTY = None
+_SHORT_PENALTY = None
 
 
 def _normalize_answer(s: str) -> str:
@@ -258,6 +271,30 @@ class HotpotQALengthPenalty(Reward):
             text = _last_assistant_text(t) or ''
             overflow = max(0, len(text) - FORMAT_MAX_CHARS)
             rewards.append(-min(1.0, overflow / budget))
+        return rewards
+
+
+class HotpotQAShortPenalty(Reward):
+    """Negative reward for over-short completions (collapse guard).
+
+    Mirror of :class:`HotpotQALengthPenalty` on the lower bound: returns 0
+    if the final assistant message is at least :data:`MIN_COMPLETION_CHARS`
+    long, else a linearly growing penalty that reaches -1 when the message
+    is empty.  UNGATED by F1 on purpose -- the pathological collapse mode
+    is "short-and-lucky" (F1=1 by accident with ``\\boxed{X}<|im_end|>``),
+    so gating on F1 would leave the collapse path open.  The combination
+    with :class:`HotpotQALengthPenalty` forms a length corridor in which
+    GRPO's within-group advantage gradient is flat, preventing both
+    "collapse to minimum" and "ramble to max_tokens" failure modes.
+    """
+
+    def __call__(self, trajectories: List[Dict[str, Any]], **kwargs) -> List[float]:
+        floor = max(1, MIN_COMPLETION_CHARS)
+        rewards = []
+        for t in trajectories:
+            text = _last_assistant_text(t) or ''
+            deficit = max(0, floor - len(text))
+            rewards.append(-min(1.0, deficit / floor))
         return rewards
 
 
@@ -345,20 +382,25 @@ def create_hotpotqa_dataset() -> Dataset:
 
 def compute_rewards(
     trajectories: List[Dict[str, Any]],
-) -> Tuple[List[float], List[float], List[float], List[float]]:
-    """Weighted sum of F1 + format (diagnostic) + length_pen.
+) -> Tuple[List[float], List[float], List[float], List[float], List[float]]:
+    """Weighted sum of F1 + format (diagnostic) + length_pen + short_pen.
 
-    Return tuple: ``(total, format, f1, length_pen)``.  No extract /
+    Return tuple: ``(total, format, f1, length_pen, short_pen)``.  No extract /
     tool_use / tool_success vectors -- the baseline has no tool pipeline.
+    ``short_pen`` was added in Round-9 to break the collapse-to-minimum-length
+    pathology; it is a negative reward on completions shorter than
+    :data:`MIN_COMPLETION_CHARS` and is UNGATED by F1.
     """
-    global _F1_REWARD, _FORMAT_REWARD, _LENGTH_PENALTY
+    global _F1_REWARD, _FORMAT_REWARD, _LENGTH_PENALTY, _SHORT_PENALTY
     if _F1_REWARD is None:
         _F1_REWARD = HotpotQAF1Reward()
         _FORMAT_REWARD = HotpotQAFormatReward()
         _LENGTH_PENALTY = HotpotQALengthPenalty()
+        _SHORT_PENALTY = HotpotQAShortPenalty()
     accuracy = _F1_REWARD(trajectories)
     fmt = _FORMAT_REWARD(trajectories)
     length_pen_raw = _LENGTH_PENALTY(trajectories)
+    short_pen = _SHORT_PENALTY(trajectories)
 
     # Round-5 fix: F1-gated length_pen (see tool-augmented variant for the
     # full post-mortem).  Long-and-wrong rollouts no longer attract a
@@ -376,9 +418,10 @@ def compute_rewards(
         F1_REWARD_WEIGHT * a
         + FORMAT_REWARD_WEIGHT * f
         + LENGTH_PENALTY_WEIGHT * lp
-        for a, f, lp in zip(accuracy, fmt, length_pen)
+        + SHORT_PENALTY_WEIGHT * sp
+        for a, f, lp, sp in zip(accuracy, fmt, length_pen, short_pen)
     ]
-    return total, fmt, accuracy, length_pen
+    return total, fmt, accuracy, length_pen, short_pen
 
 
 # ========== Rollout trace dump ==========
@@ -409,23 +452,27 @@ def _dump_random_rollout_trace(
 
     reward_snapshot: Dict[str, float] = {}
     try:
-        global _F1_REWARD, _FORMAT_REWARD, _LENGTH_PENALTY
+        global _F1_REWARD, _FORMAT_REWARD, _LENGTH_PENALTY, _SHORT_PENALTY
         if _F1_REWARD is None:
             _F1_REWARD = HotpotQAF1Reward()
             _FORMAT_REWARD = HotpotQAFormatReward()
             _LENGTH_PENALTY = HotpotQALengthPenalty()
+            _SHORT_PENALTY = HotpotQAShortPenalty()
         traj_list = [traj]
         f1_val = _F1_REWARD(traj_list)[0]
         fmt_val = _FORMAT_REWARD(traj_list)[0]
         len_val = _LENGTH_PENALTY(traj_list)[0]
+        short_val = _SHORT_PENALTY(traj_list)[0]
         total_val = (
             F1_REWARD_WEIGHT * f1_val
             + FORMAT_REWARD_WEIGHT * fmt_val
-            + LENGTH_PENALTY_WEIGHT * len_val)
+            + LENGTH_PENALTY_WEIGHT * len_val
+            + SHORT_PENALTY_WEIGHT * short_val)
         reward_snapshot = {
             'f1': float(f1_val),
             'format': float(fmt_val),
             'length_pen': float(len_val),
+            'short_pen': float(short_val),
             'total': float(total_val),
         }
     except Exception as e:  # pragma: no cover -- tracing must never crash training
@@ -483,6 +530,15 @@ def run_single_turn_rollouts(
 
 # ========== Main ==========
 def main():
+    # Initialise SwanLab INSIDE main() rather than at module top level,
+    # so only the driver process creates a run.  With Ray-based
+    # ``twinkle.initialize``, every worker subprocess re-imports this
+    # module on spawn; a top-level ``swanlab.init`` would therefore fire
+    # once per worker (driver + NUM_GPUS workers = 1 + 8 empty runs),
+    # spamming the cloud project with blank runs that never receive any
+    # ``metrics.accumulate`` calls (those only happen on the driver).
+    swanlab.init(project='twinkle')
+
     device_groups = [
         DeviceGroup(name='model', ranks=list(range(MODEL_GPUS)), device_type='GPU'),
         DeviceGroup(name='sampler', ranks=list(range(MODEL_GPUS, NUM_GPUS)), device_type='GPU'),
@@ -587,7 +643,7 @@ def main():
             all_old_logps.append([logprob[0][1] for logprob in (seq.logprobs or [])])
             all_completion_lengths.append(len(seq.tokens))
 
-        total_rewards, brevity_rewards, accuracy_rewards, length_penalties = (
+        total_rewards, brevity_rewards, accuracy_rewards, length_penalties, short_penalties = (
             compute_rewards(all_trajectories))
 
         metrics.accumulate(
@@ -597,6 +653,7 @@ def main():
                 'format': brevity_rewards,
                 'f1': accuracy_rewards,
                 'length_pen': length_penalties,
+                'short_pen': short_penalties,
             },
         )
 

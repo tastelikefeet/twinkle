@@ -15,7 +15,10 @@
 
 set -u  # catch unset vars; do NOT ``set -e`` -- we want second run even if first fails
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve the script's directory WITHOUT relying on ``${BASH_SOURCE[0]}``.
+# ``BASH_SOURCE`` is a bash-only array; Ubuntu's ``sh`` is ``dash`` and
+# reports "Bad substitution" on that token.  ``$0`` works under both.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/logs}"
