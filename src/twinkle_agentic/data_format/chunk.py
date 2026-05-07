@@ -111,7 +111,17 @@ class Chunks:
         bound: List[Chunk] = []
 
         # Route trajectory-level media aside; wrap text content with block markers.
-        for idx, c in enumerate(self.chunks):
+        # Block numbers are a **1-based sequential counter over wrapped chunks
+        # only** (i.e. condensed text chunks, role != 'tool'). This gives the
+        # model a compact, predictable index space (1, 2, 3, ...) that is
+        # independent of how many non-wrapped chunks (system, question,
+        # short-text, tool responses) appear in between. The mapping from
+        # displayed number to the 0-based position in ``self.chunks`` is
+        # what :class:`~twinkle_agentic.tools.extract.ExtractCompressed`
+        # needs to recall the original passage -- use
+        # :meth:`displayed_block_mapping` to build that lookup.
+        wrap_counter = 0
+        for c in self.chunks:
             if c.get('type') in _MULTIMODAL_TYPES and not isinstance(c.get('raw'), dict):
                 media[c['type']].append(c.get('content'))
                 continue
@@ -126,18 +136,15 @@ class Chunks:
                 # condensation: a tool message typically IS the response
                 # produced by ``ExtractCompressed`` and already carries its
                 # own ``<block_N>...</block_N>`` markers for the passages
-                # it recalled.  Adding an outer ``<block_K>`` around that
-                # text would (a) nest block tags (malformed markup) and
-                # (b) let the model call ``extract_compressed(K)`` on a
-                # tool response that has no corresponding entry in
-                # ``full_chunks`` -- both are observed failure modes.
+                # it recalled.
                 raw = c.get('raw')
                 is_condensed = isinstance(raw, dict) and raw.get('condensed')
                 content = c.get('content')
                 if (is_condensed and isinstance(content, str) and content
                         and c.get('role') != 'tool'):
-                    prefix = block_wrapper[0].format(n=idx)
-                    suffix = block_wrapper[1].format(n=idx)
+                    wrap_counter += 1
+                    prefix = block_wrapper[0].format(n=wrap_counter)
+                    suffix = block_wrapper[1].format(n=wrap_counter)
                     c = {**c, 'content': f'{prefix}{content}{suffix}'}
             bound.append(c)
 
@@ -152,6 +159,38 @@ class Chunks:
             if media[singular]:
                 trajectory[plural] = media[singular]
         return trajectory
+
+    def displayed_block_mapping(self) -> Dict[int, int]:
+        """Return ``{displayed_number -> full_chunk_idx}`` for wrapped chunks.
+
+        ``displayed_number`` is the 1-based counter used by
+        :meth:`to_trajectory` when wrapping condensed text chunks in
+        ``<block_N>...</block_N>``. ``full_chunk_idx`` is the 0-based index
+        into ``self.chunks``. A tool like
+        :class:`~twinkle_agentic.tools.extract.ExtractCompressed` can use
+        this mapping to translate a block number the model emitted (1, 2,
+        ...) back into the chunk that holds the original passage.
+
+        The wrap condition is kept exactly in sync with :meth:`to_trajectory`:
+        ``type == 'text'`` AND ``role != 'tool'`` AND ``raw['condensed']``
+        truthy AND ``content`` is a non-empty string.
+        """
+        mapping: Dict[int, int] = {}
+        counter = 0
+        for idx, c in enumerate(self.chunks):
+            if c.get('type') != 'text':
+                continue
+            if c.get('role') == 'tool':
+                continue
+            raw = c.get('raw')
+            if not (isinstance(raw, dict) and raw.get('condensed')):
+                continue
+            content = c.get('content')
+            if not (isinstance(content, str) and content):
+                continue
+            counter += 1
+            mapping[counter] = idx
+        return mapping
 
     @staticmethod
     def _group_to_message(role: str, group: List[Chunk]) -> Dict[str, Any]:

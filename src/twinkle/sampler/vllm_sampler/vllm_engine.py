@@ -199,6 +199,7 @@ class VLLMEngine(BaseSamplerEngine):
                      *,
                      multi_modal_data: Optional[Dict[str, Any]] = None,
                      mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+                     disable_lora: bool = False,
                      **kwargs) -> SampleResponse:
         """
         Sample completions from the model.
@@ -244,7 +245,13 @@ class VLLMEngine(BaseSamplerEngine):
                            'False — LoRA will be ignored for this request')
             lora_request = None
 
-        if lora_request is None and self._synced_lora_request is not None:
+        if disable_lora:
+            # Caller explicitly wants the base model — skip the
+            # auto-fallback to the synced-LoRA request below so the
+            # request is served by the underlying weights regardless of
+            # any RL-training LoRA currently mounted.
+            lora_request = None
+        elif lora_request is None and self._synced_lora_request is not None:
             # RL training path: use the LoRA synced via CheckpointEngine.
             # The request object is cached after the first ``list_loras``
             # check to avoid per-request RPC overhead.

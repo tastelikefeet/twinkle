@@ -1,4 +1,13 @@
-"""HotpotQA GRPO training with context compression + tool-augmented multi-turn rollouts."""
+"""HotpotQA GRPO training with LLM-based context compression + tool-augmented multi-turn rollouts.
+
+Variant of ``short_math_grpo_with_tools.py`` where the context compressor
+is an LLM (the *base* Qwen3.5-4B without any LoRA) rather than the
+rule-based ``PassageIndexCondenser``. The compressor reuses the same
+``vLLMSampler`` as the policy rollouts — because the sampler is launched
+with ``enable_lora=True`` and the LoRA is mounted as a request-level
+adapter, we can force the base weights at compression time by passing
+``use_base_model=True`` to ``sampler.sample``. No extra GPU group needed.
+"""
 import json
 import os
 import re
@@ -24,8 +33,13 @@ from twinkle.reward.base import Reward
 from twinkle.sampler import vLLMSampler
 
 from twinkle_agentic.chunker.native import NativeChunker
-from twinkle_agentic.condenser import PassageIndexCondenser
-from twinkle_agentic.data_format.chunk import Chunk, Chunks
+from twinkle_agentic.condenser import LLMPassageCondenser
+from twinkle_agentic.rollout import (
+    FrozenContext,
+    Rollout,
+    batch_freeze_delta_pairs,
+    run_agentic_rollouts,
+)
 from twinkle_agentic.tools.extract import ExtractCompressed
 from twinkle_agentic.tools.tool_manager import ToolManager
 
@@ -62,6 +76,14 @@ MAX_TURNS = int(os.environ.get('MAX_TURNS', 6))
 CHUNK_SIZE = int(os.environ.get('CHUNK_SIZE', 1024))
 CHUNK_OVERLAP = int(os.environ.get('CHUNK_OVERLAP', 0))
 
+# Compressor (base-LLM) knobs
+COMPRESS_MAX_TOKENS = int(os.environ.get('COMPRESS_MAX_TOKENS', 160))
+COMPRESS_TEMPERATURE = float(os.environ.get('COMPRESS_TEMPERATURE', 0.4))
+COMPRESS_MIN_CHARS = int(os.environ.get('COMPRESS_MIN_CHARS', 200))
+# Target compression ratio (input_len / output_len). 4.0 ≈ keep ~25% of
+# the original passage length.
+COMPRESS_RATIO = float(os.environ.get('COMPRESS_RATIO', 4.0))
+
 HOTPOTQA_NUM_PROC = int(os.environ.get('HOTPOTQA_NUM_PROC', 16))
 HOTPOTQA_MAX_LENGTH = int(os.environ.get('HOTPOTQA_MAX_LENGTH', 64000))
 
@@ -93,7 +115,7 @@ TOOL_COT_BONUS = float(os.environ.get('TOOL_COT_BONUS', 0.0))
 _ROLLOUT_TRACE_PATH = os.environ.get('ROLLOUT_TRACE_PATH', 'rollout_trace.jsonl')
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# System Prompt
+# System Prompt (policy-side — consumed by the LoRA model)
 # ═══════════════════════════════════════════════════════════════════════════════
 SYSTEM_PROMPT = (
     'You are a careful multi-hop QA assistant. Answer the user\'s question '
@@ -102,11 +124,11 @@ SYSTEM_PROMPT = (
     'scored.  Keep the boxed text short: a name, entity, date, or '
     '"yes"/"no". Do not include extra words in the box.\n\n'
     'CONTEXT FORMAT: The provided paragraphs are wrapped as '
-    '<block_N>...</block_N>. For long paragraphs, only the first sentence '
-    'is shown, followed by "(Facts: entity1 [rel] entity2; ... | Related: '
-    'keyword1, keyword2, ...)" listing key relationships and additional '
-    'terms present in the hidden remainder.\n\n'
-    'Use the first sentence plus the Related-list to decide whether a '
+    '<block_N>...</block_N>. For long paragraphs, only a Markdown summary '
+    'is shown with three sections — **Summary** (one-sentence overview), '
+    '**Key** (bulleted salient facts), and **More** (keywords hinting at '
+    'additional information available if the block is expanded).\n\n'
+    'Use the Summary + Key lines plus the More-list to decide whether a '
     'block probably contains the fact you need. When it does, call the '
     '``extract_compressed`` tool with the relevant block numbers to recall '
     'the full original text. When the visible text is already sufficient, '
@@ -131,94 +153,50 @@ SYSTEM_PROMPT = (
     'which facts before writing \\boxed{}.')
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Tool-call parsing & text sanitization
+# System Prompt for the compressor (base Qwen3.5-4B)
 # ═══════════════════════════════════════════════════════════════════════════════
-# Qwen3.5 native XML format: <tool_call>\n<function=NAME>\n<parameter=K>\nV\n</parameter>\n</function>\n</tool_call>
-_TOOL_CALL_BLOCK_RE = re.compile(r'<tool_call>\s*([\s\S]*?)\s*(?:</tool_call>|\Z)')
-_FUNCTION_RE = re.compile(r'<function=([^>]+)>([\s\S]*?)</function>')
-_PARAMETER_RE = re.compile(r'<parameter=([^>]+)>\s*([\s\S]*?)\s*</parameter>')
-# Legacy JSON format fallback
-_TOOL_CALL_STRIP_RE = re.compile(r'<tool_call>[\s\S]*?(?:</tool_call>|\Z)')
-_BLOCK_TAG_STRIP_RE = re.compile(r'<block_(\d+)>\s*([\s\S]*?)\s*</block_\1>')
+COMPRESS_SYSTEM_PROMPT = (
+    'You are a passage compressor for a multi-hop QA pipeline. Given a '
+    'single paragraph, produce a compact Markdown summary using EXACTLY '
+    'these three sections and nothing else:\n\n'
+    '**Summary**: one sentence describing what the passage is about '
+    '(subject entity, topic, scope).\n'
+    '**Key**: a short bullet list (max 5 items, each under 15 words) of '
+    'the most salient facts — entities, relations, numbers, dates.\n'
+    '**More**: comma-separated keywords/phrases hinting at additional '
+    'information that would be recovered by expanding the passage '
+    '(secondary entities, minor dates, extra attributes).\n\n'
+    f'Rules: target ~{int(round(100 / COMPRESS_RATIO))}% of the '
+    f'original length (compression ratio ~{COMPRESS_RATIO:g}x), and in '
+    f'any case stay under {COMPRESS_MAX_TOKENS} tokens. Do NOT answer '
+    'any question. Do NOT add any preamble or closing. Output the three '
+    'Markdown sections directly, nothing else.\n\n'
+    'Example\n'
+    'Input paragraph:\n'
+    '"Christopher Nolan (born 30 July 1970) is a British-American film '
+    'director, producer and screenwriter. His film Inception (2010), a '
+    'science-fiction heist movie starring Leonardo DiCaprio, grossed over '
+    '$829 million worldwide and received eight Academy Award nominations, '
+    'winning four. Nolan also directed The Dark Knight trilogy and '
+    'Interstellar (2014)."\n\n'
+    'Output:\n'
+    '**Summary**: Profile of filmmaker Christopher Nolan and his film '
+    'Inception.\n'
+    '**Key**:\n'
+    '- Christopher Nolan: British-American director, born 30 July 1970.\n'
+    '- Inception released 2010, sci-fi heist film.\n'
+    '- Stars Leonardo DiCaprio.\n'
+    '- Grossed over $829 million worldwide.\n'
+    '- 8 Oscar nominations, won 4.\n'
+    '**More**: expand to recover — Nolan\'s other roles (producer, '
+    'screenwriter), his other directed works (The Dark Knight trilogy, '
+    'Interstellar 2014), and the genre label ("heist movie" wording, '
+    'Academy Award full name).')
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HotpotQA-specific regex (final-answer extraction)
+# ═══════════════════════════════════════════════════════════════════════════════
 _BOXED_RE = re.compile(r'\\boxed\{([^}]*)\}')
-# Detect the first ``<block_N>`` marker so we can guarantee the
-# ``Context:`` header survives the chunk -> condense -> groupby round-trip.
-_FIRST_BLOCK_RE = re.compile(r'<block_\d+>')
-
-
-def _ensure_context_header(text: str) -> str:
-    """Insert a ``Context:`` header before the first ``<block_N>`` if missing.
-
-    Idempotent: if ``Context:`` already appears anywhere before the first
-    block marker (or no block marker is present), the text is returned
-    unchanged.
-    """
-    m = _FIRST_BLOCK_RE.search(text)
-    if not m:
-        return text
-    prefix = text[:m.start()]
-    if 'Context:' in prefix:
-        return text
-    preamble = prefix.rstrip()
-    head = preamble + ('\n\n' if preamble else '')
-    return f'{head}Context:\n\n{text[m.start():]}'
-
-
-def parse_tool_calls(text: str) -> List[Dict[str, Any]]:
-    """Extract tool calls (Qwen3.5 XML format + JSON fallback)."""
-    calls: List[Dict[str, Any]] = []
-    for block_m in _TOOL_CALL_BLOCK_RE.finditer(text):
-        block = block_m.group(1)
-        func_m = _FUNCTION_RE.search(block)
-        if func_m:
-            args = {}
-            for pm in _PARAMETER_RE.finditer(func_m.group(2)):
-                try:
-                    args[pm.group(1).strip()] = json.loads(pm.group(2).strip())
-                except (json.JSONDecodeError, ValueError):
-                    args[pm.group(1).strip()] = pm.group(2).strip()
-            calls.append({'tool_name': func_m.group(1).strip(), 'arguments': args})
-        else:
-            try:
-                data = json.loads(block)
-            except json.JSONDecodeError:
-                continue
-            name = data.get('name') or data.get('tool_name', '')
-            if not name:
-                continue
-            args = data.get('arguments', {})
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args) if args.strip() else {}
-                except json.JSONDecodeError:
-                    args = {}
-            calls.append({'tool_name': name, 'arguments': args if isinstance(args, dict) else {}})
-    return calls
-
-
-def _clean_assistant_output(text: str) -> str:
-    """Remove tool_call tags and echoed block tags from assistant text."""
-    text = _TOOL_CALL_STRIP_RE.sub('', text or '')
-    text = _BLOCK_TAG_STRIP_RE.sub(lambda m: m.group(2), text)
-    return text.rstrip()
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Passage Index Generation (delegates to PassageIndexCondenser)
-# ═══════════════════════════════════════════════════════════════════════════════
-# Skip the policy's own assistant turns in addition to the default
-# system/tool skip. Otherwise long assistant reasoning on intermediate
-# turns gets reduced to a Facts/Related index on the NEXT turn, and the
-# policy would see its own chain-of-thought through a condensed lens —
-# directly fighting the ``HotpotQACoTReward`` signal.
-_passage_index_condenser = PassageIndexCondenser(
-    max_keywords=12,
-    skip_roles=('system', 'tool', 'assistant'),
-)
-
-
-def _generate_structured_index(chunks: Chunks) -> Chunks:
-    return _passage_index_condenser.condense(chunks)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -319,7 +297,7 @@ class HotpotQALengthPenalty(Reward):
 
 class HotpotQAAnswerCommitPenalty(Reward):
     _COMPRESSION_TAG_RE = re.compile(
-        r'\(\s*(?:Facts|Related)\s*:[^)]*\)\s*(?:</?block_\d+>?)?\s*$', re.IGNORECASE)
+        r'\*\*(?:Summary|Key|More)\*\*\s*:?\s*(?:</?block_\d+>?)?\s*$', re.IGNORECASE)
 
     def __call__(self, trajectories: List[Dict[str, Any]], **kwargs) -> List[float]:
         rewards = []
@@ -337,20 +315,36 @@ class HotpotQAAnswerCommitPenalty(Reward):
 class HotpotQACoTReward(Reward):
     """Reward chain-of-thought reasoning for tool-callers.
 
-    Checks if the final assistant response contains multi-step reasoning
-    of the form "Step N: From block X, ..." before the \\boxed{} answer.
-    Only penalizes rollouts that used tools (tool_call_count > 0) but
-    lack structured reasoning — direct answerers are not affected.
+    Requires at least ``_MIN_REFS=2`` DISTINCT block references in the
+    reasoning preceding ``\\boxed{}``. A block reference is one of:
+
+    * ``From block N`` (strong — names the source)
+    * ``block[N`` (bracket shorthand)
+    * ``block N <verb>`` where verb ∈ {shows, mentions, states,
+      indicates, tells}
+
+    The earlier ``_STEP_RE`` conflated ``Step N:`` headers with block
+    refs and DOUBLE-COUNTED them on a single line like
+    ``"Step 1: From block 2, ..."`` → 2 regex matches → passed
+    ``_MIN_STEPS=2`` threshold with a SINGLE reasoning line. This
+    tighter regex demands two DIFFERENT block references across the
+    reasoning, so a genuine multi-hop chain is needed before
+    ``TOOL_COT_BONUS`` is granted.
+
+    Only penalises rollouts that used tools; direct answerers unaffected.
     """
-    _STEP_RE = re.compile(
-        r'(?:step\s*\d|from\s+block[\s_]*\d|block[\s_]*\[\d|block[\s_]*\d+.*?(?:shows?|mentions?|states?|indicates?|tells?))',
+    _BLOCK_REF_RE = re.compile(
+        r'(?:'
+        r'from\s+block[\s_]*\d+'
+        r'|block[\s_]*\[\d+'
+        r'|block[\s_]*\d+[\w\s,.;:\-]{0,20}?(?:shows?|mentions?|states?|indicates?|tells?)'
+        r')',
         re.IGNORECASE)
-    _MIN_STEPS = 2  # require at least 2 evidence references
+    _MIN_REFS = 2
 
     def __call__(self, trajectories: List[Dict[str, Any]], **kwargs) -> List[float]:
         rewards = []
         for t in trajectories:
-            # Only apply to rollouts that made tool calls
             msgs = t.get('messages', [])
             has_tool_call = any(
                 m.get('role') == 'assistant' and m.get('tool_calls')
@@ -360,21 +354,20 @@ class HotpotQACoTReward(Reward):
                 continue
 
             final = (_last_assistant_text(t) or '').strip()
-            # Count evidence-referencing steps before \boxed{}
             boxed_pos = final.rfind('\\boxed{')
             reasoning = final[:boxed_pos] if boxed_pos > 0 else final
-            n_steps = len(self._STEP_RE.findall(reasoning))
+            n_refs = len(self._BLOCK_REF_RE.findall(reasoning))
 
-            if n_steps >= self._MIN_STEPS:
-                # With a non-zero ``TOOL_COT_BONUS`` this branch becomes
-                # strictly positive, making "tool + proper step
-                # reasoning" beat "no tool" (which is always 0) in GRPO
-                # group-relative advantage.
-                rewards.append(TOOL_COT_BONUS)  # good: has CoT
-            elif n_steps == 1:
-                rewards.append(-0.3)  # partial: only 1 evidence ref
+            if n_refs >= self._MIN_REFS:
+                # With a non-zero ``TOOL_COT_BONUS`` this branch
+                # becomes strictly positive, making "tool + proper
+                # multi-hop reasoning" beat "no tool" (which is always
+                # 0) in GRPO group-relative advantage.
+                rewards.append(TOOL_COT_BONUS)
+            elif n_refs == 1:
+                rewards.append(-0.3)
             else:
-                rewards.append(-0.5)  # bad: no reasoning at all
+                rewards.append(-0.5)
         return rewards
 
 
@@ -474,7 +467,6 @@ def create_hotpotqa_dataset() -> Dataset:
     dataset.add_dataset(DatasetMeta(
         'hf://hotpotqa/hotpot_qa', subset_name='fullwiki', split='train'))
 
-    # Optional id whitelist
     _wrong_ids_path = os.environ.get('WRONG_IDS_FILE', '').strip()
     if _wrong_ids_path:
         with open(_wrong_ids_path, 'r', encoding='utf-8') as fh:
@@ -493,235 +485,56 @@ def create_hotpotqa_dataset() -> Dataset:
     _HOTPOTQA_COLS = ['id', 'question', 'answer', 'type', 'level',
                       'supporting_facts', 'context']
     dataset.map(HotpotQAProcessor(system=SYSTEM_PROMPT), remove_columns=_HOTPOTQA_COLS)
-    # Intentionally NOT calling ``dataset.encode(...)``. The rollout path
-    # passes raw trajectory dicts (``messages`` only) to the sampler via
-    # ``_FrozenContext.render_display()``; the sampler then re-encodes
-    # the COMPRESSED view per-turn inside ``encode_trajectory_for_vllm``.
-    # Pre-encoding the RAW (uncompressed) prompt here would only produce
-    # ``input_ids`` that nobody reads, while consuming dataset cache disk
-    # space and HOTPOTQA_NUM_PROC tokenization workers at startup.
     return dataset
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Agentic Rollout
+# Rollout-trace hook (HotpotQA-specific — uses _extract_final_answer)
 # ═══════════════════════════════════════════════════════════════════════════════
-_MEDIA_KEYS = ('images', 'videos', 'audios')
+def _make_dump_rollout_trace(trace_path: str):
+    """Build an ``on_turn`` hook that appends per-turn state to a JSONL file.
 
+    Returns ``None`` when ``trace_path`` is empty so the caller can pass
+    the result directly into :func:`run_agentic_rollouts`.
+    """
+    if not trace_path:
+        return None
 
-class _FrozenContext:
-    """Incremental chunk+index cache. Only processes NEW messages each turn."""
-    __slots__ = ('frozen_msg_count', 'full_chunks', 'compressed_chunks', 'media_frozen')
-
-    def __init__(self) -> None:
-        self.frozen_msg_count: int = 0
-        self.full_chunks: List[Chunk] = []
-        self.compressed_chunks: List[Chunk] = []
-        self.media_frozen: bool = False
-
-    def freeze_delta(self, trajectory: Dict[str, Any], chunker: NativeChunker) -> None:
-        total_msgs = trajectory['messages']
-        new_msgs = total_msgs[self.frozen_msg_count:]
-        needs_media = not self.media_frozen and any(trajectory.get(k) for k in _MEDIA_KEYS)
-        if not (new_msgs or needs_media):
-            return
-
-        delta: Dict[str, Any] = {
-            'messages': list(new_msgs),
-            'user_data': trajectory.get('user_data', []),
-        }
-        if needs_media:
-            for k in _MEDIA_KEYS:
-                if trajectory.get(k):
-                    delta[k] = trajectory[k]
-
-        new_full = chunker.chunk(delta)
-        # Issue 5 fix: ``NativeChunker.chunk`` calls
-        # ``template.format_trajectory`` which can inject a default system
-        # message when the delta contains only assistant / tool roles
-        # (turn >= 1). Drop any synthetic system chunk so the downstream
-        # block numbering stays aligned with the model-visible messages.
-        input_roles = {m.get('role') for m in new_msgs if isinstance(m, dict)}
-        if 'system' not in input_roles:
-            filtered_full = [c for c in new_full.chunks if c.get('role') != 'system']
-        else:
-            filtered_full = list(new_full.chunks)
-        new_compressed = _generate_structured_index(Chunks(chunks=filtered_full))
-        self.full_chunks.extend(filtered_full)
-        self.compressed_chunks.extend(new_compressed.chunks)
-        self.frozen_msg_count = len(total_msgs)
-        # Only flip media_frozen AFTER successful commit, so a condense
-        # failure mid-way does not corrupt bookkeeping.
-        if needs_media:
-            self.media_frozen = True
-
-    def render_display(self) -> Dict[str, Any]:
-        traj = Chunks(chunks=list(self.compressed_chunks)).to_trajectory()
-        # Issue 6 safety-net: make sure the ``Context:`` header appears
-        # before the first ``<block_N>`` in each user message so the model
-        # still sees the "these are the context paragraphs" cue even if
-        # chunker packing absorbs the standalone ``Context:`` paragraph.
-        for msg in traj.get('messages', []):
-            if msg.get('role') != 'user':
-                continue
-            content = msg.get('content')
-            if isinstance(content, str):
-                msg['content'] = _ensure_context_header(content)
-        return traj
-
-    def render_full(self) -> Chunks:
-        return Chunks(chunks=list(self.full_chunks))
-
-    def displayed_to_full(self) -> Dict[int, int]:
-        """Return ``{displayed_block_number -> full_chunk_idx}``.
-
-        Delegates to :meth:`Chunks.displayed_block_mapping` on the
-        compressed-chunk view so the mapping stays in sync with what
-        :meth:`render_display` actually wraps as ``<block_N>``.
-        """
-        return Chunks(chunks=list(self.compressed_chunks)).displayed_block_mapping()
-
-
-class _Rollout:
-    __slots__ = ('trajectory', 'final_sequence', 'turn_sequences', 'turns', 'done', 'frozen')
-
-    def __init__(self, prompt_trajectory: Dict[str, Any]) -> None:
-        self.trajectory: Dict[str, Any] = {
-            'messages': list(prompt_trajectory.get('messages', [])),
-            'user_data': prompt_trajectory.get('user_data', []),
-        }
-        for _k in _MEDIA_KEYS:
-            if prompt_trajectory.get(_k):
-                self.trajectory[_k] = list(prompt_trajectory[_k])
-        self.final_sequence = None
-        # Per-turn sampled sequences. Keeping every turn (not just the
-        # final one) lets GRPO train on the tool-call decision turns,
-        # so the policy actually learns WHEN to expand a <block_N>.
-        # Rollout-level reward is replicated to per-turn advantages
-        # at the optimiser feed time (see main loop below).
-        self.turn_sequences: List[Any] = []
-        self.turns = 0
-        self.done = False
-        self.frozen = _FrozenContext()
-
-
-def run_agentic_rollouts(
-    prompts: List[Dict[str, Any]],
-    sampler: vLLMSampler,
-    sampling_params: SamplingParams,
-    chunker: NativeChunker,
-    max_turns: int,
-    min_batch_size: int = 1,
-) -> List[_Rollout]:
-    rollouts = [_Rollout(p) for p in prompts]
-
-    for turn in range(max_turns):
-        active = [r for r in rollouts if not r.done]
+    def _hook(turn, active, displays, responses):
         if not active:
-            break
+            return
+        try:
+            records: List[str] = []
+            for idx, r in enumerate(active):
+                try:
+                    resp = responses[idx] if idx < len(responses) else None
+                    tcc = sum(
+                        len(m.get('tool_calls') or [])
+                        for m in r.trajectory.get('messages', [])
+                        if m.get('role') == 'assistant')
+                    last_decoded = ''
+                    if resp and getattr(resp, 'sequences', None):
+                        last_decoded = resp.sequences[0].decoded or ''
+                    final_answer = _extract_final_answer(
+                        _last_assistant_text(r.trajectory)) if r.done else ''
+                    record = {
+                        'ts': time.time(), 'turn': turn,
+                        'group_size': len(active), 'picked_idx': idx,
+                        'rollout_id': id(r), 'tool_call_count': tcc,
+                        'done': bool(r.done),
+                        'compressed': displays[idx] if idx < len(displays) else None,
+                        'last_decoded': last_decoded, 'final_answer': final_answer,
+                    }
+                    records.append(json.dumps(record, ensure_ascii=False, default=str))
+                except Exception:
+                    pass
+            if records:
+                with open(trace_path, 'a', encoding='utf-8') as f:
+                    f.write('\n'.join(records) + '\n')
+        except Exception:
+            pass
 
-        displays: List[Dict[str, Any]] = []
-        tool_mgrs: List[ToolManager] = []
-        for r in active:
-            r.frozen.freeze_delta(r.trajectory, chunker)
-            displays.append(r.frozen.render_display())
-            # Issue 1 fix: pass the displayed->full mapping so
-            # ExtractCompressed can translate the 1-based <block_N>
-            # numbers the model emits back into the correct full-chunk
-            # index for original-text recall. Without this, the legacy
-            # fallback treats the displayed number as a direct index,
-            # which is wrong now that block numbering is a 1-based
-            # consecutive counter over wrapped chunks only.
-            tool_mgrs.append(ToolManager([
-                ExtractCompressed(
-                    r.frozen.render_full(),
-                    displayed_to_full=r.frozen.displayed_to_full(),
-                )
-            ]))
-
-        # Pad to min_batch_size for DP
-        n_active = len(displays)
-        if n_active < min_batch_size:
-            displays = displays + [displays[0]] * (min_batch_size - n_active)
-
-        responses = sampler.sample(displays, sampling_params)
-        responses = responses[:n_active]
-
-        for r, resp, tool_mgr in zip(active, responses, tool_mgrs):
-            seq = resp.sequences[0]
-            r.final_sequence = seq
-            r.turn_sequences.append(seq)
-            r.turns += 1
-            decoded = seq.decoded or ''
-            tool_calls = parse_tool_calls(decoded)
-
-            if not tool_calls:
-                # Terminal turn
-                r.trajectory['messages'].append(
-                    {'role': 'assistant', 'content': _clean_assistant_output(decoded)})
-                r.done = True
-            else:
-                # Tool turn
-                r.trajectory['messages'].append({
-                    'role': 'assistant',
-                    'content': _clean_assistant_output(decoded),
-                    'tool_calls': [
-                        {'tool_name': tc['tool_name'],
-                         'arguments': (tc['arguments'] if isinstance(tc['arguments'], str)
-                                       else json.dumps(tc['arguments'], ensure_ascii=False))}
-                        for tc in tool_calls
-                    ],
-                })
-                for i, tc in enumerate(tool_calls):
-                    r.trajectory['messages'].append({
-                        'role': 'tool',
-                        'content': tool_mgr.dispatch(tc),
-                        'tool_call_id': f'call_t{turn}_i{i}',
-                    })
-
-        # Dump trace
-        _dump_rollout_trace(turn, active, displays, responses)
-
-    # Mark remaining as done
-    for r in rollouts:
-        r.done = True
-    return rollouts
-
-
-def _dump_rollout_trace(turn, active, displays, responses):
-    """Append all active rollouts' state to trace JSONL (best-effort)."""
-    if not _ROLLOUT_TRACE_PATH or not active:
-        return
-    try:
-        records: List[str] = []
-        for idx, r in enumerate(active):
-            try:
-                resp = responses[idx] if idx < len(responses) else None
-                tcc = sum(len(m.get('tool_calls') or [])
-                          for m in r.trajectory.get('messages', [])
-                          if m.get('role') == 'assistant')
-                last_decoded = ''
-                if resp and getattr(resp, 'sequences', None):
-                    last_decoded = resp.sequences[0].decoded or ''
-                final_answer = _extract_final_answer(
-                    _last_assistant_text(r.trajectory)) if r.done else ''
-
-                record = {
-                    'ts': time.time(), 'turn': turn,
-                    'group_size': len(active), 'picked_idx': idx,
-                    'rollout_id': id(r), 'tool_call_count': tcc,
-                    'done': bool(r.done),
-                    'compressed': displays[idx] if idx < len(displays) else None,
-                    'last_decoded': last_decoded, 'final_answer': final_answer,
-                }
-                records.append(json.dumps(record, ensure_ascii=False, default=str))
-            except Exception:
-                pass
-        if records:
-            with open(_ROLLOUT_TRACE_PATH, 'a', encoding='utf-8') as f:
-                f.write('\n'.join(records) + '\n')
-    except Exception:
-        pass
+    return _hook
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -736,29 +549,30 @@ def main():
     ]
     model_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, dp_size=MODEL_GPUS)
     sampler_mesh = DeviceMesh.from_sizes(world_size=SAMPLER_GPUS, dp_size=SAMPLER_GPUS)
-    twinkle.initialize(mode='ray', nproc_per_node=NUM_GPUS, groups=device_groups, lazy_collect=False)
+    twinkle.initialize(mode='ray', nproc_per_node=NUM_GPUS,
+                       groups=device_groups, lazy_collect=False)
 
-    # Truncate trace file for clean run
     if _ROLLOUT_TRACE_PATH:
         try:
             open(_ROLLOUT_TRACE_PATH, 'w').close()
         except OSError:
             pass
 
-    # Build dataset
     logger.info('Building HotpotQA dataset')
     _prebuilt_dataset = create_hotpotqa_dataset()
     logger.info('Dataset ready: %d rows', len(_prebuilt_dataset))
 
-    # Compute training horizon (accounts for multiple optim steps per batch)
     GLOBAL_BATCH_SIZE = BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS
     batches_per_epoch = max(1, len(_prebuilt_dataset) // GLOBAL_BATCH_SIZE)
-    # With the per-turn training feed (see ``_Rollout.turn_sequences``)
+    # With the per-turn training feed (see ``Rollout.turn_sequences``)
     # the optimiser does ``sum(rollout.turns)`` mini-batch steps per
     # batch, not just ``rollouts / MINI_BATCH_SIZE``. We therefore
     # multiply by a conservative ``EXPECTED_AVG_TURNS`` so the LR
     # scheduler horizon and the ``optim_step >= total_steps`` early-exit
     # reflect the REAL per-turn step count, not the per-rollout one.
+    # If the observed ``avg_turns`` diverges noticeably from the
+    # constant below, set ``EXPECTED_AVG_TURNS`` in the environment so
+    # training does not stop after a fraction of the planned epochs.
     EXPECTED_AVG_TURNS = int(os.environ.get('EXPECTED_AVG_TURNS', 3))
     optim_steps_per_batch = max(1, (GLOBAL_BATCH_SIZE * NUM_GENERATIONS * EXPECTED_AVG_TURNS
                                      + MINI_BATCH_SIZE - 1) // MINI_BATCH_SIZE)
@@ -768,7 +582,6 @@ def main():
     logger.info('Training horizon: %d steps (%d epochs × %d batches × %d steps/batch)',
                 total_steps, NUM_EPOCHS, batches_per_epoch, optim_steps_per_batch)
 
-    # Model setup
     lora_config = LoraConfig(
         target_modules='all-linear', r=LORA_RANK,
         lora_alpha=LORA_RANK * 2, lora_dropout=0.05)
@@ -795,24 +608,59 @@ def main():
     model.set_processor(InputProcessor, padding_free=True)
     model.set_template('Qwen3_5Template', model_id=MODEL_ID, enable_thinking=False)
 
+    # Policy sampler (LoRA-enabled, receives weight syncs). The same
+    # sampler is reused by the condenser at compression time; the
+    # condenser calls ``sampler.sample(..., use_base_model=True)`` so
+    # vLLM serves those requests with the base weights (no LoRA),
+    # independent of the policy LoRA currently mounted.
     sampler = vLLMSampler(
         model_id=MODEL_ID,
         engine_args={
-            # Bumped from 8192 -> 32768. Multi-turn rollouts append
-            # previously-expanded <block_N> passages on every
-            # extract_compressed call, so the visible prompt grows
-            # monotonically across turns. With MAX_TURNS=6 and
-            # MAX_NEW_TOKENS=4096 the previous 8192 budget would be
-            # exhausted after 1-2 expansions and vLLM would truncate
-            # / fail; 32768 leaves enough headroom for the full
-            # MAX_TURNS rollout plus the final generation even when
-            # several passages are recalled.
+            # Bumped from 8192 -> 32768. The multi-turn rollout keeps
+            # APPENDING previously-expanded <block_N> passages (full
+            # original text) on every extract_compressed call, so the
+            # visible prompt grows monotonically across turns. With
+            # MAX_TURNS=6 and MAX_NEW_TOKENS=4096, the previous 8192
+            # budget would be exhausted after 1-2 tool expansions and
+            # vLLM would start truncating / failing; 32768 gives enough
+            # headroom for the full MAX_TURNS rollout plus the final
+            # generation even when several passages are recalled.
             'gpu_memory_utilization': 0.8, 'max_model_len': 32768,
             'max_lora_rank': 32, 'enable_lora': True,
             'enable_tower_connector_lora': True,
         },
         device_mesh=sampler_mesh, remote_group='sampler')
     sampler.set_template('Qwen3_5Template', model_id=MODEL_ID, enable_thinking=False)
+
+    condenser = LLMPassageCondenser(
+        sampler=sampler,
+        sampling_params=SamplingParams(
+            max_tokens=COMPRESS_MAX_TOKENS, num_samples=1,
+            temperature=COMPRESS_TEMPERATURE, top_p=0.9),
+        system_prompt=COMPRESS_SYSTEM_PROMPT,
+        min_chars=COMPRESS_MIN_CHARS,
+        # Skip the policy's own assistant turns in addition to the
+        # default system/tool skip. Otherwise any turn whose cleaned
+        # assistant content exceeds ``min_chars`` gets summarised into
+        # Summary/Key/More on the NEXT turn, and the policy would see
+        # its own chain-of-thought through a compression lens —
+        # directly fighting the ``HotpotQACoTReward`` signal.
+        skip_roles=('system', 'tool', 'assistant'),
+    )
+
+    # Per-rollout tool factory: the ExtractCompressed tool needs the
+    # rollout's CURRENT full+compressed chunks (which evolve every turn),
+    # so the factory closes over ``r.frozen`` instead of being built
+    # once up front.
+    def _build_tool_manager(r: Rollout) -> ToolManager:
+        return ToolManager([
+            ExtractCompressed(
+                r.frozen.render_full(),
+                displayed_to_full=r.frozen.displayed_to_full(),
+            )
+        ])
+
+    on_turn_hook = _make_dump_rollout_trace(_ROLLOUT_TRACE_PATH)
 
     ckpt_manager = CheckpointEngineManager(model=model, sampler=sampler)
     chunker = NativeChunker(
@@ -830,7 +678,7 @@ def main():
         temperature=1.0, top_p=0.95, stop=['</tool_call>'])
 
     optim_step = 0
-    logger.info('Starting HotpotQA GRPO training')
+    logger.info('Starting HotpotQA GRPO training (LLM condenser variant)')
 
     def _epoch_cycle(dl, n_epochs):
         for ep in range(1, n_epochs + 1):
@@ -848,16 +696,41 @@ def main():
         ckpt_manager.sync_weights(merge_and_sync=False)
         sampler.reset_prefix_cache()
 
-        # Multi-turn rollout
+        # Compress the initial prompt (system + user + passages) ONCE per
+        # unique prompt in the batch, then share the result across its
+        # ``NUM_GENERATIONS`` rollouts via ``FrozenContext.clone()``.
+        # Without this, each rollout would independently re-run the
+        # base-LLM compressor on the same passages, multiplying
+        # compression cost by NUM_GENERATIONS and introducing sampling
+        # noise across rollouts of the same prompt (different
+        # **Summary**/**Key**/**More** for the same input paragraph).
+        # Furthermore, unique-prompt compressions are batched together
+        # into a single condenser call, so the whole batch's initial
+        # compression costs exactly one ``sampler.sample`` trip.
+        shared_frozens: Dict[int, FrozenContext] = {}
+        initial_pairs: List[Tuple[FrozenContext, Dict[str, Any]]] = []
+        for prompt in batch:
+            key = id(prompt)
+            if key in shared_frozens:
+                continue
+            fc = FrozenContext()
+            shared_frozens[key] = fc
+            initial_pairs.append((fc, prompt))
+        batch_freeze_delta_pairs(initial_pairs, chunker, condenser)
+        initial_frozens: List[Optional[FrozenContext]] = [
+            shared_frozens[id(p)] for p in expand_prompts]
+
         rollouts = run_agentic_rollouts(
-            expand_prompts, sampler, sampling_params, chunker,
-            max_turns=MAX_TURNS, min_batch_size=GLOBAL_BATCH_SIZE)
+            expand_prompts, sampler, sampling_params, chunker, condenser,
+            _build_tool_manager,
+            max_turns=MAX_TURNS, min_batch_size=GLOBAL_BATCH_SIZE,
+            initial_frozens=initial_frozens, on_turn=on_turn_hook)
 
         # ---- Per-rollout aggregates (reward + metrics) ------------------
-        # Reward is computed on the whole rollout trajectory. Completion
-        # length logged per rollout is the SUM of every turn's generated
-        # token count so we see the true generation budget usage, not
-        # just the last turn.
+        # Reward is computed on the whole rollout trajectory (final F1 +
+        # length / answer-commit / cot shaping). Completion length logged
+        # per rollout is the SUM of every turn's generated token count so
+        # we see the true generation budget usage, not just the last turn.
         # NOTE: do NOT silently filter out rollouts with empty
         # ``turn_sequences`` — the rollout list is ordered as consecutive
         # groups of NUM_GENERATIONS per prompt, and ``GRPOAdvantage`` with
@@ -882,11 +755,13 @@ def main():
                      'length_pen': length_pen_rewards, 'answer_commit': answer_commit_rewards,
                      'cot': cot_rewards, 'tool_explore': tool_explore_rewards})
 
-        # GRPO advantages computed at rollout level (group-scaled over
+        # GRPO advantages are computed at rollout level (group-scaled over
         # NUM_GENERATIONS same-prompt rollouts), then REPLICATED to every
-        # turn of that rollout so the same advantage signal is
-        # back-propagated through (i) tool-call decision turns and
-        # (ii) the final answer turn.
+        # turn of that rollout. This way the same advantage signal is
+        # back-propagated through (i) the tool-call decision turns and
+        # (ii) the final answer turn, so the policy gets direct gradient
+        # on WHEN to expand a block, not only on what to say after it
+        # was already expanded.
         rollout_advantages = advantage_fn(
             total_rewards, num_generations=NUM_GENERATIONS, scale='group').tolist()
 
@@ -900,7 +775,6 @@ def main():
                 all_old_logps.append([lp[0][1] for lp in (seq.logprobs or [])])
                 advantages.append(adv)
 
-        # Mini-batch training loop
         total_completions = len(all_input_data)
         for mb_start in range(0, total_completions, MINI_BATCH_SIZE):
             mb_end = min(mb_start + MINI_BATCH_SIZE, total_completions)
@@ -914,13 +788,29 @@ def main():
             if optim_step >= total_steps:
                 break
             if optim_step % SAVE_STEPS == 0:
-                model.save(f'hotpotqa-grpo-tools-checkpoint-{optim_step}')
+                model.save(f'hotpotqa-grpo-tools-llmcondense-checkpoint-{optim_step}')
 
-        # Logging
         log_dict = metrics.calculate()
         log_dict.update(model.calculate_metric(is_training=True))
         if n_turns_per_rollout:
             log_dict['avg_turns'] = sum(n_turns_per_rollout) / len(n_turns_per_rollout)
+        # Track the maximum prompt length across ALL turn-level training
+        # samples in this batch. With max_model_len=32768, the worst-case
+        # multi-turn rollout (6 turns × 4K MAX_NEW_TOKENS + 6 expanded
+        # blocks of original text) can approach 33K tokens and silently
+        # overflow vLLM. If this metric climbs above ~30K, lower
+        # ``max_blocks_per_call`` on ExtractCompressed or bump
+        # ``max_model_len``.
+        _max_prompt_tok = 0
+        for r in rollouts:
+            for seq in r.turn_sequences:
+                feat = getattr(seq, 'new_input_feature', None) or {}
+                ids = feat.get('input_ids') if isinstance(feat, dict) else None
+                if ids:
+                    prompt_len = max(0, len(ids) - len(seq.tokens or []))
+                    if prompt_len > _max_prompt_tok:
+                        _max_prompt_tok = prompt_len
+        log_dict['max_prompt_tokens'] = _max_prompt_tok
         if all_trajectories:
             tool_counts = [
                 sum(len(m.get('tool_calls') or [])
@@ -937,7 +827,7 @@ def main():
         logger.info(f'[Step {optim_step}/{total_steps}] {log_dict}')
 
     logger.info(f'Training completed. optim_steps={optim_step}')
-    model.save('hotpotqa-grpo-tools-final')
+    model.save('hotpotqa-grpo-tools-llmcondense-final')
 
 
 if __name__ == '__main__':

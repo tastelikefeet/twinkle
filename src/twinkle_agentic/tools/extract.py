@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
 
 from twinkle.data_format.message import Tool as ToolInfo
 from twinkle_agentic.data_format import Chunks
@@ -12,13 +12,32 @@ from .base import Tool
 
 
 class ExtractCompressed(Tool):
-    """Recall original (pre-compression) text of <block_N> markers."""
+    """Recall original (pre-compression) text of <block_N> markers.
+
+    The ``<block_N>`` numbering emitted by :meth:`Chunks.to_trajectory` is a
+    1-based consecutive counter over wrapped (condensed) chunks only. That
+    displayed number does NOT equal the chunk's 0-based position in
+    ``original_chunks.chunks``. Callers should pass the
+    ``displayed_to_full`` mapping from
+    :meth:`Chunks.displayed_block_mapping` so this tool can translate the
+    displayed block number emitted by the model back into the concrete
+    chunk that holds the original passage text.
+
+    If ``displayed_to_full`` is omitted, the tool falls back to treating
+    the block number as a direct 0-based index (legacy behaviour).
+    """
 
     name = 'extract_compressed'
 
-    def __init__(self, original_chunks: Chunks, max_blocks_per_call: int = 16) -> None:
+    def __init__(
+        self,
+        original_chunks: Chunks,
+        max_blocks_per_call: int = 16,
+        displayed_to_full: Optional[Dict[int, int]] = None,
+    ) -> None:
         self.original_chunks = original_chunks
         self.max_blocks_per_call = max_blocks_per_call
+        self.displayed_to_full = dict(displayed_to_full) if displayed_to_full else None
 
     def __call__(self, tool_name: str, arguments: Dict[str, Any]) -> str:
         if not isinstance(arguments, dict):
@@ -31,26 +50,47 @@ class ExtractCompressed(Tool):
             return (f'Error: too many blocks ({len(blocks)} > '
                     f'{self.max_blocks_per_call}). Split the request.')
 
+        return '\n'.join(self._render_block(b) for b in blocks)
+
+    # ------------------------------------------------------------------
+    # Rendering helpers
+    # ------------------------------------------------------------------
+    def _render_block(self, displayed: int) -> str:
+        """Render a single ``<block_N>...</block_N>`` for the given number.
+
+        Translates ``displayed`` (1-based, as the model emits it) to the
+        underlying full-chunk index using ``displayed_to_full``, then
+        returns either the original passage text or a structured error
+        message wrapped in matching block tags. The displayed identifier
+        is preserved in the response so the model sees what it asked for.
+        """
+        def wrap(body: str) -> str:
+            return f'<block_{displayed}>{body}</block_{displayed}>'
+
+        # 1. Resolve displayed -> full-chunk index.
+        if self.displayed_to_full is not None:
+            if displayed not in self.displayed_to_full:
+                valid = sorted(self.displayed_to_full)
+                return wrap(f'ERROR: no such block. Valid blocks: {valid}.')
+            idx = self.displayed_to_full[displayed]
+        else:
+            idx = displayed
+
+        # 2. Bounds check.
         n_chunks = len(self.original_chunks.chunks)
-        rendered: List[str] = []
-        for idx in blocks:
-            if not 0 <= idx < n_chunks:
-                rendered.append(
-                    f'<block_{idx}>ERROR: index out of range [0, {n_chunks})</block_{idx}>')
-                continue
-            chunk = self.original_chunks.chunks[idx]
-            if self._is_structural(chunk):
-                rendered.append(
-                    f'<block_{idx}>This block is structural, not a passage. '
-                    f'Pick a higher-numbered passage block instead.</block_{idx}>')
-                continue
-            content = chunk.get('content')
-            if not isinstance(content, str):
-                rendered.append(
-                    f'<block_{idx}>[non-text chunk, type={chunk.get("type")!r}]</block_{idx}>')
-                continue
-            rendered.append(f'<block_{idx}>{content}</block_{idx}>')
-        return '\n'.join(rendered)
+        if not 0 <= idx < n_chunks:
+            return wrap(f'ERROR: index out of range [0, {n_chunks})')
+
+        # 3. Skip structural / non-text chunks.
+        chunk = self.original_chunks.chunks[idx]
+        if self._is_structural(chunk):
+            return wrap('This block is structural, not a passage. '
+                        'Pick a different passage block instead.')
+        content = chunk.get('content')
+        if not isinstance(content, str):
+            return wrap(f'[non-text chunk, type={chunk.get("type")!r}]')
+
+        return wrap(content)
 
     def tool_info(self) -> ToolInfo:
         return {
@@ -61,8 +101,8 @@ class ExtractCompressed(Tool):
             'parameters': json.dumps({
                 'blocks': {
                     'type': 'array',
-                    'items': {'type': 'integer', 'minimum': 0},
-                    'description': f'Block numbers to expand. Up to {self.max_blocks_per_call} per call.',
+                    'items': {'type': 'integer', 'minimum': 1},
+                    'description': f'Block numbers (as shown in <block_N> tags) to expand. Up to {self.max_blocks_per_call} per call.',
                 },
             }),
         }

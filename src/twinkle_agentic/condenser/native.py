@@ -26,10 +26,14 @@ _KW_STOP = frozenset(
     'It He She They We I You His Her Their Our Its '
     'However Although Because While Since When Where After Before During Through Without'.split()
 )
-_SKIP_ROLES = frozenset({'system', 'tool'})
+_DEFAULT_SKIP_ROLES = frozenset({'system', 'tool'})
 _SKIP_KINDS = frozenset({'tool_call', 'tool_response'})
 _SKIP_TYPES = frozenset({'image', 'video', 'audio'})
 _NER_LABELS = {'PERSON', 'ORG', 'GPE', 'LOC', 'DATE', 'EVENT', 'WORK_OF_ART', 'FAC'}
+# POS tag groups used by ``_extract_relation``'s fallback chain.
+_REL_POS_VERB = ('VERB', 'ADP', 'PART')
+_REL_POS_BROAD = ('VERB', 'ADP', 'PART', 'NOUN', 'ADJ', 'ADV')
+_REL_BROAD_STOP = frozenset({'the', 'a', 'an'})
 
 _NLP = spacy.load('en_core_web_sm', disable=['lemmatizer', 'textcat'])
 
@@ -42,15 +46,22 @@ class PassageIndexCondenser(Condenser):
         max_triplets: Max NER triplets per chunk.
     """
 
-    def __init__(self, max_keywords: int = 12, max_triplets: int = 3) -> None:
+    def __init__(
+        self,
+        max_keywords: int = 12,
+        max_triplets: int = 3,
+        skip_roles=None,
+    ) -> None:
         self.max_keywords = max_keywords
         self.max_triplets = max_triplets
+        self.skip_roles = (frozenset(skip_roles) if skip_roles is not None
+                           else _DEFAULT_SKIP_ROLES)
 
     def condense(self, chunks: Chunks, **kwargs) -> Chunks:
         return Chunks(chunks=[self._index(c) for c in chunks.chunks])
 
     def _should_skip(self, chunk: Chunk) -> bool:
-        if chunk.get('role') in _SKIP_ROLES:
+        if chunk.get('role') in self.skip_roles:
             return True
         if chunk.get('type') in _SKIP_TYPES:
             return True
@@ -108,26 +119,43 @@ class PassageIndexCondenser(Condenser):
 
     @staticmethod
     def _extract_relation(doc, subj, obj) -> str:
-        """Extract relation between two entities using multiple strategies."""
+        """Extract a relation phrase between two entities.
+
+        Tries three strategies in order, returning the first non-empty
+        match (each truncated to 30 chars):
+
+        1. Verbs + prepositions in the span between the two entities.
+        2. Same span but broader POS set (adds NOUN/ADJ/ADV) when no
+           verb is present.
+        3. Sentence root verb as a last resort.
+
+        Returns ``''`` when nothing meaningful is found, signalling the
+        caller to drop the triplet entirely.
+        """
         span = doc[subj.end:obj.start]
-        # Strategy 1: verbs + prepositions (core relation words)
-        rel_tokens = [t.text for t in span
-                      if t.pos_ in ('VERB', 'ADP', 'PART') and not t.is_stop]
-        if rel_tokens:
-            return ' '.join(rel_tokens)[:30]
-        # Strategy 2: include nouns/adjectives if no verbs found
-        rel_tokens = [t.text for t in span
-                      if t.pos_ in ('VERB', 'ADP', 'PART', 'NOUN', 'ADJ', 'ADV')
-                      and not t.is_stop and t.text.lower() not in ('the', 'a', 'an')]
-        if rel_tokens:
-            return ' '.join(rel_tokens)[:30]
-        # Strategy 3: find the dependency root verb of the sentence
-        sent = subj.sent if hasattr(subj, 'sent') else None
-        if sent:
-            root = [t for t in sent if t.dep_ == 'ROOT' and t.pos_ == 'VERB']
-            if root:
-                return root[0].text
-        # No relation found — skip this triplet
+
+        def _join(tokens):
+            return ' '.join(t.text for t in tokens)[:30] if tokens else ''
+
+        # Strategy 1: verbs + prepositions only.
+        verb_prep = [t for t in span if t.pos_ in _REL_POS_VERB and not t.is_stop]
+        if verb_prep:
+            return _join(verb_prep)
+
+        # Strategy 2: broaden to nouns / adjectives / adverbs.
+        broad = [t for t in span
+                 if t.pos_ in _REL_POS_BROAD
+                 and not t.is_stop
+                 and t.text.lower() not in _REL_BROAD_STOP]
+        if broad:
+            return _join(broad)
+
+        # Strategy 3: dependency root verb of the sentence.
+        sent = getattr(subj, 'sent', None)
+        if sent is not None:
+            for t in sent:
+                if t.dep_ == 'ROOT' and t.pos_ == 'VERB':
+                    return t.text
         return ''
 
     def _keywords(self, first: str, rest: str) -> List[str]:
