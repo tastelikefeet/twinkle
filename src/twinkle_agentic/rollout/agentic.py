@@ -1,22 +1,4 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
-"""Generic multi-turn agentic rollout primitives.
-
-Public API:
-    parse_tool_calls(text)       → List[{'tool_name', 'arguments'}]
-    clean_assistant_output(text) → str
-    strip_passage_prefix(chunk)  → Chunk
-    ensure_context_header(text)  → str
-    FrozenContext                → per-rollout incremental chunk+condense cache
-    batch_freeze_delta_pairs(pairs, chunker, condenser) → None
-    Rollout                      → per-rollout state holder
-    run_agentic_rollouts(...)    → full chunk → condense → sample → tool loop
-
-The module is intentionally free of any task-specific logic (reward,
-dataset, prompts). Callers inject condenser + tool factory so the same
-loop works for HotpotQA, synthetic math, open-web search, etc.
-"""
-from __future__ import annotations
-
 import json
 import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -38,23 +20,12 @@ _PARAMETER_RE = re.compile(r'<parameter=([^>]+)>\s*([\s\S]*?)\s*</parameter>')
 _TOOL_CALL_STRIP_RE = re.compile(r'<tool_call>[\s\S]*?(?:</tool_call>|\Z)')
 _BLOCK_TAG_STRIP_RE = re.compile(r'<block_(\d+)>\s*([\s\S]*?)\s*</block_\1>')
 _ORPHAN_BLOCK_RE = re.compile(r'</?block_\d+>')
-# HotpotQA-style ``[N] Title:`` passage prefix. Once chunks are wrapped
-# as ``<block_N>`` by the condenser, the upstream ``[N]`` competes with
-# our own 1-based numbering, confusing the compressor and wasting
-# tokens. ``strip_passage_prefix`` removes it from each chunk's content
-# while leaving ``raw`` untouched.
 _PASSAGE_PREFIX_RE = re.compile(r'^\s*\[\d+\]\s+')
-# Detect the first ``<block_N>`` marker in a rendered user message so we
-# can make sure the ``Context:`` header survives the chunk → condense →
-# groupby round-trip.
 _FIRST_BLOCK_RE = re.compile(r'<block_\d+>')
 
 _MEDIA_KEYS = ('images', 'videos', 'audios')
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Tool-call parsing & text sanitisation
-# ═══════════════════════════════════════════════════════════════════════════════
 def parse_tool_calls(text: str) -> List[Dict[str, Any]]:
     """Extract tool calls from assistant text (Qwen3.5 XML + JSON fallback)."""
     calls: List[Dict[str, Any]] = []
@@ -339,32 +310,6 @@ def run_agentic_rollouts(
     initial_frozens: Optional[List[Optional[FrozenContext]]] = None,
     on_turn: Optional[TurnHook] = None,
 ) -> List[Rollout]:
-    """Run a multi-turn agentic rollout loop over ``prompts``.
-
-    Args:
-        prompts: Prompt trajectories, one per rollout.
-        sampler: Policy sampler (vLLM).
-        sampling_params: Decoding params for the policy sampler.
-        chunker: Chunker used to split each turn's delta.
-        condenser: Condenser used to compress chunks between turns.
-        tool_factory: Factory ``(rollout) -> ToolManager`` invoked every
-            turn for every active rollout. Typically returns a manager
-            wired with the rollout's current full/compressed chunks.
-        max_turns: Cap on turns per rollout.
-        min_batch_size: Pad the sample call to at least this batch size
-            (prevents small-batch under-utilisation of vLLM).
-        initial_frozens: Optional per-prompt ``FrozenContext`` to clone
-            into the rollout's cache — lets callers share the initial
-            compression across ``num_generations`` rollouts of the same
-            prompt.
-        on_turn: Optional hook called after each turn with
-            ``(turn, active_rollouts, displays, responses)`` — used by
-            trace logging. Exceptions inside the hook are swallowed so
-            tracing cannot break training.
-
-    Returns:
-        List of completed :class:`Rollout` objects (same order as prompts).
-    """
     if initial_frozens is not None:
         assert len(initial_frozens) == len(prompts), (
             f'initial_frozens length {len(initial_frozens)} != prompts {len(prompts)}')
