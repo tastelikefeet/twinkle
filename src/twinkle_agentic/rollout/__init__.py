@@ -1,11 +1,13 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 """Generic multi-turn agentic rollout primitives.
 
-The orchestration loop lives here; compression machinery lives in
-:mod:`twinkle_agentic.condenser.frozen` and the tool-call wire format
-lives in :mod:`twinkle_agentic.tools.protocol`.
+The rollout loop here is compression-agnostic: callers plug in
+compression (or any other per-turn context edit) via the
+``display_builder`` callback. Compression machinery itself lives in
+:mod:`twinkle_agentic.condenser`.
 """
 from .agentic import (
+    DisplayBuilder,
     OutputSanitizer,
     Rollout,
     ToolFactory,
@@ -14,6 +16,7 @@ from .agentic import (
 )
 
 __all__ = [
+    'DisplayBuilder',
     'OutputSanitizer',
     'Rollout',
     'ToolFactory',

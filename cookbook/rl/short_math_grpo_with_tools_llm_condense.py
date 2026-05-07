@@ -18,14 +18,15 @@ from twinkle.model import TransformersModel
 from twinkle.preprocessor.base import Preprocessor
 from twinkle.processor import InputProcessor
 from twinkle.sampler import vLLMSampler
+from twinkle.template import Template
 from twinkle_agentic.chunker.native import NativeChunker
-from twinkle_agentic.condenser import LLMPassageCondenser
-from twinkle_agentic.rollout import (
+from twinkle_agentic.condenser import (
     FrozenContext,
-    Rollout,
+    LLMPassageCondenser,
     batch_freeze_delta_pairs,
-    run_agentic_rollouts,
+    strip_block_echoes,
 )
+from twinkle_agentic.rollout import Rollout, run_agentic_rollouts
 from twinkle_agentic.reward import HotpotQACoTReward, HotpotQAToolExploreReward, HotpotQAF1Reward
 from twinkle_agentic.tools.tool_manager import ToolManager
 
@@ -314,6 +315,13 @@ def main():
         device_mesh=sampler_mesh, remote_group='sampler')
     sampler.set_template('Qwen3_5Template', model_id=MODEL_ID, enable_thinking=False)
 
+    # Local Template for tool-call parsing / cleaning inside the rollout
+    # loop. The sampler is a Ray actor, so its remote ``.template`` is
+    # unreachable from this driver process — build a local one here and
+    # pass it into ``run_agentic_rollouts``. Cheap: only loads tokenizer
+    # + config once at init, not per batch.
+    rollout_template = Template(MODEL_ID)
+
     condenser = LLMPassageCondenser(
         sampler=sampler,
         sampling_params=SamplingParams(
@@ -332,13 +340,15 @@ def main():
 
     # Per-rollout tool factory: the ExtractCompressed tool needs the
     # rollout's CURRENT full+compressed chunks (which evolve every turn),
-    # so the factory closes over ``r.frozen`` instead of being built
-    # once up front.
+    # so the factory closes over the rollout's per-rollout FrozenContext
+    # stashed on ``r.state['frozen']`` (rollout itself is
+    # compression-agnostic; state is owned by this cookbook).
     def _build_tool_manager(r: Rollout) -> ToolManager:
+        fc: FrozenContext = r.state['frozen']
         return ToolManager([
             ExtractCompressed(
-                r.frozen.render_full(),
-                displayed_to_full=r.frozen.displayed_to_full(),
+                fc.render_full(),
+                displayed_to_full=fc.displayed_to_full(),
             )
         ])
 
@@ -399,14 +409,39 @@ def main():
             shared_frozens[key] = fc
             initial_pairs.append((fc, prompt))
         batch_freeze_delta_pairs(initial_pairs, chunker, condenser)
-        initial_frozens: List[Optional[FrozenContext]] = [
-            shared_frozens[id(p)] for p in expand_prompts]
+        # Clone the shared FrozenContext per rollout so each rollout
+        # mutates its own copy. Stashed on ``Rollout.state`` — the
+        # rollout loop never touches this; it's read back by the
+        # ``display_builder`` closure and ``_build_tool_manager``.
+        initial_states: List[Dict[str, Any]] = [
+            {'frozen': shared_frozens[id(p)].clone()} for p in expand_prompts]
+
+        # Per-turn compression hook: batched chunk + condense across all
+        # active rollouts, then return each rollout's displayed view.
+        # This is the ONLY place the rollout loop touches compression,
+        # and it's injected from the outside — ``run_agentic_rollouts``
+        # itself stays compression-free.
+        def _display_builder_with_compression(
+            active: List[Rollout]) -> List[Dict[str, Any]]:
+            batch_freeze_delta_pairs(
+                [(r.state['frozen'], r.trajectory) for r in active],
+                chunker, condenser)
+            return [r.state['frozen'].render_display() for r in active]
 
         rollouts = run_agentic_rollouts(
-            expand_prompts, sampler, sampling_params, chunker, condenser,
-            _build_tool_manager,
-            max_turns=MAX_TURNS, min_batch_size=GLOBAL_BATCH_SIZE,
-            initial_frozens=initial_frozens, on_turn=on_turn_hook)
+            expand_prompts, sampler, sampling_params,
+            _build_tool_manager, rollout_template,
+            max_turns=MAX_TURNS,
+            # Compression is injected via ``display_builder`` — the
+            # rollout loop itself has no knowledge of FrozenContext /
+            # chunker / condenser. Tool-call parsing is handled by the
+            # local ``rollout_template`` (Ray-actor sampler.template is
+            # unreachable from the driver).
+            display_builder=_display_builder_with_compression,
+            initial_states=initial_states,
+            output_sanitizers=[strip_block_echoes],
+            min_batch_size=GLOBAL_BATCH_SIZE,
+            on_turn=on_turn_hook)
 
         # ---- Per-rollout aggregates (reward + metrics) ------------------
         # Reward is computed on the whole rollout trajectory (final F1 +
