@@ -1,28 +1,22 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 """Generic multi-turn agentic rollout primitives.
 
-Extracted from the HotpotQA cookbooks so every agentic-RL training script
-can reuse the same chunk → condense → sample → tool loop without
-copy-pasting hundreds of lines.
+The orchestration loop lives here; compression machinery lives in
+:mod:`twinkle_agentic.condenser.frozen` and the tool-call wire format
+lives in :mod:`twinkle_agentic.tools.protocol`.
 """
 from .agentic import (
-    FrozenContext,
+    OutputSanitizer,
     Rollout,
-    batch_freeze_delta_pairs,
-    clean_assistant_output,
-    ensure_context_header,
-    parse_tool_calls,
+    ToolFactory,
+    TurnHook,
     run_agentic_rollouts,
-    strip_passage_prefix,
 )
 
 __all__ = [
-    'FrozenContext',
+    'OutputSanitizer',
     'Rollout',
-    'batch_freeze_delta_pairs',
-    'clean_assistant_output',
-    'ensure_context_header',
-    'parse_tool_calls',
+    'ToolFactory',
+    'TurnHook',
     'run_agentic_rollouts',
-    'strip_passage_prefix',
 ]

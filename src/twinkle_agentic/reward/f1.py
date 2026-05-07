@@ -70,6 +70,21 @@ def _f1_score(prediction: str, gold: str) -> Tuple[float, float]:
 
 
 class HotpotQAF1Reward(Reward):
+
+    def __init__(self, answer_pattern=_BOXED_RE):
+        if isinstance(answer_pattern, str):
+            answer_pattern = re.compile(answer_pattern)
+        self._answer_pattern = answer_pattern
+
+    def _extract(self, completion: str) -> str:
+        matches = self._answer_pattern.findall(completion or '')
+        if not matches:
+            return ''
+        last = matches[-1]
+        if isinstance(last, tuple):
+            last = last[0] if last else ''
+        return (last or '').strip()
+
     def __call__(self, trajectories: List[Dict[str, Any]], **kwargs) -> List[float]:
         rewards = []
         for traj in trajectories:
@@ -78,7 +93,7 @@ class HotpotQAF1Reward(Reward):
                 if key == 'ground_truth':
                     gold = val or ''
                     break
-            pred = _extract_final_answer(_last_assistant_text(traj))
+            pred = self._extract(_last_assistant_text(traj))
             f1, _ = _f1_score(pred, gold)
             rewards.append(f1)
         return rewards
