@@ -776,8 +776,23 @@ def main():
                 advantages.append(adv)
 
         total_completions = len(all_input_data)
-        for mb_start in range(0, total_completions, MINI_BATCH_SIZE):
-            mb_end = min(mb_start + MINI_BATCH_SIZE, total_completions)
+        # The trainer fans each mini-batch slice out across ``MODEL_GPUS``
+        # DP workers via ``_dispatch_args``, which raises if any rank
+        # ends up with an empty slice. With the per-turn training feed
+        # ``total_completions`` is ``sum(rollout.turns)`` — essentially
+        # arbitrary — so the tail slice ``[k*MINI_BATCH_SIZE:total]`` can
+        # contain fewer than ``MODEL_GPUS`` samples even when every
+        # middle slice is fine. Drop the unaligned tail (at most
+        # ``MODEL_GPUS-1`` items per batch) so every slice is guaranteed
+        # to fan out across all DP ranks.
+        aligned_completions = (total_completions // MODEL_GPUS) * MODEL_GPUS
+        if aligned_completions < total_completions:
+            logger.info(
+                '[dp-align] dropping %d tail sample(s): total=%d -> aligned=%d (dp=%d)',
+                total_completions - aligned_completions,
+                total_completions, aligned_completions, MODEL_GPUS)
+        for mb_start in range(0, aligned_completions, MINI_BATCH_SIZE):
+            mb_end = min(mb_start + MINI_BATCH_SIZE, aligned_completions)
             model.forward_backward(
                 inputs=all_input_data[mb_start:mb_end],
                 old_logps=all_old_logps[mb_start:mb_end],
