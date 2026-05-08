@@ -9,7 +9,6 @@ compression (or any other per-turn context edit) via the
 from .agentic import (
     OutputSanitizer,
     Rollout,
-    ToolFactory,
     TrajectoryBuilder,
     TurnHook,
     run_agentic_rollouts,
@@ -18,7 +17,6 @@ from .agentic import (
 __all__ = [
     'OutputSanitizer',
     'Rollout',
-    'ToolFactory',
     'TrajectoryBuilder',
     'TurnHook',
     'run_agentic_rollouts',
