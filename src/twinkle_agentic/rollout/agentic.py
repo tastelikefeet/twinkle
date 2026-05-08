@@ -14,7 +14,7 @@ _MEDIA_KEYS = ('images', 'videos', 'audios')
 OutputSanitizer = Callable[[str], str]
 TurnHook = Callable[[int, List['Rollout'], List[Dict[str, Any]], List[Any]], None]
 ToolFactory = Callable[['Rollout'], ToolManager]
-DisplayBuilder = Callable[[List['Rollout']], List[Dict[str, Any]]]
+TrajectoryBuilder = Callable[[List['Rollout']], List[Dict[str, Any]]]
 
 
 @dataclass(slots=True)
@@ -24,7 +24,7 @@ class Rollout:
     ``state`` is an opaque per-rollout scratchpad owned by the CALLER.
     The rollout itself never reads it. Callers that need per-rollout
     machinery (e.g. a compression cache) stash it here and recover it
-    from their ``display_builder`` / ``tool_factory`` closures.
+    from their ``trajectory_builder`` / ``tool_factory`` closures.
 
     Notes on ``turn_sequences``: all per-turn (prompt, generation) training
     features. Keeping every turn (not just the final one) lets GRPO train
@@ -51,7 +51,7 @@ class Rollout:
                 self.trajectory[k] = list(prompt_trajectory[k])
 
 
-def _default_display_builder(active: List[Rollout]) -> List[Dict[str, Any]]:
+def _default_trajectory_builder(active: List[Rollout]) -> List[Dict[str, Any]]:
     """Default: feed each rollout's trajectory straight to the sampler."""
     return [r.trajectory for r in active]
 
@@ -64,7 +64,7 @@ def run_agentic_rollouts(
     template: Template,
     *,
     max_turns: int,
-    display_builder: Optional[DisplayBuilder] = None,
+    trajectory_builder: Optional[TrajectoryBuilder] = None,
     initial_states: Optional[List[Any]] = None,
     output_sanitizers: Optional[List[OutputSanitizer]] = None,
     min_batch_size: int = 1,
@@ -84,7 +84,7 @@ def run_agentic_rollouts(
             for ``parse_tool_call`` / ``clean_tool_call`` family
             dispatch; construct once outside the training loop.
         max_turns: Cap on turns per rollout.
-        display_builder: Callback ``(active_rollouts) -> List[display]``
+        trajectory_builder: Callback ``(active_rollouts) -> List[trajectory]``
             that produces the input fed to the sampler each turn. This
             is the hook callers use to plug in compression / context
             editing WITHOUT the rollout knowing about it. Defaults to
@@ -100,7 +100,7 @@ def run_agentic_rollouts(
         min_batch_size: Pad the sample call to at least this batch size
             (prevents small-batch under-utilisation of vLLM).
         on_turn: Optional hook called after each turn with
-            ``(turn, active_rollouts, displays, responses)``. Exceptions
+            ``(turn, active_rollouts, trajectories, responses)``. Exceptions
             inside the hook are swallowed so tracing cannot break training.
 
     Returns:
@@ -117,7 +117,7 @@ def run_agentic_rollouts(
     else:
         rollouts = [Rollout(p) for p in prompts]
 
-    build_displays = display_builder or _default_display_builder
+    build_trajectories = trajectory_builder or _default_trajectory_builder
     extra_sanitizers: List[OutputSanitizer] = list(output_sanitizers or ())
 
     for turn in range(max_turns):
@@ -125,18 +125,18 @@ def run_agentic_rollouts(
         if not active:
             break
 
-        # Caller-owned display construction (compression plugs in here).
-        displays: List[Dict[str, Any]] = build_displays(active)
-        assert len(displays) == len(active), (
-            f'display_builder returned {len(displays)} items for '
+        # Caller-owned trajectory construction (compression plugs in here).
+        trajectories: List[Dict[str, Any]] = build_trajectories(active)
+        assert len(trajectories) == len(active), (
+            f'trajectory_builder returned {len(trajectories)} items for '
             f'{len(active)} active rollouts')
         tool_mgrs: List[ToolManager] = [tool_factory(r) for r in active]
 
-        n_active = len(displays)
+        n_active = len(trajectories)
         if n_active < min_batch_size:
-            displays = displays + [displays[0]] * (min_batch_size - n_active)
+            trajectories = trajectories + [trajectories[0]] * (min_batch_size - n_active)
 
-        responses = sampler.sample(displays, sampling_params)
+        responses = sampler.sample(trajectories, sampling_params)
         responses = responses[:n_active]
 
         for r, resp, tool_mgr in zip(active, responses, tool_mgrs):
@@ -144,7 +144,7 @@ def run_agentic_rollouts(
 
         if on_turn is not None:
             try:
-                on_turn(turn, active, displays, responses)
+                on_turn(turn, active, trajectories, responses)
             except Exception:  # pragma: no cover — tracing must never break training
                 pass
 

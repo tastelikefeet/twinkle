@@ -495,7 +495,7 @@ def create_hotpotqa_dataset() -> Dataset:
     dataset.map(HotpotQAProcessor(system=SYSTEM_PROMPT), remove_columns=_HOTPOTQA_COLS)
     # Intentionally NOT calling ``dataset.encode(...)``. The rollout path
     # passes raw trajectory dicts (``messages`` only) to the sampler via
-    # ``_FrozenContext.render_display()``; the sampler then re-encodes
+    # ``_FrozenContext.build_compressed_trajectory()``; the sampler then re-encodes
     # the COMPRESSED view per-turn inside ``encode_trajectory_for_vllm``.
     # Pre-encoding the RAW (uncompressed) prompt here would only produce
     # ``input_ids`` that nobody reads, while consuming dataset cache disk
@@ -555,7 +555,7 @@ class _FrozenContext:
         if needs_media:
             self.media_frozen = True
 
-    def render_display(self) -> Dict[str, Any]:
+    def build_compressed_trajectory(self) -> Dict[str, Any]:
         traj = Chunks(chunks=list(self.compressed_chunks)).to_trajectory()
         # Issue 6 safety-net: make sure the ``Context:`` header appears
         # before the first ``<block_N>`` in each user message so the model
@@ -569,7 +569,7 @@ class _FrozenContext:
                 msg['content'] = _ensure_context_header(content)
         return traj
 
-    def render_full(self) -> Chunks:
+    def get_full_chunks(self) -> Chunks:
         return Chunks(chunks=list(self.full_chunks))
 
     def displayed_to_full(self) -> Dict[int, int]:
@@ -577,7 +577,7 @@ class _FrozenContext:
 
         Delegates to :meth:`Chunks.displayed_block_mapping` on the
         compressed-chunk view so the mapping stays in sync with what
-        :meth:`render_display` actually wraps as ``<block_N>``.
+        :meth:`build_compressed_trajectory` actually wraps as ``<block_N>``.
         """
         return Chunks(chunks=list(self.compressed_chunks)).displayed_block_mapping()
 
@@ -624,7 +624,7 @@ def run_agentic_rollouts(
         tool_mgrs: List[ToolManager] = []
         for r in active:
             r.frozen.freeze_delta(r.trajectory, chunker)
-            displays.append(r.frozen.render_display())
+            displays.append(r.frozen.build_compressed_trajectory())
             # Issue 1 fix: pass the displayed->full mapping so
             # ExtractCompressed can translate the 1-based <block_N>
             # numbers the model emits back into the correct full-chunk
@@ -634,7 +634,7 @@ def run_agentic_rollouts(
             # consecutive counter over wrapped chunks only.
             tool_mgrs.append(ToolManager([
                 ExtractCompressed(
-                    r.frozen.render_full(),
+                    r.frozen.get_full_chunks(),
                     displayed_to_full=r.frozen.displayed_to_full(),
                 )
             ]))

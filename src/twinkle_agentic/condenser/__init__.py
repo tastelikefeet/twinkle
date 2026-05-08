@@ -4,7 +4,7 @@ from .frozen import (
     batch_freeze_delta_pairs,
     build_initial_rollout_states,
     ensure_context_header,
-    make_compression_display_builder,
+    make_compression_trajectory_builder,
     strip_block_echoes,
     strip_passage_prefix,
 )
@@ -19,7 +19,7 @@ __all__ = [
     'batch_freeze_delta_pairs',
     'build_initial_rollout_states',
     'ensure_context_header',
-    'make_compression_display_builder',
+    'make_compression_trajectory_builder',
     'strip_block_echoes',
     'strip_passage_prefix',
 ]

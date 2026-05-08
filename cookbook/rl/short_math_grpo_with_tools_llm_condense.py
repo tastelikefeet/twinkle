@@ -26,7 +26,7 @@ from twinkle_agentic.condenser import (
     LLMPassageCondenser,
     batch_freeze_delta_pairs,
     build_initial_rollout_states,
-    make_compression_display_builder,
+    make_compression_trajectory_builder,
     strip_block_echoes,
 )
 from twinkle_agentic.rollout import Rollout, run_agentic_rollouts
@@ -339,6 +339,8 @@ def main():
     model.set_processor(InputProcessor, padding_free=True)
     model.set_template('Qwen3_5Template', model_id=MODEL_ID, enable_thinking=False)
 
+    model.add_metric('GRPOMetric', is_training=True)
+
     # Policy sampler (LoRA-enabled, receives weight syncs). The same
     # sampler is reused by the condenser at compression time; the
     # condenser calls ``sampler.sample(..., use_base_model=True)`` so
@@ -391,7 +393,7 @@ def main():
         fc: FrozenContext = r.state['frozen']
         return ToolManager([
             ExtractCompressed(
-                fc.render_full(),
+                fc.get_full_chunks(),
                 displayed_to_full=fc.displayed_to_full(),
             )
         ])
@@ -439,7 +441,7 @@ def main():
             expand_prompts, sampler, sampling_params,
             _build_tool_manager, rollout_template,
             max_turns=MAX_TURNS,
-            display_builder=make_compression_display_builder(chunker, condenser),
+            trajectory_builder=make_compression_trajectory_builder(chunker, condenser),
             initial_states=initial_states,
             output_sanitizers=[strip_block_echoes],
             min_batch_size=GLOBAL_BATCH_SIZE,

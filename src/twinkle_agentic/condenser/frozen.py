@@ -119,16 +119,7 @@ class FrozenContext:
         cp.media_frozen = self.media_frozen
         return cp
 
-    def freeze_delta(
-        self,
-        trajectory: Dict[str, Any],
-        chunker: NativeChunker,
-        condenser: Condenser,
-    ) -> None:
-        """Single-pair wrapper around :func:`batch_freeze_delta_pairs`."""
-        batch_freeze_delta_pairs([(self, trajectory)], chunker, condenser)
-
-    def render_display(self) -> Dict[str, Any]:
+    def build_compressed_trajectory(self) -> Dict[str, Any]:
         """Return a trajectory-shaped view of the compressed chunks."""
         traj = Chunks(chunks=list(self.compressed_chunks)).to_trajectory()
         # Safety net: the chunker / condenser min_chars cutoff may merge
@@ -143,14 +134,19 @@ class FrozenContext:
                 msg['content'] = ensure_context_header(content)
         return traj
 
-    def render_full(self) -> Chunks:
+    def get_full_chunks(self) -> Chunks:
+        """Return the uncompressed chunk list (zero-cost view copy).
+
+        Consumed by :class:`ExtractCompressed` to recall the original
+        passage text behind a displayed ``<block_N>`` number.
+        """
         return Chunks(chunks=list(self.full_chunks))
 
     def displayed_to_full(self) -> Dict[int, int]:
         """Map ``displayed_block_number → full_chunk_idx``.
 
         Built off the compressed view so it matches what
-        :meth:`render_display` actually wraps as ``<block_N>``.
+        :meth:`build_compressed_trajectory` actually wraps as ``<block_N>``.
         """
         return Chunks(chunks=list(self.compressed_chunks)).displayed_block_mapping()
 
@@ -160,7 +156,7 @@ def batch_freeze_delta_pairs(
     chunker: NativeChunker,
     condenser: Condenser,
 ) -> None:
-    """Batched ``freeze_delta`` across many ``(frozen, trajectory)`` pairs.
+    """Freeze each pair's pending delta into its :class:`FrozenContext` cache.
 
     Workflow:
 
@@ -275,13 +271,13 @@ def build_initial_rollout_states(
     return [{'frozen': shared[id(p)].clone()} for p in expand_prompts]
 
 
-def make_compression_display_builder(
+def make_compression_trajectory_builder(
     chunker: NativeChunker,
     condenser: Condenser,
 ) -> Callable[[List[Any]], List[Dict[str, Any]]]:
-    """Create a ``display_builder`` closure wiring incremental compression.
+    """Create a ``trajectory_builder`` closure wiring incremental compression.
 
-    The returned callable matches the ``display_builder`` contract of
+    The returned callable matches the ``trajectory_builder`` contract of
     :func:`twinkle_agentic.rollout.run_agentic_rollouts`: on every turn it
 
     1. Batches the per-rollout delta (``trajectory[frozen_msg_count:]``)
@@ -304,13 +300,13 @@ def make_compression_display_builder(
 
     Returns:
         A closure ``(active: List[Rollout]) -> List[Dict[str, Any]]`` to
-        pass as ``run_agentic_rollouts(display_builder=...)``.
+        pass as ``run_agentic_rollouts(trajectory_builder=...)``.
     """
 
-    def _display_builder(active: List[Any]) -> List[Dict[str, Any]]:
+    def _trajectory_builder(active: List[Any]) -> List[Dict[str, Any]]:
         batch_freeze_delta_pairs(
             [(r.state['frozen'], r.trajectory) for r in active],
             chunker, condenser)
-        return [r.state['frozen'].render_display() for r in active]
+        return [r.state['frozen'].build_compressed_trajectory() for r in active]
 
-    return _display_builder
+    return _trajectory_builder
