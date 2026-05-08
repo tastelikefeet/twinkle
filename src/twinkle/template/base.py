@@ -3,7 +3,6 @@ import inspect
 import json
 import numpy as np
 import os
-import re
 from collections.abc import Mapping
 from copy import copy, deepcopy
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, Union
@@ -37,8 +36,8 @@ def _parse_arguments(args: Any) -> Any:
 def _normalize_tool_call_for_template(tc: Any) -> Any:
     """Translate Twinkle ``ToolCall`` shape to OpenAI-style for chat templates.
 
-    Twinkle internal:  ``{'tool_name': str, 'arguments': json-str}``
-    Chat-template:     ``{'type': 'function',
+    Twinkle internal: ``{'tool_name': str, 'arguments': json-str}``
+    Chat-template: ``{'type': 'function',
                           'function': {'name': str, 'arguments': dict}}``
 
     Calls already in OpenAI shape (have ``function.name`` or a top-level
@@ -75,9 +74,9 @@ def _normalize_tool_call_for_template(tc: Any) -> Any:
 
 
 def _normalize_tool_for_template(tool: Any) -> Any:
-    """Translate Twinkle :class:`~twinkle.data_format.message.Tool` advertisement.
+    """Translate Twinkle: class:`~twinkle.data_format.message.Tool` advertisement.
 
-    Twinkle:       ``{'tool_name', 'description', 'parameters': json-str}``
+    Twinkle: ``{'tool_name', 'description', 'parameters': json-str}``
     Chat-template: ``{'type': 'function',
                      'function': {'name', 'description', 'parameters': dict}}``
     """

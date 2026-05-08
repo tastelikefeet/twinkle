@@ -19,20 +19,6 @@ TrajectoryBuilder = Callable[[List['Rollout']], List[Dict[str, Any]]]
 
 @dataclass(slots=True)
 class Rollout:
-    """Per-rollout bookkeeping: trajectory, turn sequences, caller state.
-
-    ``state`` is an opaque per-rollout scratchpad owned by the CALLER.
-    The rollout itself never reads it. Callers that need per-rollout
-    machinery (e.g. a compression cache) stash it here and recover it
-    from their ``trajectory_builder`` / ``tool_factory`` closures.
-
-    Notes on ``turn_sequences``: all per-turn (prompt, generation) training
-    features. Keeping every turn (not just the final one) lets GRPO train
-    on the tool-call decision turns too, so the policy can learn WHEN to
-    expand a ``<block_N>``. Rollout-level reward is replicated onto every
-    turn's advantage at optimiser feed time.
-    """
-
     prompt_trajectory: InitVar[Dict[str, Any]]
     state: Any = None
     trajectory: Dict[str, Any] = field(init=False)

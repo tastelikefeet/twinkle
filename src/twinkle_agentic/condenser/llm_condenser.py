@@ -1,12 +1,4 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
-"""LLM-backed passage condenser.
-
-Delegates per-chunk summarisation to a provided ``vLLMSampler`` instance.
-The sampler is expected to run the *base* LLM (no LoRA) so compression
-stays decoupled from the policy being trained.
-"""
-from __future__ import annotations
-
 import re
 from typing import Any, Dict, Iterable, List, Optional, Pattern
 

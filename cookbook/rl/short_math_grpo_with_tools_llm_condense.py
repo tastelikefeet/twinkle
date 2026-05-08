@@ -2,7 +2,7 @@ import json
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import swanlab
 from peft import LoraConfig
@@ -34,9 +34,6 @@ from twinkle_agentic.tools import ExtractCompressed, ToolManager
 
 logger = get_logger()
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Configuration
-# ═══════════════════════════════════════════════════════════════════════════════
 MODEL_ID = os.environ.get('MODEL_ID', 'ms://Qwen/Qwen3.5-4B')
 USE_MEGATRON = bool(int(os.environ.get('USE_MEGATRON', '1')))
 
@@ -398,38 +395,16 @@ def main():
 
     model.add_metric('GRPOMetric', is_training=True)
 
-    # Policy sampler (LoRA-enabled, receives weight syncs). The same
-    # sampler is reused by the condenser at compression time; the
-    # condenser calls ``sampler.sample(..., use_base_model=True)`` so
-    # vLLM serves those requests with the base weights (no LoRA),
-    # independent of the policy LoRA currently mounted.
     sampler = vLLMSampler(
         model_id=MODEL_ID,
         engine_args={
-            # Bumped from 8192 -> 32768. The multi-turn rollout keeps
-            # APPENDING previously-expanded <block_N> passages (full
-            # original text) on every extract_compressed call, so the
-            # visible prompt grows monotonically across turns. With
-            # MAX_TURNS=6 and MAX_NEW_TOKENS=4096, the previous 8192
-            # budget would be exhausted after 1-2 tool expansions and
-            # vLLM would start truncating / failing; 32768 gives enough
-            # headroom for the full MAX_TURNS rollout plus the final
-            # generation even when several passages are recalled.
             'gpu_memory_utilization': 0.8, 'max_model_len': 32768,
             'max_lora_rank': 32, 'enable_lora': True,
             'enable_tower_connector_lora': True,
         },
         device_mesh=sampler_mesh, remote_group='sampler')
     sampler.set_template('Qwen3_5Template', model_id=MODEL_ID, enable_thinking=False)
-
-    # Local Template for tool-call parsing / cleaning inside the rollout
-    # loop AND for the condenser's special-token strip regex. The sampler
-    # is a Ray actor, so its remote ``.template`` is unreachable from this
-    # driver process — build a local one here and pass it into
-    # ``run_agentic_rollouts`` + ``LLMPassageCondenser``. Cheap: only
-    # loads tokenizer + config once at init, not per batch.
     rollout_template = Template(MODEL_ID)
-
     condenser = LLMPassageCondenser(
         sampler=sampler,
         sampling_params=SamplingParams(
@@ -441,11 +416,6 @@ def main():
         template=rollout_template,
     )
 
-    # Per-rollout tool factory: the ExtractCompressed tool needs the
-    # rollout's CURRENT full+compressed chunks (which evolve every turn),
-    # so the factory closes over the rollout's per-rollout FrozenContext
-    # stashed on ``r.state['frozen']`` (rollout itself is
-    # compression-agnostic; state is owned by this cookbook).
     def _build_tool_manager(r: Rollout) -> ToolManager:
         fc: FrozenContext = r.state['frozen']
         return ToolManager([
