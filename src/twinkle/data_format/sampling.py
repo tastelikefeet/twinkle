@@ -169,10 +169,18 @@ class SamplingParams:
 
 @dataclass
 class SampledSequence:
-    """A single sampled sequence with tokens and logprobs."""
+    """A single sampled sequence with tokens and logprobs.
+
+    ``logprobs`` layout (matches vLLM engine output at ``sampling_params.logprobs >= 1``):
+    one per GENERATED position, each a list of top-k ``(token_id, logprob)``
+    tuples where index 0 is always the chosen / sampled token. For
+    ``logprobs=1`` the inner list has length 1; for ``logprobs=k > 1`` it
+    has length ``k``. When ``sampling_params.logprobs is None`` the field
+    stays ``None``.
+    """
     stop_reason: StopReason
     tokens: List[int]
-    logprobs: Optional[List[float]] = None
+    logprobs: Optional[List[List[Tuple[int, float]]]] = None
     decoded: str = None
     new_input_feature: InputFeature = None
 

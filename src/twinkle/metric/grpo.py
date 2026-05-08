@@ -37,11 +37,14 @@ per-microbatch lists: its default ``pad_value=-200`` would defeat the
 iterate the microbatches and reduce each one independently.
 """
 import math
+import logging
 from typing import Any, Dict, List, Optional, Union
 
 from twinkle.data_format import InputFeature, ModelOutput
 
 from .base import Metric
+
+_logger = logging.getLogger(__name__)
 
 
 def _align_logps_to_mask(
@@ -160,6 +163,10 @@ class GRPOMetric(Metric):
         self.sum_approx_kl: float = 0.0
         self.n_tokens: int = 0
         self.has_old: bool = False
+        # One-shot warning gate for missing ``outputs['logps']``. Reset
+        # at each metric cycle so a mid-training regression still fires
+        # a single log line (vs. silently accumulating zero samples).
+        self._warned_missing_logps: bool = False
 
     @staticmethod
     def _as_mb_list(logps_val) -> Optional[List]:
@@ -263,6 +270,13 @@ class GRPOMetric(Metric):
         logps_val = outputs.get('logps')
         logps_list = self._as_mb_list(logps_val)
         if logps_list is None:
+            if not self._warned_missing_logps:
+                _logger.warning(
+                    "GRPOMetric: outputs['logps'] is missing/empty — "
+                    'metric will report zero samples for this cycle. '
+                    'Ensure the configured loss (e.g. GRPOLoss) populates '
+                    "outputs['logps'] and the model backend forwards it.")
+                self._warned_missing_logps = True
             return
 
         inputs_list = inputs if isinstance(inputs, list) else [inputs]

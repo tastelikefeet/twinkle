@@ -24,14 +24,13 @@ from twinkle_agentic.chunker.native import NativeChunker
 from twinkle_agentic.condenser import (
     FrozenContext,
     LLMPassageCondenser,
-    batch_freeze_delta_pairs,
     build_initial_rollout_states,
     make_compression_trajectory_builder,
     strip_block_echoes,
 )
 from twinkle_agentic.rollout import Rollout, run_agentic_rollouts
 from twinkle_agentic.reward import HotpotQACoTReward, HotpotQAToolExploreReward, HotpotQAF1Reward
-from twinkle_agentic.tools.tool_manager import ToolManager
+from twinkle_agentic.tools import ExtractCompressed, ToolManager
 
 logger = get_logger()
 
@@ -64,13 +63,15 @@ CHUNK_OVERLAP = int(os.environ.get('CHUNK_OVERLAP', 0))
 
 COMPRESS_TEMPERATURE = float(os.environ.get('COMPRESS_TEMPERATURE', 0.4))
 COMPRESS_RATIO = float(os.environ.get('COMPRESS_RATIO', 4.0))
+COMPRESS_MAX_TOKENS = int(os.environ.get('COMPRESS_MAX_TOKENS', 256))
+COMPRESS_MIN_CHARS = int(os.environ.get('COMPRESS_MIN_CHARS', 200))
 
 HOTPOTQA_NUM_PROC = int(os.environ.get('HOTPOTQA_NUM_PROC', 16))
 HOTPOTQA_MAX_LENGTH = int(os.environ.get('HOTPOTQA_MAX_LENGTH', 64000))
 
 # Reward weights
 F1_REWARD_WEIGHT = float(os.environ.get('F1_REWARD_WEIGHT', 1.0))
-COT_PENALTY_WEIGHT = float(os.environ.get('COT_PENALTY_WEIGHT', 0.5))
+COT_REWARD_WEIGHT = float(os.environ.get('COT_REWARD_WEIGHT', 0.5))
 TOOL_BONUS_WEIGHT = float(os.environ.get('TOOL_BONUS_WEIGHT', 0.1))
 
 WRONG_IDS_FILE = os.environ.get('WRONG_IDS_FILE', '')
@@ -161,7 +162,7 @@ def compute_rewards(trajectories: List[Dict[str, Any]]):
     cot = _COT_REWARD(trajectories)
     tool_explore = _TOOL_EXPLORE_REWARD(trajectories)
     total = [
-        F1_REWARD_WEIGHT * a + COT_PENALTY_WEIGHT * c + TOOL_BONUS_WEIGHT * te
+        F1_REWARD_WEIGHT * a + COT_REWARD_WEIGHT * c + TOOL_BONUS_WEIGHT * te
         for a, c, te in zip(f1, cot, tool_explore)
     ]
     return total, f1, cot, tool_explore
@@ -244,6 +245,62 @@ def _last_assistant_text(trajectory: Dict[str, Any]) -> Optional[str]:
         if m.get('role') == 'assistant':
             return m.get('content')
     return None
+
+
+def _make_dump_rollout_trace(path: str):
+    """Factory returning a ``TurnHook`` that appends each turn to JSONL.
+
+    The returned callable matches the
+    ``Callable[[int, List[Rollout], List[Dict], List[Any]], None]``
+    signature expected by :func:`run_agentic_rollouts`. Best-effort:
+    any per-record or per-file error is swallowed so tracing cannot
+    break training.
+    """
+    if not path:
+        def _noop(*args, **kwargs) -> None:
+            return None
+        return _noop
+
+    def _hook(turn: int, active: List[Rollout],
+              trajectories: List[Dict[str, Any]],
+              responses: List[Any]) -> None:
+        if not active:
+            return
+        try:
+            records: List[str] = []
+            for idx, r in enumerate(active):
+                try:
+                    resp = responses[idx] if idx < len(responses) else None
+                    tcc = sum(
+                        len(m.get('tool_calls') or [])
+                        for m in r.trajectory.get('messages', [])
+                        if m.get('role') == 'assistant')
+                    last_decoded = ''
+                    if resp and getattr(resp, 'sequences', None):
+                        last_decoded = resp.sequences[0].decoded or ''
+                    match = _BOXED_RE.search(_last_assistant_text(r.trajectory) or '') if r.done else None
+                    final_answer = match.group(0) if match else ''
+                    record = {
+                        'ts': time.time(), 'turn': turn,
+                        'group_size': len(active), 'picked_idx': idx,
+                        'rollout_id': id(r), 'tool_call_count': tcc,
+                        'done': bool(r.done),
+                        'compressed': (trajectories[idx]
+                                       if idx < len(trajectories) else None),
+                        'last_decoded': last_decoded,
+                        'final_answer': final_answer,
+                    }
+                    records.append(
+                        json.dumps(record, ensure_ascii=False, default=str))
+                except Exception:
+                    pass
+            if records:
+                with open(path, 'a', encoding='utf-8') as f:
+                    f.write('\n'.join(records) + '\n')
+        except Exception:
+            pass
+
+    return _hook
 
 
 def _compute_rollout_diagnostics(
@@ -452,13 +509,12 @@ def main():
         per_rollout_completion_length = [
             sum(len(s.tokens) for s in r.turn_sequences) for r in rollouts]
 
-        total_rewards, f1_rewards, length_pen_rewards, answer_commit_rewards, cot_rewards, tool_explore_rewards = \
+        total_rewards, f1_rewards, cot_rewards, tool_explore_rewards = \
             compute_rewards(all_trajectories)
 
         metrics.accumulate(
             completion_lengths=per_rollout_completion_length,
             rewards={'total': total_rewards, 'f1': f1_rewards,
-                     'length_pen': length_pen_rewards, 'answer_commit': answer_commit_rewards,
                      'cot': cot_rewards, 'tool_explore': tool_explore_rewards})
 
         rollout_advantages = advantage_fn(

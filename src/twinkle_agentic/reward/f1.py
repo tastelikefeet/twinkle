@@ -1,14 +1,44 @@
 import re
 import string
-from typing import List, Dict, Any, Tuple, Counter
+from typing import List, Dict, Any, Tuple
+from collections import Counter
 
 from twinkle.reward import Reward
 
-_BOXED_RE = re.compile(r'\\boxed\{([^}]*)\}')
+_BOXED_MARKER = '\\boxed{'
+
 
 def _extract_final_answer(completion: str) -> str:
-    matches = _BOXED_RE.findall(completion or '')
-    return matches[-1].strip() if matches else ''
+    """Return the content of the LAST ``\\boxed{...}`` with brace balancing.
+
+    Uses a depth counter so nested braces (e.g. ``\\boxed{\\frac{1}{2}}``)
+    are captured correctly instead of being truncated at the first ``}``.
+    Returns an empty string if no well-formed boxed expression is found.
+    """
+    if not completion:
+        return ''
+    out = ''
+    idx = 0
+    while True:
+        i = completion.find(_BOXED_MARKER, idx)
+        if i == -1:
+            break
+        j = i + len(_BOXED_MARKER)
+        depth = 1
+        while j < len(completion) and depth > 0:
+            c = completion[j]
+            if c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+            j += 1
+        if depth == 0:
+            out = completion[i + len(_BOXED_MARKER): j - 1].strip()
+            idx = j
+        else:
+            # Unbalanced trailing marker — stop, keep last good match.
+            break
+    return out
 
 
 def _last_assistant_text(traj: Dict[str, Any]) -> str:
@@ -71,12 +101,21 @@ def _f1_score(prediction: str, gold: str) -> Tuple[float, float]:
 
 class HotpotQAF1Reward(Reward):
 
-    def __init__(self, answer_pattern=_BOXED_RE):
+    def __init__(self, answer_pattern=None):
+        # ``answer_pattern`` kept for backward-compat; the brace-balanced
+        # extractor :func:`_extract_final_answer` is now the source of
+        # truth. A user-supplied regex only kicks in when it produces a
+        # match AND the balanced extractor did not (legacy callers).
         if isinstance(answer_pattern, str):
             answer_pattern = re.compile(answer_pattern)
         self._answer_pattern = answer_pattern
 
     def _extract(self, completion: str) -> str:
+        balanced = _extract_final_answer(completion)
+        if balanced:
+            return balanced
+        if self._answer_pattern is None:
+            return ''
         matches = self._answer_pattern.findall(completion or '')
         if not matches:
             return ''
@@ -100,35 +139,86 @@ class HotpotQAF1Reward(Reward):
 
 
 class HotpotQACoTReward(Reward):
-    _STEP1_RE = re.compile(r'step\s*1\b', re.IGNORECASE)
+    """Graded chain-of-thought reward for multi-step reasoning.
+
+    Design notes (why it is NOT a single ``step 1`` regex):
+
+    1. **Line-anchored**: only counts ``Step N:`` patterns that start a
+       line (``(?im)^\s*step\s*\d+[.:]``). This rejects inline
+       echoes of the system prompt embedded in quoted text, which are
+       a known reward-hacking surface when the system prompt itself
+       lists ``Step 1``, ``Step 2`` as instructions.
+    2. **Graded by distinct step count**: 0 distinct → 0.0, 1 → 0.25,
+       ..., 4+ → 1.0. Provides a gradient instead of a 0/1 signal.
+    3. **Requires a boxed answer**: if the rollout never emitted
+       ``\\boxed{...}`` the reward collapses to 0.0 — CoT without a
+       committed answer is not useful for HotpotQA.
+    """
+
+    _STEP_LINE_RE = re.compile(r'(?im)^\s*step\s*(\d+)\s*[.:]')
+    _HAS_BOXED_RE = re.compile(r'\\boxed\{')
 
     def __call__(self, trajectories: List[Dict[str, Any]], **kwargs) -> List[float]:
-        rewards = []
+        rewards: List[float] = []
         for t in trajectories:
-            msgs = t.get('messages', [])
+            msgs = t.get('messages', []) or []
 
-            # Concatenate all assistant turns
-            all_assistant_text = ' '.join(
+            # Newline-joined so ``^`` line anchors work even when
+            # multiple assistant turns exist.
+            assistant_text = '\n'.join(
                 m.get('content', '') or ''
                 for m in msgs
                 if m.get('role') == 'assistant' and isinstance(m.get('content'), str)
             )
 
-            if self._STEP1_RE.search(all_assistant_text):
-                rewards.append(1.0)
-            else:
+            if not self._HAS_BOXED_RE.search(assistant_text):
                 rewards.append(0.0)
+                continue
+
+            steps: set = set()
+            for match in self._STEP_LINE_RE.finditer(assistant_text):
+                try:
+                    steps.add(int(match.group(1)))
+                except ValueError:
+                    continue
+
+            n = len(steps)
+            # 0 → 0.0, 1 → 0.25, 2 → 0.5, 3 → 0.75, 4+ → 1.0
+            rewards.append(min(1.0, n * 0.25))
 
         return rewards
 
 
 class HotpotQAToolExploreReward(Reward):
+    """Reward the model for issuing AT LEAST ONE SUCCESSFUL tool call.
+
+    A tool call is considered "successful" if its immediate ``tool``
+    response does not start with ``ERROR`` and is non-empty. This
+    discourages reward-hacking via spamming malformed ``extract_compressed``
+    calls that always return ``<block_N>ERROR: ...`` responses.
+    """
+
     def __call__(self, trajectories: List[Dict[str, Any]], **kwargs) -> List[float]:
         rewards: List[float] = []
         for t in trajectories:
-            has_tool_call = any(
-                m.get('role') == 'assistant' and m.get('tool_calls')
-                for m in t.get('messages', []))
-            rewards.append(1.0 if has_tool_call else 0.0)
+            msgs = t.get('messages', []) or []
+            n_msgs = len(msgs)
+            success = False
+            for i, m in enumerate(msgs):
+                if m.get('role') != 'assistant' or not m.get('tool_calls'):
+                    continue
+                # Scan subsequent consecutive ``tool`` messages and keep
+                # the first non-ERROR one.
+                j = i + 1
+                while j < n_msgs and msgs[j].get('role') == 'tool':
+                    content = msgs[j].get('content') or ''
+                    text = content if isinstance(content, str) else str(content)
+                    if text.strip() and not text.lstrip().startswith('ERROR'):
+                        success = True
+                        break
+                    j += 1
+                if success:
+                    break
+            rewards.append(1.0 if success else 0.0)
         return rewards
 
