@@ -224,43 +224,14 @@ def batch_freeze_delta_pairs(
             frozen.media_frozen = True
 
 
-def build_initial_rollout_states(
-    expand_prompts: List[Dict[str, Any]],
+def build_frozen_user_data(
+    trajectories: List[Dict[str, Any]],
     chunker: NativeChunker,
     condenser: Condenser,
 ) -> List[Dict[str, Any]]:
-    """Build per-rollout ``initial_states`` with a shared initial compression.
-
-    Typical use in GRPO-style pipelines: ``expand_prompts`` contains each
-    unique prompt repeated ``NUM_GENERATIONS`` times (same Python object,
-    same ``id()``). For each UNIQUE prompt this helper compresses the
-    initial context exactly ONCE (all unique compressions are batched into
-    a single ``condenser.condense`` call), then ``.clone()``s the resulting
-    :class:`FrozenContext` per rollout so sibling rollouts start from
-    byte-identical state but can diverge independently afterwards.
-
-    Why it matters:
-
-    * **Cost**: ``NUM_GENERATIONS``× fewer compressor calls per batch.
-    * **Fidelity**: sibling rollouts of the same prompt share the exact
-      same initial summary, so GRPO's group-relative advantage compares
-      policy differences, not compression sampling noise.
-
-    Args:
-        expand_prompts: The expanded prompt list (length =
-            ``len(batch) * NUM_GENERATIONS``) as passed into
-            ``run_agentic_rollouts``.
-        chunker: Local chunker used to split each unique prompt.
-        condenser: Condenser that does the actual summarisation.
-
-    Returns:
-        A list of ``{'frozen': FrozenContext}`` dicts, one per entry in
-        ``expand_prompts`` (same order), ready to pass as
-        ``run_agentic_rollouts(initial_states=...)``.
-    """
     shared: Dict[int, FrozenContext] = {}
     pairs: List[Tuple[FrozenContext, Dict[str, Any]]] = []
-    for prompt in expand_prompts:
+    for prompt in trajectories:
         key = id(prompt)
         if key in shared:
             continue  # same prompt object already queued
@@ -268,7 +239,7 @@ def build_initial_rollout_states(
         shared[key] = fc
         pairs.append((fc, prompt))
     batch_freeze_delta_pairs(pairs, chunker, condenser)
-    return [{'frozen': shared[id(p)].clone()} for p in expand_prompts]
+    return [{'frozen': shared[id(p)].clone()} for p in trajectories]
 
 
 def make_compression_trajectory_builder(

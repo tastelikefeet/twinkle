@@ -675,7 +675,7 @@ def run_agentic_rollouts(
                 for i, tc in enumerate(tool_calls):
                     r.trajectory['messages'].append({
                         'role': 'tool',
-                        'content': tool_mgr.dispatch(tc),
+                        'content': tool_mgr(tc),
                         'tool_call_id': f'call_t{turn}_i{i}',
                     })
 

@@ -2,7 +2,7 @@ import json
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Callable
 
 import swanlab
 from peft import LoraConfig
@@ -11,7 +11,7 @@ import twinkle
 from twinkle import DeviceMesh, DeviceGroup, get_logger
 from twinkle.advantage import GRPOAdvantage
 from twinkle.checkpoint_engine import CheckpointEngineManager
-from twinkle.data_format import Message, SamplingParams, Trajectory
+from twinkle.data_format import Message, SamplingParams, Trajectory, ToolCall
 from twinkle.dataloader import DataLoader
 from twinkle.dataset import Dataset, DatasetMeta
 from twinkle.metric import CompletionRewardMetric
@@ -19,12 +19,12 @@ from twinkle.model import TransformersModel
 from twinkle.preprocessor.base import Preprocessor
 from twinkle.processor import InputProcessor
 from twinkle.sampler import vLLMSampler
-from twinkle.template import Template
+from twinkle.template import Qwen3_5Template
 from twinkle_agentic.chunker.native import NativeChunker
 from twinkle_agentic.condenser import (
     FrozenContext,
     LLMPassageCondenser,
-    build_initial_rollout_states,
+    build_frozen_user_data,
     make_compression_trajectory_builder,
     strip_block_echoes,
 )
@@ -404,7 +404,7 @@ def main():
         },
         device_mesh=sampler_mesh, remote_group='sampler')
     sampler.set_template('Qwen3_5Template', model_id=MODEL_ID, enable_thinking=False)
-    rollout_template = Template(MODEL_ID)
+    rollout_template = Qwen3_5Template(MODEL_ID)
     condenser = LLMPassageCondenser(
         sampler=sampler,
         sampling_params=SamplingParams(
@@ -416,8 +416,8 @@ def main():
         template=rollout_template,
     )
 
-    def _build_tool_manager(r: Rollout) -> ToolManager:
-        fc: FrozenContext = r.state['frozen']
+    def _build_tool_manager(r: Rollout) -> Callable[[Dict[str, Any]], str]:
+        fc: FrozenContext = r.user_data['frozen']
         return ToolManager([
             ExtractCompressed(
                 fc.get_full_chunks(),
@@ -461,7 +461,7 @@ def main():
         ckpt_manager.sync_weights(merge_and_sync=False)
         sampler.reset_prefix_cache()
 
-        initial_states = build_initial_rollout_states(
+        user_data = build_frozen_user_data(
             expand_prompts, chunker, condenser)
 
         rollouts = run_agentic_rollouts(
@@ -469,7 +469,7 @@ def main():
             _build_tool_manager, rollout_template,
             max_turns=MAX_TURNS,
             trajectory_builder=make_compression_trajectory_builder(chunker, condenser),
-            initial_states=initial_states,
+            user_data=user_data,
             output_sanitizers=[strip_block_echoes],
             min_batch_size=GLOBAL_BATCH_SIZE,
             on_turn=on_turn_hook)

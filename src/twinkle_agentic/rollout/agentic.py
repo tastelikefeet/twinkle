@@ -3,7 +3,7 @@ import json
 from dataclasses import InitVar, dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-from twinkle.data_format import SamplingParams
+from twinkle.data_format import SamplingParams, ToolCall
 from twinkle.sampler import vLLMSampler
 from twinkle.template import Template
 
@@ -13,28 +13,17 @@ _MEDIA_KEYS = ('images', 'videos', 'audios')
 
 OutputSanitizer = Callable[[str], str]
 TurnHook = Callable[[int, List['Rollout'], List[Dict[str, Any]], List[Any]], None]
-ToolFactory = Callable[['Rollout'], ToolManager]
 TrajectoryBuilder = Callable[[List['Rollout']], List[Dict[str, Any]]]
 
 
 @dataclass(slots=True)
 class Rollout:
-    prompt_trajectory: InitVar[Dict[str, Any]]
-    state: Any = None
     trajectory: Dict[str, Any] = field(init=False)
+    user_data: Dict[str, Any] = None
     final_sequence: Any = field(init=False, default=None)
     turn_sequences: List[Any] = field(init=False, default_factory=list)
     turns: int = field(init=False, default=0)
     done: bool = field(init=False, default=False)
-
-    def __post_init__(self, prompt_trajectory: Dict[str, Any]) -> None:
-        self.trajectory = {
-            'messages': list(prompt_trajectory.get('messages', [])),
-            'user_data': prompt_trajectory.get('user_data', []),
-        }
-        for k in _MEDIA_KEYS:
-            if prompt_trajectory.get(k):
-                self.trajectory[k] = list(prompt_trajectory[k])
 
 
 def _default_trajectory_builder(active: List[Rollout]) -> List[Dict[str, Any]]:
@@ -46,60 +35,24 @@ def run_agentic_rollouts(
     prompts: List[Dict[str, Any]],
     sampler: vLLMSampler,
     sampling_params: SamplingParams,
-    tool_factory: ToolFactory,
+    tool_factory: Callable[['Rollout'], Callable[[Dict[str, Any]], str]],
     template: Template,
     *,
     max_turns: int,
     trajectory_builder: Optional[TrajectoryBuilder] = None,
-    initial_states: Optional[List[Any]] = None,
     output_sanitizers: Optional[List[OutputSanitizer]] = None,
     min_batch_size: int = 1,
     on_turn: Optional[TurnHook] = None,
+    user_data: List[Dict[str, Any]] = None,
 ) -> List[Rollout]:
-    """Run a multi-turn agentic rollout loop over ``prompts``.
-
-    Args:
-        prompts: Prompt trajectories, one per rollout.
-        sampler: Policy sampler (vLLM). Typically a Ray actor, so its
-            remote ``.template`` is unreachable from the driver — pass
-            a local ``Template`` via the ``template`` argument instead.
-        sampling_params: Decoding params for the policy sampler.
-        tool_factory: Factory ``(rollout) -> ToolManager`` invoked every
-            turn for every active rollout.
-        template: Local :class:`~twinkle.template.Template` used purely
-            for ``parse_tool_call`` / ``clean_tool_call`` family
-            dispatch; construct once outside the training loop.
-        max_turns: Cap on turns per rollout.
-        trajectory_builder: Callback ``(active_rollouts) -> List[trajectory]``
-            that produces the input fed to the sampler each turn. This
-            is the hook callers use to plug in compression / context
-            editing WITHOUT the rollout knowing about it. Defaults to
-            returning each rollout's trajectory verbatim (no
-            compression).
-        initial_states: Optional per-prompt opaque state, one entry per
-            prompt, stashed on ``Rollout.state``. Callers use this to
-            seed per-rollout compression caches (or anything else) —
-            the rollout loop never reads these values.
-        output_sanitizers: Optional extra cleaners applied AFTER
-            ``template.clean_tool_call`` (e.g. ``strip_block_echoes`` to
-            remove condenser ``<block_N>`` markup from assistant text).
-        min_batch_size: Pad the sample call to at least this batch size
-            (prevents small-batch under-utilisation of vLLM).
-        on_turn: Optional hook called after each turn with
-            ``(turn, active_rollouts, trajectories, responses)``. Exceptions
-            inside the hook are swallowed so tracing cannot break training.
-
-    Returns:
-        List of completed :class:`Rollout` objects (same order as prompts).
-    """
     assert template is not None, (
         'run_agentic_rollouts requires a local Template for tool-call '
         'parsing / cleaning; build one via ``Template(MODEL_ID)``.')
 
-    if initial_states is not None:
-        assert len(initial_states) == len(prompts), (
-            f'initial_states length {len(initial_states)} != prompts {len(prompts)}')
-        rollouts = [Rollout(p, s) for p, s in zip(prompts, initial_states)]
+    if user_data is not None:
+        assert len(user_data) == len(prompts), (
+            f'initial_states length {len(user_data)} != prompts {len(prompts)}')
+        rollouts = [Rollout(p, s) for p, s in zip(prompts, user_data)]
     else:
         rollouts = [Rollout(p) for p in prompts]
 
@@ -116,7 +69,7 @@ def run_agentic_rollouts(
         assert len(trajectories) == len(active), (
             f'trajectory_builder returned {len(trajectories)} items for '
             f'{len(active)} active rollouts')
-        tool_mgrs: List[ToolManager] = [tool_factory(r) for r in active]
+        tool_mgrs: List[Callable[[Dict[str, Any]], str]] = [tool_factory(r) for r in active]
 
         n_active = len(trajectories)
         if n_active < min_batch_size:
@@ -129,10 +82,7 @@ def run_agentic_rollouts(
             _advance_rollout(r, resp, tool_mgr, turn, template, extra_sanitizers)
 
         if on_turn is not None:
-            try:
-                on_turn(turn, active, trajectories, responses)
-            except Exception:  # pragma: no cover — tracing must never break training
-                pass
+            on_turn(turn, active, trajectories, responses)
 
     for r in rollouts:
         r.done = True
@@ -149,7 +99,7 @@ def run_agentic_rollouts(
 def _advance_rollout(
     rollout: Rollout,
     response: Any,
-    tool_mgr: ToolManager,
+    tool_dispatcher: Callable[[Dict[str, Any]], str],
     turn: int,
     template: Template,
     extra_sanitizers: List[OutputSanitizer],
@@ -185,7 +135,7 @@ def _advance_rollout(
     for i, tc in enumerate(tool_calls):
         rollout.trajectory['messages'].append({
             'role': 'tool',
-            'content': tool_mgr.dispatch(tc),
+            'content': tool_dispatcher(tc),
             'tool_call_id': f'call_t{turn}_i{i}',
         })
 

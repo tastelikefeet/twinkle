@@ -37,7 +37,7 @@ class ToolManager:
         [{'tool_name': 'extract_compressed', 'description': '...',
           'parameters': '...'}]
         >>> # 2. the LLM emits a tool_call; dispatch returns the tool result
-        >>> result = mgr.dispatch({
+        >>> result = mgr({
         ...     'tool_name': 'extract_compressed',
         ...     'arguments': '{"blocks": [1, 3]}',
         ... })
@@ -90,9 +90,7 @@ class ToolManager:
         """Return the list of :class:`ToolInfo` schemas for prompt injection."""
         return [t.tool_info() for t in self._tools.values()]
 
-    # -- Dispatch -------------------------------------------------------------
-
-    def dispatch(self, tool_call: Union[ToolCall, Dict[str, Any]]) -> str:
+    def __call__(self, tool_call: Union[ToolCall, Dict[str, Any]]) -> str:
         """Dispatch a :class:`ToolCall` to its registered tool.
 
         The return value is always a string so it can be dropped straight
