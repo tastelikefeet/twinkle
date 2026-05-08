@@ -1,24 +1,6 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
-"""Generic multi-turn agentic rollout orchestration.
-
-This module is intentionally format- and compression-agnostic:
-
-* The **tool-call wire format** is owned by
-  :class:`twinkle.template.Template`; the rollout dispatches on
-  ``template.parse_tool_call`` / ``template.clean_tool_call`` so adding
-  a new model family only requires extending ``Template``.
-* **Compression is NOT a rollout concern.** The rollout has no
-  knowledge of ``FrozenContext``, chunkers or condensers. Callers who
-  want compression plug it in via the ``display_builder`` callback
-  (and stash any per-rollout state on ``Rollout.state``). The default
-  builder simply feeds ``rollout.trajectory`` straight to the sampler,
-  so the rollout works out of the box without any compression wiring.
-* Callers can inject **extra output sanitisers** to clean
-  format-specific echoes from assistant text before it is committed to
-  the trajectory (e.g. ``strip_block_echoes`` for the condenser's
-  ``<block_N>`` markup).
-"""
 import json
+from dataclasses import InitVar, dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from twinkle.data_format import SamplingParams
@@ -35,6 +17,7 @@ ToolFactory = Callable[['Rollout'], ToolManager]
 DisplayBuilder = Callable[[List['Rollout']], List[Dict[str, Any]]]
 
 
+@dataclass(slots=True)
 class Rollout:
     """Per-rollout bookkeeping: trajectory, turn sequences, caller state.
 
@@ -42,33 +25,30 @@ class Rollout:
     The rollout itself never reads it. Callers that need per-rollout
     machinery (e.g. a compression cache) stash it here and recover it
     from their ``display_builder`` / ``tool_factory`` closures.
-    """
-    __slots__ = (
-        'trajectory', 'final_sequence', 'turn_sequences', 'turns', 'done', 'state')
 
-    def __init__(
-        self,
-        prompt_trajectory: Dict[str, Any],
-        state: Any = None,
-    ) -> None:
-        self.trajectory: Dict[str, Any] = {
+    Notes on ``turn_sequences``: all per-turn (prompt, generation) training
+    features. Keeping every turn (not just the final one) lets GRPO train
+    on the tool-call decision turns too, so the policy can learn WHEN to
+    expand a ``<block_N>``. Rollout-level reward is replicated onto every
+    turn's advantage at optimiser feed time.
+    """
+
+    prompt_trajectory: InitVar[Dict[str, Any]]
+    state: Any = None
+    trajectory: Dict[str, Any] = field(init=False)
+    final_sequence: Any = field(init=False, default=None)
+    turn_sequences: List[Any] = field(init=False, default_factory=list)
+    turns: int = field(init=False, default=0)
+    done: bool = field(init=False, default=False)
+
+    def __post_init__(self, prompt_trajectory: Dict[str, Any]) -> None:
+        self.trajectory = {
             'messages': list(prompt_trajectory.get('messages', [])),
             'user_data': prompt_trajectory.get('user_data', []),
         }
         for k in _MEDIA_KEYS:
             if prompt_trajectory.get(k):
                 self.trajectory[k] = list(prompt_trajectory[k])
-        self.final_sequence = None
-        # All per-turn (prompt, generation) training features. Keeping
-        # every turn (not just the final one) lets GRPO train on the
-        # tool-call decision turns too, so the policy can learn WHEN to
-        # expand a <block_N>. Rollout-level reward is replicated onto
-        # every turn's advantage at optimiser feed time.
-        self.turn_sequences: List[Any] = []
-        self.turns = 0
-        self.done = False
-        # Opaque caller-owned state. Never touched by the rollout loop.
-        self.state = state
 
 
 def _default_display_builder(active: List[Rollout]) -> List[Dict[str, Any]]:
@@ -170,6 +150,13 @@ def run_agentic_rollouts(
 
     for r in rollouts:
         r.done = True
+
+    if max_turns > 0:
+        empty = [i for i, r in enumerate(rollouts) if not r.turn_sequences]
+        assert not empty, (
+            f'rollouts {empty} have empty turn_sequences after {max_turns} '
+            f'turns; likely a sampler or min_batch_size bug.')
+
     return rollouts
 
 

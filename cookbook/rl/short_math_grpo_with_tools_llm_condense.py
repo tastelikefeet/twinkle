@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -24,6 +25,8 @@ from twinkle_agentic.condenser import (
     FrozenContext,
     LLMPassageCondenser,
     batch_freeze_delta_pairs,
+    build_initial_rollout_states,
+    make_compression_display_builder,
     strip_block_echoes,
 )
 from twinkle_agentic.rollout import Rollout, run_agentic_rollouts
@@ -229,9 +232,54 @@ def create_hotpotqa_dataset() -> Dataset:
     return dataset
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Main
-# ═══════════════════════════════════════════════════════════════════════════════
+# Matches a LaTeX ``\boxed{...}`` final-answer marker — used to flag
+# rollouts that never committed an answer. Brace-balanced is overkill for
+# a logging heuristic; a non-greedy ``[^}]*`` is good enough.
+_BOXED_RE = re.compile(r'\\boxed\{[^}]*\}')
+
+
+def _last_assistant_text(trajectory: Dict[str, Any]) -> Optional[str]:
+    """Return the text of the last ``assistant`` message, or ``None``."""
+    for m in reversed(trajectory.get('messages', [])):
+        if m.get('role') == 'assistant':
+            return m.get('content')
+    return None
+
+
+def _compute_rollout_diagnostics(
+    rollouts: List[Rollout],
+    n_turns_per_rollout: List[int],
+    all_trajectories: List[Dict[str, Any]],
+) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    if n_turns_per_rollout:
+        out['avg_turns'] = sum(n_turns_per_rollout) / len(n_turns_per_rollout)
+
+    _max_prompt_tok = 0
+    for r in rollouts:
+        for seq in r.turn_sequences:
+            feat = getattr(seq, 'new_input_feature', None) or {}
+            ids = feat.get('input_ids') if isinstance(feat, dict) else None
+            if ids:
+                prompt_len = max(0, len(ids) - len(seq.tokens or []))
+                if prompt_len > _max_prompt_tok:
+                    _max_prompt_tok = prompt_len
+    out['max_prompt_tokens'] = _max_prompt_tok
+
+    if all_trajectories:
+        tool_counts = [
+            sum(len(m.get('tool_calls') or [])
+                for m in t.get('messages', []) if m.get('role') == 'assistant')
+            for t in all_trajectories]
+        out['avg_tool_calls'] = sum(tool_counts) / len(tool_counts)
+        out['tool_use_rate'] = sum(1 for c in tool_counts if c > 0) / len(tool_counts)
+        n_no_boxed = sum(
+            0 if _BOXED_RE.search(_last_assistant_text(t) or '') else 1
+            for t in all_trajectories)
+        out['no_boxed_rate'] = n_no_boxed / len(all_trajectories)
+    return out
+
+
 def main():
     swanlab.init(project='twinkle')
 
@@ -330,15 +378,7 @@ def main():
             temperature=COMPRESS_TEMPERATURE, top_p=0.9),
         system_prompt=COMPRESS_SYSTEM_PROMPT,
         min_chars=COMPRESS_MIN_CHARS,
-        # Skip the policy's own assistant turns in addition to the
-        # default system/tool skip. Otherwise any turn whose cleaned
-        # assistant content exceeds ``min_chars`` gets summarised into
-        # Summary/Key/More on the NEXT turn, and the policy would see
-        # its own chain-of-thought through a compression lens —
-        # directly fighting the ``HotpotQACoTReward`` signal.
         skip_roles=('system', 'tool', 'assistant'),
-        # Drives the special-token strip regex from the tokenizer's
-        # ``all_special_tokens`` (no hand-maintained Qwen/Llama list).
         template=rollout_template,
     )
 
@@ -392,76 +432,19 @@ def main():
         ckpt_manager.sync_weights(merge_and_sync=False)
         sampler.reset_prefix_cache()
 
-        # Compress the initial prompt (system + user + passages) ONCE per
-        # unique prompt in the batch, then share the result across its
-        # ``NUM_GENERATIONS`` rollouts via ``FrozenContext.clone()``.
-        # Without this, each rollout would independently re-run the
-        # base-LLM compressor on the same passages, multiplying
-        # compression cost by NUM_GENERATIONS and introducing sampling
-        # noise across rollouts of the same prompt (different
-        # **Summary**/**Key**/**More** for the same input paragraph).
-        # Furthermore, unique-prompt compressions are batched together
-        # into a single condenser call, so the whole batch's initial
-        # compression costs exactly one ``sampler.sample`` trip.
-        shared_frozens: Dict[int, FrozenContext] = {}
-        initial_pairs: List[Tuple[FrozenContext, Dict[str, Any]]] = []
-        for prompt in batch:
-            key = id(prompt)
-            if key in shared_frozens:
-                continue
-            fc = FrozenContext()
-            shared_frozens[key] = fc
-            initial_pairs.append((fc, prompt))
-        batch_freeze_delta_pairs(initial_pairs, chunker, condenser)
-        # Clone the shared FrozenContext per rollout so each rollout
-        # mutates its own copy. Stashed on ``Rollout.state`` — the
-        # rollout loop never touches this; it's read back by the
-        # ``display_builder`` closure and ``_build_tool_manager``.
-        initial_states: List[Dict[str, Any]] = [
-            {'frozen': shared_frozens[id(p)].clone()} for p in expand_prompts]
-
-        # Per-turn compression hook: batched chunk + condense across all
-        # active rollouts, then return each rollout's displayed view.
-        # This is the ONLY place the rollout loop touches compression,
-        # and it's injected from the outside — ``run_agentic_rollouts``
-        # itself stays compression-free.
-        def _display_builder_with_compression(
-            active: List[Rollout]) -> List[Dict[str, Any]]:
-            batch_freeze_delta_pairs(
-                [(r.state['frozen'], r.trajectory) for r in active],
-                chunker, condenser)
-            return [r.state['frozen'].render_display() for r in active]
+        initial_states = build_initial_rollout_states(
+            expand_prompts, chunker, condenser)
 
         rollouts = run_agentic_rollouts(
             expand_prompts, sampler, sampling_params,
             _build_tool_manager, rollout_template,
             max_turns=MAX_TURNS,
-            # Compression is injected via ``display_builder`` — the
-            # rollout loop itself has no knowledge of FrozenContext /
-            # chunker / condenser. Tool-call parsing is handled by the
-            # local ``rollout_template`` (Ray-actor sampler.template is
-            # unreachable from the driver).
-            display_builder=_display_builder_with_compression,
+            display_builder=make_compression_display_builder(chunker, condenser),
             initial_states=initial_states,
             output_sanitizers=[strip_block_echoes],
             min_batch_size=GLOBAL_BATCH_SIZE,
             on_turn=on_turn_hook)
 
-        # ---- Per-rollout aggregates (reward + metrics) ------------------
-        # Reward is computed on the whole rollout trajectory (final F1 +
-        # length / answer-commit / cot shaping). Completion length logged
-        # per rollout is the SUM of every turn's generated token count so
-        # we see the true generation budget usage, not just the last turn.
-        # NOTE: do NOT silently filter out rollouts with empty
-        # ``turn_sequences`` — the rollout list is ordered as consecutive
-        # groups of NUM_GENERATIONS per prompt, and ``GRPOAdvantage`` with
-        # ``scale='group'`` relies on that grouping exactly. Dropping one
-        # rollout would shift every subsequent group by one and corrupt
-        # the group-relative advantage computation. Crash loudly instead.
-        empty_rollouts = [i for i, r in enumerate(rollouts) if not r.turn_sequences]
-        assert not empty_rollouts, (
-            f'rollouts {empty_rollouts} have empty turn_sequences; this would '
-            'break GRPO group alignment. Likely a sampler or min_batch_size bug.')
         all_trajectories = [r.trajectory for r in rollouts]
         n_turns_per_rollout = [r.turns for r in rollouts]
         per_rollout_completion_length = [
@@ -476,17 +459,9 @@ def main():
                      'length_pen': length_pen_rewards, 'answer_commit': answer_commit_rewards,
                      'cot': cot_rewards, 'tool_explore': tool_explore_rewards})
 
-        # GRPO advantages are computed at rollout level (group-scaled over
-        # NUM_GENERATIONS same-prompt rollouts), then REPLICATED to every
-        # turn of that rollout. This way the same advantage signal is
-        # back-propagated through (i) the tool-call decision turns and
-        # (ii) the final answer turn, so the policy gets direct gradient
-        # on WHEN to expand a block, not only on what to say after it
-        # was already expanded.
         rollout_advantages = advantage_fn(
             total_rewards, num_generations=NUM_GENERATIONS, scale='group').tolist()
 
-        # ---- Per-turn training feed ------------------------------------
         all_input_data: List[Any] = []
         all_old_logps: List[List[float]] = []
         advantages: List[float] = []
@@ -519,29 +494,8 @@ def main():
 
         log_dict = metrics.calculate()
         log_dict.update(model.calculate_metric(is_training=True))
-        if n_turns_per_rollout:
-            log_dict['avg_turns'] = sum(n_turns_per_rollout) / len(n_turns_per_rollout)
-        _max_prompt_tok = 0
-        for r in rollouts:
-            for seq in r.turn_sequences:
-                feat = getattr(seq, 'new_input_feature', None) or {}
-                ids = feat.get('input_ids') if isinstance(feat, dict) else None
-                if ids:
-                    prompt_len = max(0, len(ids) - len(seq.tokens or []))
-                    if prompt_len > _max_prompt_tok:
-                        _max_prompt_tok = prompt_len
-        log_dict['max_prompt_tokens'] = _max_prompt_tok
-        if all_trajectories:
-            tool_counts = [
-                sum(len(m.get('tool_calls') or [])
-                    for m in t.get('messages', []) if m.get('role') == 'assistant')
-                for t in all_trajectories]
-            log_dict['avg_tool_calls'] = sum(tool_counts) / len(tool_counts)
-            log_dict['tool_use_rate'] = sum(1 for c in tool_counts if c > 0) / len(tool_counts)
-            n_no_boxed = sum(
-                0 if _BOXED_RE.search(_last_assistant_text(t) or '') else 1
-                for t in all_trajectories)
-            log_dict['no_boxed_rate'] = n_no_boxed / len(all_trajectories)
+        log_dict.update(_compute_rollout_diagnostics(
+            rollouts, n_turns_per_rollout, all_trajectories))
         swanlab.log(log_dict)
         metrics.reset()
         logger.info(f'[Step {optim_step}/{total_steps}] {log_dict}')

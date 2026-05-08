@@ -2,7 +2,9 @@ from .base import Condenser
 from .frozen import (
     FrozenContext,
     batch_freeze_delta_pairs,
+    build_initial_rollout_states,
     ensure_context_header,
+    make_compression_display_builder,
     strip_block_echoes,
     strip_passage_prefix,
 )
@@ -15,7 +17,9 @@ __all__ = [
     'LLMPassageCondenser',
     'PassageIndexCondenser',
     'batch_freeze_delta_pairs',
+    'build_initial_rollout_states',
     'ensure_context_header',
+    'make_compression_display_builder',
     'strip_block_echoes',
     'strip_passage_prefix',
 ]

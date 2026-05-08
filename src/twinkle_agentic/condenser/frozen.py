@@ -18,7 +18,7 @@ Kept separate from the rollout loop so the orchestration code can
 remain compression-agnostic and both concerns can evolve independently.
 """
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 
 from twinkle_agentic.chunker.native import NativeChunker
 from twinkle_agentic.condenser.base import Condenser
@@ -226,3 +226,91 @@ def batch_freeze_delta_pairs(
         frozen.frozen_msg_count = len(trajectory['messages'])
         if needs_media:
             frozen.media_frozen = True
+
+
+def build_initial_rollout_states(
+    expand_prompts: List[Dict[str, Any]],
+    chunker: NativeChunker,
+    condenser: Condenser,
+) -> List[Dict[str, Any]]:
+    """Build per-rollout ``initial_states`` with a shared initial compression.
+
+    Typical use in GRPO-style pipelines: ``expand_prompts`` contains each
+    unique prompt repeated ``NUM_GENERATIONS`` times (same Python object,
+    same ``id()``). For each UNIQUE prompt this helper compresses the
+    initial context exactly ONCE (all unique compressions are batched into
+    a single ``condenser.condense`` call), then ``.clone()``s the resulting
+    :class:`FrozenContext` per rollout so sibling rollouts start from
+    byte-identical state but can diverge independently afterwards.
+
+    Why it matters:
+
+    * **Cost**: ``NUM_GENERATIONS``× fewer compressor calls per batch.
+    * **Fidelity**: sibling rollouts of the same prompt share the exact
+      same initial summary, so GRPO's group-relative advantage compares
+      policy differences, not compression sampling noise.
+
+    Args:
+        expand_prompts: The expanded prompt list (length =
+            ``len(batch) * NUM_GENERATIONS``) as passed into
+            ``run_agentic_rollouts``.
+        chunker: Local chunker used to split each unique prompt.
+        condenser: Condenser that does the actual summarisation.
+
+    Returns:
+        A list of ``{'frozen': FrozenContext}`` dicts, one per entry in
+        ``expand_prompts`` (same order), ready to pass as
+        ``run_agentic_rollouts(initial_states=...)``.
+    """
+    shared: Dict[int, FrozenContext] = {}
+    pairs: List[Tuple[FrozenContext, Dict[str, Any]]] = []
+    for prompt in expand_prompts:
+        key = id(prompt)
+        if key in shared:
+            continue  # same prompt object already queued
+        fc = FrozenContext()
+        shared[key] = fc
+        pairs.append((fc, prompt))
+    batch_freeze_delta_pairs(pairs, chunker, condenser)
+    return [{'frozen': shared[id(p)].clone()} for p in expand_prompts]
+
+
+def make_compression_display_builder(
+    chunker: NativeChunker,
+    condenser: Condenser,
+) -> Callable[[List[Any]], List[Dict[str, Any]]]:
+    """Create a ``display_builder`` closure wiring incremental compression.
+
+    The returned callable matches the ``display_builder`` contract of
+    :func:`twinkle_agentic.rollout.run_agentic_rollouts`: on every turn it
+
+    1. Batches the per-rollout delta (``trajectory[frozen_msg_count:]``)
+       across all still-active rollouts into a SINGLE
+       :func:`batch_freeze_delta_pairs` call — chunks locally, then
+       issues one ``condenser.condense`` sampler trip for the whole batch.
+    2. Returns each rollout's compressed display view (``<block_N>`` +
+       ``Summary``/``Key Facts``/``More`` for long passages) to be used
+       as the next-turn prompt.
+
+    Expects each ``Rollout`` to carry its :class:`FrozenContext` under
+    ``state['frozen']`` — the convention established by
+    :func:`build_initial_rollout_states`. Pair the two helpers together
+    and ``run_agentic_rollouts`` itself stays completely
+    compression-agnostic.
+
+    Args:
+        chunker: Local chunker used to split each rollout's delta.
+        condenser: Condenser that summarises the batched chunks.
+
+    Returns:
+        A closure ``(active: List[Rollout]) -> List[Dict[str, Any]]`` to
+        pass as ``run_agentic_rollouts(display_builder=...)``.
+    """
+
+    def _display_builder(active: List[Any]) -> List[Dict[str, Any]]:
+        batch_freeze_delta_pairs(
+            [(r.state['frozen'], r.trajectory) for r in active],
+            chunker, condenser)
+        return [r.state['frozen'].render_display() for r in active]
+
+    return _display_builder
