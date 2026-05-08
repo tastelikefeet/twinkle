@@ -316,10 +316,11 @@ def main():
     sampler.set_template('Qwen3_5Template', model_id=MODEL_ID, enable_thinking=False)
 
     # Local Template for tool-call parsing / cleaning inside the rollout
-    # loop. The sampler is a Ray actor, so its remote ``.template`` is
-    # unreachable from this driver process — build a local one here and
-    # pass it into ``run_agentic_rollouts``. Cheap: only loads tokenizer
-    # + config once at init, not per batch.
+    # loop AND for the condenser's special-token strip regex. The sampler
+    # is a Ray actor, so its remote ``.template`` is unreachable from this
+    # driver process — build a local one here and pass it into
+    # ``run_agentic_rollouts`` + ``LLMPassageCondenser``. Cheap: only
+    # loads tokenizer + config once at init, not per batch.
     rollout_template = Template(MODEL_ID)
 
     condenser = LLMPassageCondenser(
@@ -336,6 +337,9 @@ def main():
         # its own chain-of-thought through a compression lens —
         # directly fighting the ``HotpotQACoTReward`` signal.
         skip_roles=('system', 'tool', 'assistant'),
+        # Drives the special-token strip regex from the tokenizer's
+        # ``all_special_tokens`` (no hand-maintained Qwen/Llama list).
+        template=rollout_template,
     )
 
     # Per-rollout tool factory: the ExtractCompressed tool needs the

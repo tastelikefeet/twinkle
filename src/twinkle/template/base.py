@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, 
 from twinkle.data_format import InputFeature, Message, Trajectory
 from twinkle.hub import HubOperation
 from twinkle.utils import load_image, to_device
+from .tool_call_parser import QWEN_TOOL_CALL_PARSER
 from .utils import TokenizeByRound, transfer_to_standard_message
 
 if TYPE_CHECKING:
@@ -21,63 +22,6 @@ if TYPE_CHECKING:
 ImageInput = Union[str, 'Image.Image', 'torch.Tensor']
 VideoInput = Union[str, List['Image.Image'], 'torch.Tensor']
 AudioInput = Union[str, np.ndarray, 'torch.Tensor']
-
-# ─── Qwen3.5 native XML tool-call format ──────────────────────────────────────
-# ``<tool_call><function=NAME><parameter=KEY>VAL</parameter></function></tool_call>``
-# ``\Z`` branches handle sampler-stripped closing tokens.
-_QWEN_TOOL_CALL_BLOCK_RE = re.compile(
-    r'<tool_call>\s*([\s\S]*?)\s*(?:</tool_call>|\Z)')
-_QWEN_FUNCTION_RE = re.compile(r'<function=([^>]+)>([\s\S]*?)</function>')
-_QWEN_PARAMETER_RE = re.compile(
-    r'<parameter=([^>]+)>\s*([\s\S]*?)\s*</parameter>')
-_QWEN_TOOL_CALL_STRIP_RE = re.compile(
-    r'<tool_call>[\s\S]*?(?:</tool_call>|\Z)')
-
-
-def _parse_qwen_tool_calls(text: str) -> List[Dict[str, Any]]:
-    """Parse Qwen3.5 XML tool calls (with JSON fallback inside the block)."""
-    calls: List[Dict[str, Any]] = []
-    for block_m in _QWEN_TOOL_CALL_BLOCK_RE.finditer(text or ''):
-        block = block_m.group(1)
-        func_m = _QWEN_FUNCTION_RE.search(block)
-        if func_m:
-            args: Dict[str, Any] = {}
-            for pm in _QWEN_PARAMETER_RE.finditer(func_m.group(2)):
-                key = pm.group(1).strip()
-                val = pm.group(2).strip()
-                try:
-                    args[key] = json.loads(val)
-                except (json.JSONDecodeError, ValueError):
-                    args[key] = val
-            calls.append({
-                'tool_name': func_m.group(1).strip(),
-                'arguments': args,
-            })
-            continue
-        # JSON fallback: ``{"name": ..., "arguments": ...}`` inside the block.
-        try:
-            data = json.loads(block)
-        except json.JSONDecodeError:
-            continue
-        name = data.get('name') or data.get('tool_name', '')
-        if not name:
-            continue
-        args = data.get('arguments', {})
-        if isinstance(args, str):
-            try:
-                args = json.loads(args) if args.strip() else {}
-            except json.JSONDecodeError:
-                args = {}
-        calls.append({
-            'tool_name': name,
-            'arguments': args if isinstance(args, dict) else {},
-        })
-    return calls
-
-
-def _strip_qwen_tool_calls(text: str) -> str:
-    """Strip ``<tool_call>...</tool_call>`` wrappers from assistant text."""
-    return _QWEN_TOOL_CALL_STRIP_RE.sub('', text or '').rstrip()
 
 
 def _parse_arguments(args: Any) -> Any:
@@ -198,18 +142,23 @@ class Template:
         ]
 
     def parse_tool_call(self, decoded: str) -> List[Dict[str, Any]]:
-        """Parse tool calls from the assistant's decoded output."""
+        """Parse tool calls from the assistant's decoded output.
+
+        Dispatches by model family on ``self.model_id``; the actual
+        wire-format logic lives in :mod:`.tool_call_parser`.
+        """
         mid = (self.model_id or '').lower()
         if 'qwen' in mid:
-            return _parse_qwen_tool_calls(decoded)
-        # TODO: Other models
+            return QWEN_TOOL_CALL_PARSER.parse(decoded)
+        # TODO: Other models (Llama3, OpenAI JSON, …) — add a parser in
+        # ``tool_call_parser.py`` and extend this dispatch.
         return []
 
     def clean_tool_call(self, decoded: str) -> str:
         """Strip family-specific tool-call markup from assistant text."""
         mid = (self.model_id or '').lower()
         if 'qwen' in mid:
-            return _strip_qwen_tool_calls(decoded)
+            return QWEN_TOOL_CALL_PARSER.clean(decoded)
         # TODO: Other models
         return (decoded or '').rstrip()
 
@@ -854,8 +803,17 @@ class Template:
             output.append(self.check(trajectory))
         return output
 
-    def format_trajectory(self, trajectory: Trajectory) -> Trajectory:
-        return self._invoke_pre_pipeline([trajectory])[0]
+    def format_trajectory(self, trajectory: Trajectory,
+                          add_default_system: bool = False) -> Trajectory:
+        current = [trajectory]
+        for pipeline in self.pre_pipeline:
+            if not add_default_system and pipeline == self._add_default_system:
+                continue
+            next_batch = []
+            for traj in current:
+                next_batch.extend(pipeline(traj))
+            current = next_batch
+        return current[0]
 
     def decode(self, token_ids: List[int], **kwargs) -> str:
         return self.processor.decode(token_ids, **kwargs)

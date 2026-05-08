@@ -173,9 +173,10 @@ def batch_freeze_delta_pairs(
 
     Defensive behaviour:
 
-    * Drops any synthetic ``system`` chunk injected by
-      ``template.format_trajectory`` when the delta had no system
-      message, so block numbering stays aligned with model-visible turns.
+    * Relies on ``Template.format_trajectory(add_default_system=False)``
+      (default) inside the chunker so no synthetic ``system`` chunk is
+      injected for deltas that lack one — keeps block numbering aligned
+      with model-visible turns.
     * Flips ``media_frozen`` only after the chunk is committed in
       phase 3, not optimistically in phase 1.
     """
@@ -203,13 +204,7 @@ def batch_freeze_delta_pairs(
                     delta[k] = trajectory[k]
 
         raw_full = chunker.chunk(delta)
-
-        input_roles = {m.get('role') for m in new_msgs if isinstance(m, dict)}
-        if 'system' not in input_roles:
-            filtered = [c for c in raw_full.chunks if c.get('role') != 'system']
-        else:
-            filtered = list(raw_full.chunks)
-        stripped = [strip_passage_prefix(c) for c in filtered]
+        stripped = [strip_passage_prefix(c) for c in raw_full.chunks]
         pending.append((frozen, trajectory, stripped, needs_media))
 
     if not pending:
