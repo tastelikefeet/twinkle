@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
 
 from twinkle_agentic.condenser.base import Condenser
 from twinkle_agentic.data_format import Chunk, Chunks
@@ -26,11 +26,6 @@ def _sampling_params_cls():
     """Lazy import to avoid coupling module import to twinkle.sampler."""
     from twinkle.data_format.sampling import SamplingParams
     return SamplingParams
-
-# Markdown headers emitted by the condenser.
-_SUMMARY_HEADER = '## Summary'
-_FACTS_HEADER = '## Key Facts'
-_MORE_HEADER = '## More'
 
 _DEFAULT_SYSTEM_PROMPT = (
     'You are a precise text compression assistant. Summarize the user'
@@ -164,15 +159,19 @@ class ModelCondenser(Condenser):
             trajectories = [
                 self._build_trajectory(c['content'], b) for _, c, b in batch
             ]
+            actual_len = len(trajectories)
+            # Pad to batch_size so distributed samplers (DP slice) never
+            # receive fewer inputs than expected.
+            if actual_len < self.batch_size and actual_len > 0:
+                pad_traj = trajectories[-1]
+                trajectories.extend(
+                    [pad_traj] * (self.batch_size - actual_len))
             sp = self._build_sampling_params(max(b for _, _, b in batch))
             sample_kwargs: Dict[str, Any] = {'sampling_params': sp}
             if self.use_base_model:
                 sample_kwargs['use_base_model'] = True
             responses = self.sampler.sample(trajectories, **sample_kwargs)
-            if len(responses) != len(batch):
-                raise RuntimeError(
-                    f'sampler returned {len(responses)} responses for '
-                    f'{len(batch)} inputs')
+            responses = responses[:actual_len]
             for (i, c, budget), resp in zip(batch, responses):
                 raw_text = self._pick_decoded(resp)
                 compressed = self._postprocess(raw_text, budget, c['content'])
@@ -249,88 +248,21 @@ class ModelCondenser(Condenser):
         return decoded or ''
 
     def _postprocess(self, raw: str, budget: int, original: str) -> str:
+        """Strip code fences and clamp to budget via word-boundary truncation.
+
+        The model is prompted to produce structured markdown (## Summary,
+        ## Key Facts, ## More). We trust the output as-is and only enforce
+        the character budget — no section parsing or re-formatting.
+        """
         text = _strip_code_fences(raw).strip()
-        sections = _parse_markdown_sections(text)
-        formatted = _format_sections(sections, fallback=text)
-        if formatted and len(formatted) <= budget:
-            return formatted
-        # Progressive drop on a *copy*: More → Key Facts → Summary. Keep
-        # the original ``sections`` intact for the body-only fallback.
-        remaining = dict(sections)
-        for drop in ('more', 'facts', 'summary'):
-            remaining.pop(drop, None)
-            reduced = _format_sections(remaining, fallback='')
-            if reduced and len(reduced) <= budget:
-                return reduced
-        # Even "## Summary\n<body>" cannot fit — the header alone eats the
-        # budget. Clamp the most informative *body* (no header) so the user
-        # still gets meaningful content instead of dangling hash marks.
-        for key in ('summary', 'facts', 'more'):
-            body = sections.get(key)
-            if body:
-                clamped = _clamp_to_budget(body, budget)
-                if clamped:
-                    return clamped
-        # No parsable sections at all — clamp the stripped raw text
-        # (or the original passage as a last resort).
+        if text and len(text) <= budget:
+            return text
         return _clamp_to_budget(text or original, budget)
 
 
 # ---------------------------------------------------------------------------
 # helpers (pure functions)
 # ---------------------------------------------------------------------------
-_SECTION_RE = re.compile(
-    r'^[ \t]*#{1,6}[ \t]*(?P<header>summary|key[ \t]*facts?|more)[ \t]*$',
-    re.IGNORECASE | re.MULTILINE,
-)
-_SECTION_KEYS = {
-    'summary': 'summary',
-    'key fact': 'facts',
-    'key facts': 'facts',
-    'keyfact': 'facts',
-    'keyfacts': 'facts',
-    'more': 'more',
-}
-_HEADER_ORDER: Tuple[Tuple[str, str], ...] = (
-    ('summary', _SUMMARY_HEADER),
-    ('facts', _FACTS_HEADER),
-    ('more', _MORE_HEADER),
-)
-
-
-def _parse_markdown_sections(text: str) -> Dict[str, str]:
-    """Extract ``{summary, facts, more}`` sections from ``text``.
-
-    Last-writer wins on duplicate headers (e.g. the model repeats
-    ``## Summary`` twice — we keep the later body).
-    """
-    if not text:
-        return {}
-    matches = list(_SECTION_RE.finditer(text))
-    out: Dict[str, str] = {}
-    for i, m in enumerate(matches):
-        header = re.sub(r'\s+', ' ', m.group('header').strip().lower())
-        key = _SECTION_KEYS.get(header)
-        if key is None:
-            continue
-        start = m.end()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        body = text[start:end].strip()
-        if body:
-            out[key] = body
-    return out
-
-
-def _format_sections(sections: Dict[str, str], *, fallback: str = '') -> str:
-    parts = [
-        f'{header}\n{sections[key]}' for key, header in _HEADER_ORDER
-        if sections.get(key)
-    ]
-    if parts:
-        return '\n\n'.join(parts)
-    return fallback
-
-
 def _strip_code_fences(text: str) -> str:
     """Unwrap a leading/trailing triple-backtick fence if present."""
     stripped = text.strip()
