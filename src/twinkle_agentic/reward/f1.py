@@ -93,7 +93,7 @@ def _f1_score(prediction: str, gold: str) -> Tuple[float, float]:
     return f1, em
 
 
-class HotpotQAF1Reward(Reward):
+class F1Reward(Reward):
 
     def __init__(self, answer_pattern=None):
         if isinstance(answer_pattern, str):
@@ -128,7 +128,7 @@ class HotpotQAF1Reward(Reward):
         return rewards
 
 
-class HotpotQACoTReward(Reward):
+class CoTReward(Reward):
     _STEP_LINE_RE = re.compile(r'(?im)^\s*step\s*(\d+)\s*[.:]')
     _HAS_BOXED_RE = re.compile(r'\\boxed\{')
 
@@ -163,7 +163,7 @@ class HotpotQACoTReward(Reward):
         return rewards
 
 
-class HotpotQAToolExploreReward(Reward):
+class ToolExploreReward(Reward):
 
     def __call__(self, trajectories: List[Dict[str, Any]], **kwargs) -> List[float]:
         rewards: List[float] = []
