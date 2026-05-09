@@ -24,7 +24,7 @@ from twinkle_agentic.chunker.native import NativeChunker
 from twinkle_agentic.condenser import (
     FrozenContext,
     LLMPassageCondenser,
-    build_frozen_user_data,
+    build_initial_rollout_states,
     make_compression_trajectory_builder,
     strip_block_echoes,
 )
@@ -311,13 +311,15 @@ def _compute_rollout_diagnostics(
 
     _max_prompt_tok = 0
     for r in rollouts:
-        for seq in r.turn_sequences:
-            feat = getattr(seq, 'new_input_feature', None) or {}
-            ids = feat.get('input_ids') if isinstance(feat, dict) else None
-            if ids:
-                prompt_len = max(0, len(ids) - len(seq.tokens or []))
-                if prompt_len > _max_prompt_tok:
-                    _max_prompt_tok = prompt_len
+        seq = r.sequence
+        if seq is None:
+            continue
+        feat = getattr(seq, 'new_input_feature', None) or {}
+        ids = feat.get('input_ids') if isinstance(feat, dict) else None
+        if ids:
+            prompt_len = max(0, len(ids) - len(seq.tokens or []))
+            if prompt_len > _max_prompt_tok:
+                _max_prompt_tok = prompt_len
     out['max_prompt_tokens'] = _max_prompt_tok
 
     if all_trajectories:
@@ -391,7 +393,7 @@ def main():
 
     model.set_loss('GRPOLoss', epsilon=0.2)
     model.set_processor(InputProcessor, padding_free=True)
-    model.set_template('Qwen3_5Template', model_id=MODEL_ID, enable_thinking=False)
+    model.set_template('Qwen3_5Template', model_id=MODEL_ID, enable_thinking=False, max_length=HOTPOTQA_MAX_LENGTH)
 
     model.add_metric('GRPOMetric', is_training=True)
 
@@ -403,8 +405,8 @@ def main():
             'enable_tower_connector_lora': True,
         },
         device_mesh=sampler_mesh, remote_group='sampler')
-    sampler.set_template('Qwen3_5Template', model_id=MODEL_ID, enable_thinking=False)
-    rollout_template = Qwen3_5Template(MODEL_ID)
+    sampler.set_template('Qwen3_5Template', model_id=MODEL_ID, enable_thinking=False, max_length=HOTPOTQA_MAX_LENGTH)
+    rollout_template = Qwen3_5Template(MODEL_ID, max_length=HOTPOTQA_MAX_LENGTH)
     condenser = LLMPassageCondenser(
         sampler=sampler,
         sampling_params=SamplingParams(
@@ -417,7 +419,7 @@ def main():
     )
 
     def _build_tool_manager(r: Rollout) -> Callable[[Dict[str, Any]], str]:
-        fc: FrozenContext = r.user_data['frozen']
+        fc: FrozenContext = r.state['frozen']
         return ToolManager([
             ExtractCompressed(
                 fc.get_full_chunks(),
@@ -461,7 +463,7 @@ def main():
         ckpt_manager.sync_weights(merge_and_sync=False)
         sampler.reset_prefix_cache()
 
-        user_data = build_frozen_user_data(
+        initial_states = build_initial_rollout_states(
             expand_prompts, chunker, condenser)
 
         rollouts = run_agentic_rollouts(
@@ -469,7 +471,7 @@ def main():
             _build_tool_manager, rollout_template,
             max_turns=MAX_TURNS,
             trajectory_builder=make_compression_trajectory_builder(chunker, condenser),
-            user_data=user_data,
+            initial_states=initial_states,
             output_sanitizers=[strip_block_echoes],
             min_batch_size=GLOBAL_BATCH_SIZE,
             on_turn=on_turn_hook)
@@ -477,7 +479,7 @@ def main():
         all_trajectories = [r.trajectory for r in rollouts]
         n_turns_per_rollout = [r.turns for r in rollouts]
         per_rollout_completion_length = [
-            sum(len(s.tokens) for s in r.turn_sequences) for r in rollouts]
+            len(r.sequence.tokens) for r in rollouts]
 
         total_rewards, f1_rewards, cot_rewards, tool_explore_rewards = \
             compute_rewards(all_trajectories)
@@ -494,10 +496,9 @@ def main():
         all_old_logps: List[List[float]] = []
         advantages: List[float] = []
         for r, adv in zip(rollouts, rollout_advantages):
-            for seq in r.turn_sequences:
-                all_input_data.append(seq.new_input_feature)
-                all_old_logps.append([lp[0][1] for lp in (seq.logprobs or [])])
-                advantages.append(adv)
+            all_input_data.append(r.sequence.new_input_feature)
+            all_old_logps.append([lp[0][1] for lp in (r.sequence.logprobs or [])])
+            advantages.append(adv)
 
         total_completions = len(all_input_data)
         aligned_completions = (total_completions // MODEL_GPUS) * MODEL_GPUS
@@ -508,6 +509,9 @@ def main():
                 total_completions, aligned_completions, MODEL_GPUS)
         for mb_start in range(0, aligned_completions, MINI_BATCH_SIZE):
             mb_end = min(mb_start + MINI_BATCH_SIZE, aligned_completions)
+            test = all_input_data[mb_start:mb_end]
+            if len(test) < MICRO_BATCH_SIZE:
+                print()
             model.forward_backward(
                 inputs=all_input_data[mb_start:mb_end],
                 old_logps=all_old_logps[mb_start:mb_end],

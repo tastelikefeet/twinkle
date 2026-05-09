@@ -224,7 +224,7 @@ def batch_freeze_delta_pairs(
             frozen.media_frozen = True
 
 
-def build_frozen_user_data(
+def build_initial_rollout_states(
     trajectories: List[Dict[str, Any]],
     chunker: NativeChunker,
     condenser: Condenser,

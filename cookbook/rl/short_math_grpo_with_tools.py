@@ -583,7 +583,7 @@ class _FrozenContext:
 
 
 class _Rollout:
-    __slots__ = ('trajectory', 'final_sequence', 'turn_sequences', 'turns', 'done', 'frozen')
+    __slots__ = ('trajectory', 'sequence', 'turns', 'done', 'frozen')
 
     def __init__(self, prompt_trajectory: Dict[str, Any]) -> None:
         self.trajectory: Dict[str, Any] = {
@@ -593,13 +593,7 @@ class _Rollout:
         for _k in _MEDIA_KEYS:
             if prompt_trajectory.get(_k):
                 self.trajectory[_k] = list(prompt_trajectory[_k])
-        self.final_sequence = None
-        # Per-turn sampled sequences. Keeping every turn (not just the
-        # final one) lets GRPO train on the tool-call decision turns,
-        # so the policy actually learns WHEN to expand a <block_N>.
-        # Rollout-level reward is replicated to per-turn advantages
-        # at the optimiser feed time (see main loop below).
-        self.turn_sequences: List[Any] = []
+        self.sequence = None
         self.turns = 0
         self.done = False
         self.frozen = _FrozenContext()
@@ -649,8 +643,7 @@ def run_agentic_rollouts(
 
         for r, resp, tool_mgr in zip(active, responses, tool_mgrs):
             seq = resp.sequences[0]
-            r.final_sequence = seq
-            r.turn_sequences.append(seq)
+            r.sequence = seq
             r.turns += 1
             decoded = seq.decoded or ''
             tool_calls = parse_tool_calls(decoded)
@@ -753,12 +746,6 @@ def main():
     # Compute training horizon (accounts for multiple optim steps per batch)
     GLOBAL_BATCH_SIZE = BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS
     batches_per_epoch = max(1, len(_prebuilt_dataset) // GLOBAL_BATCH_SIZE)
-    # With the per-turn training feed (see ``_Rollout.turn_sequences``)
-    # the optimiser does ``sum(rollout.turns)`` mini-batch steps per
-    # batch, not just ``rollouts / MINI_BATCH_SIZE``. We therefore
-    # multiply by a conservative ``EXPECTED_AVG_TURNS`` so the LR
-    # scheduler horizon and the ``optim_step >= total_steps`` early-exit
-    # reflect the REAL per-turn step count, not the per-rollout one.
     EXPECTED_AVG_TURNS = int(os.environ.get('EXPECTED_AVG_TURNS', 3))
     optim_steps_per_batch = max(1, (GLOBAL_BATCH_SIZE * NUM_GENERATIONS * EXPECTED_AVG_TURNS
                                      + MINI_BATCH_SIZE - 1) // MINI_BATCH_SIZE)
@@ -855,23 +842,23 @@ def main():
 
         # ---- Per-rollout aggregates (reward + metrics) ------------------
         # Reward is computed on the whole rollout trajectory. Completion
-        # length logged per rollout is the SUM of every turn's generated
-        # token count so we see the true generation budget usage, not
-        # just the last turn.
-        # NOTE: do NOT silently filter out rollouts with empty
-        # ``turn_sequences`` — the rollout list is ordered as consecutive
+        # length logged per rollout is the final-turn generation length,
+        # whose prompt already encodes every earlier turn (non-compressed
+        # view) or the compressed-chunks view (compression mode).
+        # NOTE: do NOT silently filter out rollouts with an empty
+        # ``sequence`` — the rollout list is ordered as consecutive
         # groups of NUM_GENERATIONS per prompt, and ``GRPOAdvantage`` with
         # ``scale='group'`` relies on that grouping exactly. Dropping one
         # rollout would shift every subsequent group by one and corrupt
         # the group-relative advantage computation. Crash loudly instead.
-        empty_rollouts = [i for i, r in enumerate(rollouts) if not r.turn_sequences]
+        empty_rollouts = [i for i, r in enumerate(rollouts) if r.sequence is None]
         assert not empty_rollouts, (
-            f'rollouts {empty_rollouts} have empty turn_sequences; this would '
+            f'rollouts {empty_rollouts} produced no sequence; this would '
             'break GRPO group alignment. Likely a sampler or min_batch_size bug.')
         all_trajectories = [r.trajectory for r in rollouts]
         n_turns_per_rollout = [r.turns for r in rollouts]
         per_rollout_completion_length = [
-            sum(len(s.tokens) for s in r.turn_sequences) for r in rollouts]
+            len(r.sequence.tokens) for r in rollouts]
 
         total_rewards, f1_rewards, length_pen_rewards, answer_commit_rewards, cot_rewards, tool_explore_rewards = \
             compute_rewards(all_trajectories)
@@ -883,22 +870,22 @@ def main():
                      'cot': cot_rewards, 'tool_explore': tool_explore_rewards})
 
         # GRPO advantages computed at rollout level (group-scaled over
-        # NUM_GENERATIONS same-prompt rollouts), then REPLICATED to every
-        # turn of that rollout so the same advantage signal is
-        # back-propagated through (i) tool-call decision turns and
-        # (ii) the final answer turn.
+        # NUM_GENERATIONS same-prompt rollouts). With final-only training
+        # one sample per rollout carries this advantage directly; the
+        # last-turn sequence's prompt segment already contains every
+        # earlier turn, so a single gradient step covers the full
+        # tool-call trajectory.
         rollout_advantages = advantage_fn(
             total_rewards, num_generations=NUM_GENERATIONS, scale='group').tolist()
 
-        # ---- Per-turn training feed ------------------------------------
+        # ---- Final-only training feed ----------------------------------
         all_input_data: List[Any] = []
         all_old_logps: List[List[float]] = []
         advantages: List[float] = []
         for r, adv in zip(rollouts, rollout_advantages):
-            for seq in r.turn_sequences:
-                all_input_data.append(seq.new_input_feature)
-                all_old_logps.append([lp[0][1] for lp in (seq.logprobs or [])])
-                advantages.append(adv)
+            all_input_data.append(r.sequence.new_input_feature)
+            all_old_logps.append([lp[0][1] for lp in (r.sequence.logprobs or [])])
+            advantages.append(adv)
 
         # Mini-batch training loop
         total_completions = len(all_input_data)
