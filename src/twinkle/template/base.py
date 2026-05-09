@@ -12,7 +12,7 @@ from twinkle.data_format import InputFeature, Message, Trajectory
 from twinkle.hub import HubOperation
 from twinkle.utils import load_image, to_device
 from .utils import TokenizeByRound, transfer_to_standard_message
-from .. import remote_class
+from twinkle import remote_class
 
 if TYPE_CHECKING:
     import torch
