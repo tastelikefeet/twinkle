@@ -43,6 +43,11 @@ class Qwen3_5Template(QwenTemplate):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # Fix upstream Qwen3 chat_template parse bugs (orphan </think> handling).
+        # Deferred import to avoid cycles; idempotent across Ray actor re-init.
+        from twinkle.patch import apply_patch
+        from twinkle.patch.qwen3_chat_template import Qwen3ChatTemplate
+        apply_patch(self.tokenizer, Qwen3ChatTemplate)
         self._patch_size: Optional[int] = None
         self._merge_size: Optional[int] = None
         self._init_vision_config()
