@@ -75,6 +75,8 @@ class MultiTurnCondenseRollout(MultiTurnRollout):
                 f'one. Remove it from the shared manager or rename it.')
         self.chunker = chunker
         self.condenser = condenser
+        if getattr(self.condenser, 'template', None) is None:
+            self.condenser.template = template
         self.condenser_kwargs = dict(condenser_kwargs or {})
 
     def __call__(self, trajectories: List[Trajectory], **kwargs) -> List[Trajectory]:

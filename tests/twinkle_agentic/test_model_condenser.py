@@ -27,7 +27,6 @@ from twinkle.data_format.sampling import (
 from twinkle_agentic.condenser.model import (
     ModelCondenser,
     _clamp_to_budget,
-    _parse_markdown_sections,
     _strip_code_fences,
 )
 from twinkle_agentic.data_format import Chunks
@@ -135,27 +134,6 @@ def test_invalid_config_raises(kw):
 # ---------------------------------------------------------------------------
 # pure helper smoke tests
 # ---------------------------------------------------------------------------
-def test_parse_markdown_sections_basic():
-    text = _well_formed_markdown('')
-    secs = _parse_markdown_sections(text)
-    assert set(secs.keys()) == {'summary', 'facts', 'more'}
-    assert 'Christopher Nolan' in secs['summary']
-    assert 'Leonardo DiCaprio' in secs['facts']
-    assert 'Interstellar' in secs['more']
-
-
-def test_parse_markdown_sections_handles_header_variants():
-    text = (
-        '# summary\nfoo\n\n### KEY FACT\n- bar\n\n## more\nkw1, kw2'
-    )
-    secs = _parse_markdown_sections(text)
-    assert secs == {'summary': 'foo', 'facts': '- bar', 'more': 'kw1, kw2'}
-
-
-def test_parse_markdown_sections_empty_input():
-    assert _parse_markdown_sections('') == {}
-
-
 def test_strip_code_fences():
     wrapped = '```markdown\n## Summary\nhi\n```'
     assert _strip_code_fences(wrapped) == '## Summary\nhi'
@@ -181,6 +159,7 @@ def test_compression_ratio_is_strictly_enforced(ratio):
         _MockSampler(_well_formed_markdown),
         compression_ratio=ratio,
         min_chars=50,
+        min_budget_chars=1,  # opt out of floor to test pure ratio invariant
     )
     out = cond(_wrap(_user_chunk(LONG_PASSAGE))).chunks[0]['content']
     budget = math.ceil(len(LONG_PASSAGE) / ratio)
@@ -193,7 +172,8 @@ def test_misbehaving_model_output_is_still_clamped():
     """Even when the LLM exceeds the budget, output must fit."""
     overflow = lambda _p: _well_formed_markdown('') * 5  # noqa: E731
     cond = ModelCondenser(
-        _MockSampler(overflow), compression_ratio=3.0, min_chars=50)
+        _MockSampler(overflow), compression_ratio=3.0, min_chars=50,
+        min_budget_chars=1)
     out = cond(_wrap(_user_chunk(LONG_PASSAGE))).chunks[0]['content']
     budget = math.ceil(len(LONG_PASSAGE) / 3.0)
     assert len(out) <= budget
@@ -202,7 +182,8 @@ def test_misbehaving_model_output_is_still_clamped():
 def test_extreme_ratio_still_bounded_and_non_empty():
     cond = ModelCondenser(
         _MockSampler(_well_formed_markdown),
-        compression_ratio=200.0, min_chars=50)
+        compression_ratio=200.0, min_chars=50,
+        min_budget_chars=1)
     out = cond(_wrap(_user_chunk(LONG_PASSAGE))).chunks[0]['content']
     budget = math.ceil(len(LONG_PASSAGE) / 200.0)
     assert 0 < len(out) <= budget
@@ -238,7 +219,8 @@ def test_tight_budget_drops_more_first():
             '## More\n' + ('x, ' * 60)  # ~180 chars
         )
     cond = ModelCondenser(
-        _MockSampler(responder), compression_ratio=3.5, min_chars=50)
+        _MockSampler(responder), compression_ratio=3.5, min_chars=50,
+        min_budget_chars=1)
     out = cond(_wrap(_user_chunk(LONG_PASSAGE))).chunks[0]['content']
     budget = math.ceil(len(LONG_PASSAGE) / 3.5)
     assert len(out) <= budget
@@ -254,7 +236,8 @@ def test_very_tight_budget_keeps_only_summary():
             '## More\n' + ('kw, ' * 80)
         )
     cond = ModelCondenser(
-        _MockSampler(responder), compression_ratio=10.0, min_chars=50)
+        _MockSampler(responder), compression_ratio=10.0, min_chars=50,
+        min_budget_chars=1)
     out = cond(_wrap(_user_chunk(LONG_PASSAGE))).chunks[0]['content']
     budget = math.ceil(len(LONG_PASSAGE) / 10.0)
     assert len(out) <= budget
@@ -269,7 +252,8 @@ def test_garbled_model_output_fallback_is_clamped():
     to clamped raw text (never empty)."""
     garbled = lambda _p: 'this is some unstructured blob ' * 10  # noqa: E731
     cond = ModelCondenser(
-        _MockSampler(garbled), compression_ratio=4.0, min_chars=50)
+        _MockSampler(garbled), compression_ratio=4.0, min_chars=50,
+        min_budget_chars=1)
     out = cond(_wrap(_user_chunk(LONG_PASSAGE))).chunks[0]['content']
     budget = math.ceil(len(LONG_PASSAGE) / 4.0)
     assert 0 < len(out) <= budget
@@ -330,8 +314,10 @@ def test_skip_roles_default_preserves_system_tool_assistant():
         assert out[i]['content'] == LONG_PASSAGE
         assert (out[i].get('raw') or {}).get('condensed') is not True
     assert out[3]['raw']['condensed'] is True
-    # Sampler saw only the user chunk.
-    assert len(sampler.calls) == 1
+    # Only one real compression job (the user chunk); the batch is padded
+    # up to ``batch_size`` with duplicates of that job to keep distributed
+    # samplers happy, and the extra responses are then discarded.
+    assert len(sampler.calls) == cond.batch_size
 
 
 def test_custom_skip_roles_empty_tuple():
@@ -398,7 +384,10 @@ def test_batching_respects_batch_size():
     assert len(out) == 5
     for c in out:
         assert c['raw']['condensed'] is True
-    assert len(sampler.calls) == 5  # 5 chunks total
+    # 5 real jobs dispatched in batches of ``batch_size=2`` with the last
+    # batch padded to full size: 2 + 2 + 2 = 6 sampler calls, of which
+    # only 5 correspond to real work (the 6th is a duplicate discarded).
+    assert len(sampler.calls) == 6
 
 
 def test_order_preserved_with_mixed_chunks():
@@ -461,7 +450,8 @@ def test_semantic_preservation_against_budget():
     """Under a moderate ratio, important entities appear in the output."""
     cond = ModelCondenser(
         _MockSampler(_well_formed_markdown),
-        compression_ratio=2.0, min_chars=50)
+        compression_ratio=2.0, min_chars=50,
+        min_budget_chars=1)
     out = cond(_wrap(_user_chunk(LONG_PASSAGE))).chunks[0]['content']
     budget = math.ceil(len(LONG_PASSAGE) / 2.0)
     assert len(out) <= budget
@@ -531,8 +521,8 @@ def test_rounds_filter_only_compresses_first_user_turn():
         _round_chunk(LONG_PASSAGE, 1),
         _round_chunk(LONG_PASSAGE + ' extra.', 2),
     )).chunks
-    # Only one sampler call happened — for round 1.
-    assert len(sampler.calls) == 1
+    # One real compression job (round 1) padded up to ``batch_size``.
+    assert len(sampler.calls) == cond.batch_size
     # Round 1 compressed.
     assert out[0]['raw']['condensed'] is True
     # Round 2 untouched.
@@ -556,4 +546,5 @@ def test_rounds_filter_default_none_preserves_legacy_behavior():
     cond = ModelCondenser(sampler, compression_ratio=4.0, min_chars=50)
     out = cond(_wrap(_user_chunk(LONG_PASSAGE))).chunks[0]
     assert out['raw']['condensed'] is True
-    assert len(sampler.calls) == 1
+    # One real job, padded up to ``batch_size``.
+    assert len(sampler.calls) == cond.batch_size

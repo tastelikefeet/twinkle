@@ -64,33 +64,46 @@ _ROLLOUT_TRACE_PATH = os.environ.get('ROLLOUT_TRACE_PATH', 'rollout_trace.jsonl'
 
 SYSTEM_PROMPT = """You are a careful multi-hop QA assistant.
 
-## Compressed Context
-The context you receive is **compressed**. Each paragraph is wrapped in \
-<block_N>...</block_N> and displayed as a Markdown summary with three sections:
-- **Summary**: one-sentence overview of the block
-- **Key Facts**: bulleted salient facts
-- **More**: keywords hinting at details hidden in the full text
+## Context Format (Mixed)
+The context you receive is a **mix of two forms**:
 
-Because the context is compressed, critical details may not be immediately \
-visible. You are strongly encouraged to call the `extract_condensed` tool \
-to expand blocks that likely contain the answer.
+1. **Compressed blocks** — long passages wrapped in `<block_N>...</block_N>`, \
+   displayed as a Markdown digest in **telegraphic style** (no \
+   articles / "is" / "are"; colons and commas mean "is" / "has") \
+   with up to three sections:
+   - **Summary**: one short phrase (≤ 15 words), NOT a full sentence
+   - **Key Facts**: up to 4 short bullets (each ≤ 10 words)
+   - **More**: 5–8 comma-separated keywords hinting at details hidden in the full text
+   Reading example: `India: 7th largest by area. Borders: Pakistan, \
+   China.` means "India is the 7th largest country by area and \
+   shares borders with Pakistan and China."
+2. **Raw passages** — short passages shown inline as plain text (e.g. \
+   `[K] Title: ...`) **without** any `<block_N>` wrapping. These are already \
+   the full text; nothing is hidden.
+
+Only the `<block_N>`-wrapped blocks are compressed and can be expanded. \
+Do **not** try to extract raw passages — they have no block id and are \
+already complete.
 
 ## Workflow
 
 ### Phase 1 — Scan and Decide
-Step 1: Read each block's Summary and Key facts to get an overview.
-Step 2: Check the More keywords to judge whether hidden details are needed.
-Step 3: Decide which blocks to expand, then call `extract_condensed`.
+Step 1: Read each compressed block's Summary and Key Facts, and read raw \
+passages directly, to get an overview.
+Step 2: For compressed blocks, check the More keywords to judge whether \
+hidden details are needed.
+Step 3: Decide which compressed blocks to expand, then call \
+`extract_condensed` with their block ids. Raw passages need no extraction.
 
 ### Phase 2 — Reason and Answer
 After the tool returns the full text, continue stepping through the evidence:
-Step N:   From block X, I learn that [fact A].
+Step N:   From block X (or raw passage [K]), I learn that [fact A].
 Step N+1: From block Y, I need to call `extract_condensed` to get more information, because this block is related to...
 Step N+2: Combining these, the answer is ...
 \\boxed{answer}
 
 You may call `extract_condensed` several times to expand more blocks if the information is not enough, only answer the question if you are sure about the facts.
-The `blocks` parameter accepts either a single integer (e.g. `3`) or a list of integers (e.g. `[1, 3]`) to expand several blocks in one call.
+The `blocks` parameter accepts either a single integer (e.g. `3`) or a list of integers (e.g. `[1, 3]`) to expand several blocks in one call. Only pass ids that actually appear as `<block_N>` in the context.
 
 ## Tool Call Format
 <tool_call>
@@ -326,16 +339,11 @@ def main():
         passage_boundary_re=r'^\[\d+\]\s+')
     condenser = ModelCondenser(
         sampler=sampler,
-        compression_ratio=4.0,
+        compression_ratio=2.0,
         sampling_params=SamplingParams(
-            max_tokens=256, num_samples=1, temperature=0.4, top_p=0.9),
-        # HotpotQA passages are often short; 50 keeps almost all passages
-        # eligible for compression while still skipping single-sentence
-        # blurbs that compress poorly.
-        min_chars=50,
-        # Compress with the frozen base model so the training LoRA
-        # cannot drift the summarization policy mid-training (closed-loop
-        # drift).
+            max_tokens=1024, num_samples=1, temperature=0.4, top_p=0.9),
+        min_chars=200,
+        template=rollout_template,
         use_base_model=True,
     )
 
@@ -348,7 +356,6 @@ def main():
     sampling_params = SamplingParams(
         max_tokens=MAX_NEW_TOKENS, num_samples=1, logprobs=1,
         temperature=1.0, top_p=0.95, stop=['</tool_call>'])
-
     rollout = MultiTurnCondenseRollout(
         sampler=sampler,
         template=rollout_template,
