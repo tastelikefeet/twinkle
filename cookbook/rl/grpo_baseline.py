@@ -1,4 +1,25 @@
-import json
+"""HotpotQA GRPO baseline — full context, no chunking, no compression, no tools.
+
+This is the **control group** for ``grpo_condensed.py``. Both scripts share:
+  * dataset (HotpotQA fullwiki, hard split)
+  * preprocessing (``HotpotQAProcessor`` with ``[K] Title: ...`` passages)
+  * GRPO infra (model / sampler / device mesh / hyperparams)
+  * rollout class (``MultiTurnRollout`` from ``multi_turn.py``)
+
+The only differences are intentional:
+  * no ``NativeChunker`` / ``ModelCondenser`` (full passages go in verbatim)
+  * no tools registered (``ToolManager()`` is empty)
+  * ``max_turns=1`` so the rollout is effectively single-turn
+  * simplified system prompt (no ``<block_N>`` / ``extract_condensed`` syntax)
+  * ``F1Reward + CoTReward`` only (no ``ToolExploreReward``)
+  * traces → ``rollout_trace_baseline.jsonl``
+  * checkpoints prefixed ``hotpotqa-grpo-baseline-*``
+
+Keeping the same ``MultiTurnRollout`` code path on both sides means any
+training-loop-level discrepancy between the two runs is attributable to
+the chunk+condense pipeline, not to differences in rollout plumbing.
+"""
+
 import os
 import re
 from typing import Any, Dict, List, Optional
@@ -19,10 +40,8 @@ from twinkle.preprocessor.base import Preprocessor
 from twinkle.processor import InputProcessor
 from twinkle.sampler import vLLMSampler
 from twinkle.template import Qwen3_5Template
-from twinkle_agentic.chunker.native import NativeChunker
-from twinkle_agentic.condenser import ModelCondenser
-from twinkle_agentic.reward import F1Reward, CoTReward, ToolExploreReward
-from twinkle_agentic.rollout.multi_turn_condense import MultiTurnCondenseRollout
+from twinkle_agentic.reward import F1Reward, CoTReward
+from twinkle_agentic.rollout.multi_turn import MultiTurnRollout
 from twinkle_agentic.tools.tool_manager import ToolManager
 
 logger = get_logger()
@@ -47,72 +66,40 @@ ADAPTER_NAME = 'default'
 SAVE_STEPS = int(os.environ.get('SAVE_STEPS', 1000))
 LORA_RANK = int(os.environ.get('LORA_RANK', 16))
 
-MAX_TURNS = int(os.environ.get('MAX_TURNS', 6))
-CHUNK_SIZE = int(os.environ.get('CHUNK_SIZE', 1024))
+# Single-turn baseline; tools are not registered, but we keep MultiTurnRollout
+# to share the rollout code path with the condensed variant. ``max_turns=1``
+# guarantees the loop runs exactly one sampling pass per trajectory.
+MAX_TURNS = int(os.environ.get('MAX_TURNS', 1))
 
 HOTPOTQA_NUM_PROC = int(os.environ.get('HOTPOTQA_NUM_PROC', 16))
 HOTPOTQA_MAX_LENGTH = int(os.environ.get('HOTPOTQA_MAX_LENGTH', 64000))
 
-# Reward weights
+# Reward weights — drop ToolExploreReward (no tools to use).
 F1_REWARD_WEIGHT = float(os.environ.get('F1_REWARD_WEIGHT', 1.0))
 COT_REWARD_WEIGHT = float(os.environ.get('COT_REWARD_WEIGHT', 0.5))
-TOOL_BONUS_WEIGHT = float(os.environ.get('TOOL_BONUS_WEIGHT', 0.05))
 
 WRONG_IDS_FILE = os.environ.get('WRONG_IDS_FILE', '')
 
-_ROLLOUT_TRACE_PATH = os.environ.get('ROLLOUT_TRACE_PATH', 'rollout_trace.jsonl')
+_ROLLOUT_TRACE_PATH = os.environ.get(
+    'ROLLOUT_TRACE_BASELINE_PATH', 'rollout_trace_baseline.jsonl')
 
 SYSTEM_PROMPT = """You are a careful multi-hop QA assistant.
 
-## Context Format (Mixed)
-The context you receive is a **mix of two forms**:
-
-1. **Compressed blocks** — long passages wrapped in `<block_N>...</block_N>`, \
-   displayed as a Markdown digest in **telegraphic style** (no \
-   articles / "is" / "are"; colons and commas mean "is" / "has") \
-   with up to three sections:
-   - **Summary**: one short phrase (≤ 15 words), NOT a full sentence
-   - **Key Facts**: up to 4 short bullets (each ≤ 10 words)
-   - **More**: 5–8 comma-separated keywords hinting at details hidden in the full text
-   Reading example: `India: 7th largest by area. Borders: Pakistan, \
-   China.` means "India is the 7th largest country by area and \
-   shares borders with Pakistan and China."
-2. **Raw passages** — short passages shown inline as plain text (e.g. \
-   `[K] Title: ...`) **without** any `<block_N>` wrapping. These are already \
-   the full text; nothing is hidden.
-
-Only the `<block_N>`-wrapped blocks are compressed and can be expanded. \
-Do **not** try to extract raw passages — they have no block id and are \
-already complete.
+You will receive a question and a set of supporting passages. Each passage \
+is shown inline as plain text in the form `[K] Title: ...`, where `K` is the \
+passage index. All passages are already complete — there is no extraction \
+or expansion step.
 
 ## Workflow
 
-### Phase 1 — Scan and Decide
-Step 1: Read each compressed block's Summary and Key Facts, and read raw \
-passages directly, to get an overview.
-Step 2: For compressed blocks, check the More keywords to judge whether \
-hidden details are needed.
-Step 3: Decide which compressed blocks to expand, then call \
-`extract_condensed` with their block ids. Raw passages need no extraction.
+Step 1: Read every passage and identify which ones are relevant to the question.
+Step 2: Reason step by step, citing the passage indices you used.
+   Step N:   From passage [K], I learn that [fact A].
+   Step N+1: From passage [M], I learn that [fact B].
+   Step N+2: Combining these, the answer is ...
+Step 3: Emit the final answer in `\\boxed{...}`.
 
-### Phase 2 — Reason and Answer
-After the tool returns the full text, continue stepping through the evidence:
-Step N:   From block X (or raw passage [K]), I learn that [fact A].
-Step N+1: From block Y, I need to call `extract_condensed` to get more information, because this block is related to...
-Step N+2: Combining these, the answer is ...
-\\boxed{answer}
-
-You may call `extract_condensed` several times to expand more blocks if the information is not enough, only answer the question if you are sure about the facts.
-The `blocks` parameter accepts **exactly one integer** per call (e.g. `3`); lists are rejected. Expand additional blocks by issuing separate `extract_condensed` calls, one per block. Only pass ids that actually appear as `<block_N>` in the context, and do **not** request the same block twice — its text is already in the conversation after the first expansion.
-
-## Tool Call Format
-<tool_call>
-<function=extract_condensed>
-<parameter=blocks>
-3
-</parameter>
-</function>
-</tool_call>
+Only answer when you are confident in the supporting facts.
 
 ## Output Format
 End your final response with \\boxed{answer}, e.g. \\boxed{Delhi}.
@@ -122,21 +109,24 @@ Answers not inside \\boxed{} will not be scored."""
 
 _F1_REWARD: Optional[F1Reward] = F1Reward()
 _COT_REWARD: Optional[CoTReward] = CoTReward()
-_TOOL_EXPLORE_REWARD: Optional[ToolExploreReward] = ToolExploreReward()
 
 
 def compute_rewards(trajectories: List[Dict[str, Any]]):
     f1 = _F1_REWARD(trajectories)
     cot = _COT_REWARD(trajectories)
-    tool_explore = _TOOL_EXPLORE_REWARD(trajectories)
     total = [
-        F1_REWARD_WEIGHT * a + COT_REWARD_WEIGHT * c + TOOL_BONUS_WEIGHT * te
-        for a, c, te in zip(f1, cot, tool_explore)
+        F1_REWARD_WEIGHT * a + COT_REWARD_WEIGHT * c
+        for a, c in zip(f1, cot)
     ]
-    return total, f1, cot, tool_explore
+    return total, f1, cot
 
 
 class HotpotQAProcessor(Preprocessor):
+    """Same processor as ``grpo_condensed.py`` — passages are emitted as
+    ``[K] Title: ...`` lines. The downstream is what differs: the baseline
+    feeds the full context straight to the model (no ``<block_N>`` wrapping,
+    no chunking, no condensation)."""
+
     def __init__(self, system: str = SYSTEM_PROMPT, levels=None):
         self.system = system
         self.levels = levels
@@ -197,7 +187,8 @@ def create_hotpotqa_dataset() -> Dataset:
         truncation_strategy='delete', enable_thinking=False)
     _HOTPOTQA_COLS = ['id', 'question', 'answer', 'type', 'level',
                       'supporting_facts', 'context']
-    dataset.map(HotpotQAProcessor(system=SYSTEM_PROMPT, levels=['hard']), remove_columns=_HOTPOTQA_COLS)
+    dataset.map(HotpotQAProcessor(system=SYSTEM_PROMPT, levels=['hard']),
+                remove_columns=_HOTPOTQA_COLS)
     return dataset
 
 
@@ -222,24 +213,16 @@ def _compute_rollout_diagnostics(
 ) -> Dict[str, float]:
     """Aggregate rollout diagnostics for swanlab logging.
 
-    All inputs are already flat:
-      * ``trajectories[i]`` is the merged trajectory dict returned by
-        :class:`MultiTurnCondenseRollout` (contains ``messages``,
-        ``input_ids``, ``labels``, ``turns`` at top level).
-      * ``n_turns_per_rollout[i] == trajectories[i]['turns']``.
-      * ``per_rollout_completion_length[i]`` == number of trainable
-        tokens in the trajectory (labels != -100).
+    Stripped-down version of the condensed variant's diagnostics — without
+    chunking we only care about (a) the longest non-trainable prefix
+    (system prompt + full passages), and (b) whether the rollout produced
+    a `\\boxed{}` final answer at all. ``avg_turns`` is logged for symmetry
+    even though it should be exactly 1.0 with ``MAX_TURNS=1``.
     """
     out: Dict[str, float] = {}
     if n_turns_per_rollout:
         out['avg_turns'] = sum(n_turns_per_rollout) / len(n_turns_per_rollout)
 
-    # ``non_trainable_tokens`` is the longest non-trainable prefix across
-    # the batch: ``len(input_ids) - sum(1 for l in labels if l != -100)``.
-    # Tracks how much the condensed context + system prompt is eating the
-    # context budget (it does NOT equal the first-turn prompt length
-    # because multi-turn runs also contribute non-trainable tokens from
-    # the ``tool`` observations between assistant turns).
     _max_non_trainable = 0
     for t, comp_len in zip(trajectories, per_rollout_completion_length):
         ids = t.get('input_ids') or []
@@ -249,12 +232,6 @@ def _compute_rollout_diagnostics(
     out['non_trainable_tokens'] = _max_non_trainable
 
     if trajectories:
-        tool_counts = [
-            sum(len(m.get('tool_calls') or [])
-                for m in t.get('messages', []) if m.get('role') == 'assistant')
-            for t in trajectories]
-        out['avg_tool_calls'] = sum(tool_counts) / len(tool_counts)
-        out['tool_use_rate'] = sum(1 for c in tool_counts if c > 0) / len(tool_counts)
         n_no_boxed = sum(
             0 if _BOXED_RE.search(_last_assistant_text(t) or '') else 1
             for t in trajectories)
@@ -301,14 +278,16 @@ def main():
     twinkle.initialize(mode='ray', nproc_per_node=NUM_GPUS,
                        groups=device_groups, lazy_collect=False)
 
-    logger.info('Building HotpotQA dataset')
+    logger.info('Building HotpotQA dataset (baseline, full context)')
     _prebuilt_dataset = create_hotpotqa_dataset()
     logger.info('Dataset ready: %d rows', len(_prebuilt_dataset))
 
     GLOBAL_BATCH_SIZE = BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS
     batches_per_epoch = max(1, len(_prebuilt_dataset) // GLOBAL_BATCH_SIZE)
-    EXPECTED_AVG_TURNS = int(os.environ.get('EXPECTED_AVG_TURNS', 3))
-    optim_steps_per_batch = max(1, (GLOBAL_BATCH_SIZE * NUM_GENERATIONS * EXPECTED_AVG_TURNS
+    # Single-turn baseline: every rollout produces exactly one assistant
+    # turn, so the per-batch optim-step count equals
+    #   ceil(GLOBAL_BATCH_SIZE * NUM_GENERATIONS / MINI_BATCH_SIZE).
+    optim_steps_per_batch = max(1, (GLOBAL_BATCH_SIZE * NUM_GENERATIONS
                                      + MINI_BATCH_SIZE - 1) // MINI_BATCH_SIZE)
     steps_per_epoch = batches_per_epoch * optim_steps_per_batch
     derived_total_steps = NUM_EPOCHS * steps_per_epoch
@@ -357,23 +336,6 @@ def main():
         MODEL_ID, max_length=HOTPOTQA_MAX_LENGTH, enable_thinking=False)
 
     ckpt_manager = CheckpointEngineManager(model=model, sampler=sampler)
-    # ``passage_boundary_re`` keeps each HotpotQA passage (``[N] Title: ...``)
-    # atomic inside a single chunk — short passages are emitted as-is
-    # and are NEVER merged across boundaries, so every ``<block_N>``
-    # after condensation corresponds to exactly one passage.
-    chunker = NativeChunker(
-        chunk_size=CHUNK_SIZE,
-        # passage_boundary_re=r'^\[\d+\]\s+'
-        )
-    condenser = ModelCondenser(
-        sampler=sampler,
-        compression_ratio=4.0,
-        sampling_params=SamplingParams(
-            max_tokens=1024, num_samples=1, temperature=0.4, top_p=0.9),
-        min_chars=200,
-        template=rollout_template,
-        use_base_model=True,
-    )
 
     dataloader = DataLoader(
         dataset=lambda: _prebuilt_dataset,
@@ -383,21 +345,21 @@ def main():
     metrics = CompletionRewardMetric()
     sampling_params = SamplingParams(
         max_tokens=MAX_NEW_TOKENS, num_samples=1, logprobs=1,
-        temperature=1.0, top_p=0.95,
-        stop=['</tool_call>'])
-    rollout = MultiTurnCondenseRollout(
+        temperature=1.0, top_p=0.95)
+    # Empty ToolManager: with ``max_turns=1`` the rollout sample exactly
+    # once per trajectory and exits via the ``not tool_calls`` /
+    # ``turns >= max_turns`` branches without ever dispatching a tool.
+    rollout = MultiTurnRollout(
         sampler=sampler,
         template=rollout_template,
         tool_manager=ToolManager(),
-        chunker=chunker,
-        condenser=condenser,
         sampling_params=sampling_params,
         max_turns=MAX_TURNS,
         trace_path=_ROLLOUT_TRACE_PATH or None,
     )
 
     optim_step = 0
-    logger.info('Starting HotpotQA GRPO training (LLM condenser variant)')
+    logger.info('Starting HotpotQA GRPO baseline (no chunk / no condense / no tools)')
 
     def _epoch_cycle(dl, n_epochs):
         for ep in range(1, n_epochs + 1):
@@ -415,23 +377,19 @@ def main():
         ckpt_manager.sync_weights(merge_and_sync=False)
         sampler.reset_prefix_cache()
 
-        # Batched multi-turn rollout with chunk+condense pre-processing.
-        # Each returned trajectory is a flat dict containing ``messages``,
-        # ``input_ids``, ``labels``, ``attention_mask``, ``position_ids``,
-        # ``turns``, ``logprobs``, ``stop_reason``, ``truncated``.
+        # Single batched rollout: each trajectory produces exactly one
+        # assistant turn (tools are unregistered, ``max_turns=1``).
         all_trajectories: List[Dict[str, Any]] = rollout(expand_prompts)
         n_turns_per_rollout = [int(t.get('turns') or 0) for t in all_trajectories]
         per_rollout_completion_length = [
             sum(1 for l in (t.get('labels') or []) if l != -100)
             for t in all_trajectories]
 
-        total_rewards, f1_rewards, cot_rewards, tool_explore_rewards = \
-            compute_rewards(all_trajectories)
+        total_rewards, f1_rewards, cot_rewards = compute_rewards(all_trajectories)
 
         metrics.accumulate(
             completion_lengths=per_rollout_completion_length,
-            rewards={'total': total_rewards, 'f1': f1_rewards,
-                     'cot': cot_rewards, 'tool_explore': tool_explore_rewards})
+            rewards={'total': total_rewards, 'f1': f1_rewards, 'cot': cot_rewards})
 
         rollout_advantages = advantage_fn(
             total_rewards, num_generations=NUM_GENERATIONS, scale='group').tolist()
@@ -463,7 +421,7 @@ def main():
             if optim_step >= total_steps:
                 break
             if optim_step % SAVE_STEPS == 0:
-                model.save(f'hotpotqa-grpo-tools-llmcondense-checkpoint-{optim_step}')
+                model.save(f'hotpotqa-grpo-baseline-checkpoint-{optim_step}')
 
         log_dict = metrics.calculate()
         log_dict.update(model.calculate_metric(is_training=True))
@@ -474,7 +432,7 @@ def main():
         logger.info(f'[Step {optim_step}/{total_steps}] {log_dict}')
 
     logger.info(f'Training completed. optim_steps={optim_step}')
-    model.save('hotpotqa-grpo-tools-llmcondense-final')
+    model.save('hotpotqa-grpo-baseline-final')
 
 
 if __name__ == '__main__':

@@ -187,21 +187,28 @@ def test_non_dict_arguments_returns_error_not_attribute_error():
     assert out.startswith('Error:')
 
 
-def test_out_of_range_block_returns_error_with_available_list():
+def test_out_of_range_block_returns_short_range_error():
+    # Short existence error -- we must NOT enumerate every valid id, or
+    # a hallucinated ``blocks=[1..200]`` storm would multiply the error
+    # into thousands of tokens in the non-trainable bridge.
     tool = ExtractCondensed(Chunks(chunks=[
         _condensed('cmp1', original='orig1'),
         _condensed('cmp2', original='orig2'),
     ]))
     out = tool(TOOL_NAME, {'block': 99})
+    assert out.startswith('Error:')
     assert 'block 99 not found' in out
-    assert 'Available blocks: 1, 2' in out
+    assert '1..2' in out
+    # Defensive: the verbose legacy listing must not leak back.
+    assert 'Available blocks: 1, 2' not in out
 
 
 def test_empty_tool_reports_no_blocks_available():
     tool = ExtractCondensed(Chunks(chunks=[
         _plain('nothing condensed')]))
     out = tool(TOOL_NAME, {'block': 1})
-    assert 'Available blocks: (none)' in out
+    assert out.startswith('Error:')
+    assert 'no blocks available' in out
 
 
 def test_integer_strings_are_accepted():
@@ -211,7 +218,12 @@ def test_integer_strings_are_accepted():
 
 
 # ---------------------------------------------------------------------------
-# multi-block expansion (``blocks`` accepts int OR list[int])
+# single-block-per-call contract + trajectory-bound idempotency
+#
+# Lists were previously accepted; they are now rejected so a hallucinated
+# ``blocks=[1..200]`` cannot flood the non-trainable bridge. Re-requesting
+# the same block returns a short "already expanded" reply instead of the
+# raw text (which is already sitting in an earlier tool message).
 # ---------------------------------------------------------------------------
 def test_blocks_int_equivalent_to_legacy_block_arg():
     # Passing ``{'blocks': N}`` (single int under the new name) must
@@ -220,97 +232,61 @@ def test_blocks_int_equivalent_to_legacy_block_arg():
     tool = ExtractCondensed(Chunks(chunks=[
         _condensed('cmp1', original='orig one')]))
     assert tool(TOOL_NAME, {'blocks': 1}) == 'orig one'
-    assert tool(TOOL_NAME, {'blocks': 1}) == tool(TOOL_NAME, {'block': 1})
+    # Re-create the tool so the second call is not deduped against the
+    # first (which is covered separately below).
+    tool2 = ExtractCondensed(Chunks(chunks=[
+        _condensed('cmp1', original='orig one')]))
+    assert tool2(TOOL_NAME, {'block': 1}) == 'orig one'
 
 
-def test_blocks_list_wraps_each_result_in_block_tags():
-    tool = ExtractCondensed(Chunks(chunks=[
-        _condensed('cmp1', original='orig one'),
-        _condensed('cmp2', original='orig two'),
-        _condensed('cmp3', original='orig three'),
-    ]))
-    out = tool(TOOL_NAME, {'blocks': [1, 3]})
-    # Both blocks present, each wrapped, separated by a blank line.
-    assert '<block_1>\norig one\n</block_1>' in out
-    assert '<block_3>\norig three\n</block_3>' in out
-    assert '<block_2>' not in out
-    # Order respects input order.
-    assert out.index('<block_1>') < out.index('<block_3>')
-
-
-def test_blocks_list_preserves_order_over_sorting():
+def test_blocks_list_is_rejected_with_short_error():
+    # Single-block-per-call contract: the only way a list reaches this
+    # path is if the policy hallucinated a bulk id enumeration, which is
+    # exactly what we want to stop. Reject loudly with a brief message.
     tool = ExtractCondensed(Chunks(chunks=[
         _condensed('c1', original='a'),
         _condensed('c2', original='b'),
         _condensed('c3', original='c'),
     ]))
-    out = tool(TOOL_NAME, {'blocks': [3, 1, 2]})
-    # Output order must follow the caller's order, not numeric order.
-    assert out.index('<block_3>') < out.index('<block_1>') < out.index('<block_2>')
+    for bad in ([1, 2, 3], (1, 2), [1], []):
+        out = tool(TOOL_NAME, {'blocks': bad})
+        assert out.startswith('Error:'), (bad, out)
+        assert 'single integer' in out or 'one block' in out, (bad, out)
 
 
-def test_blocks_list_deduplicates_preserving_first_occurrence():
+def test_second_call_on_same_block_returns_already_expanded_notice():
+    # Trajectory-bound idempotency. The raw text has already been handed
+    # to the model as a prior tool response, so returning it again only
+    # doubles the non-trainable footprint. The second call gets a short
+    # notice instead -- no "Error:" prefix (it's not a failure) and
+    # crucially the raw text must NOT be repeated.
     tool = ExtractCondensed(Chunks(chunks=[
-        _condensed('c1', original='a'),
-        _condensed('c2', original='b'),
+        _condensed('cmp1', original='ORIGINAL TEXT FOR ONE'),
+        _condensed('cmp2', original='ORIGINAL TEXT FOR TWO'),
     ]))
-    out = tool(TOOL_NAME, {'blocks': [1, 2, 1, 2, 1]})
-    # Each block appears exactly once.
-    assert out.count('<block_1>') == 1
-    assert out.count('<block_2>') == 1
-    # And the first occurrence pins the order.
-    assert out.index('<block_1>') < out.index('<block_2>')
+    first = tool(TOOL_NAME, {'block': 1})
+    assert first == 'ORIGINAL TEXT FOR ONE'
+    second = tool(TOOL_NAME, {'block': 1})
+    assert 'already expanded' in second
+    assert 'ORIGINAL TEXT FOR ONE' not in second
+    # Dedup is per-id: a different block is still expandable once.
+    third = tool(TOOL_NAME, {'block': 2})
+    assert third == 'ORIGINAL TEXT FOR TWO'
+    # And then that one also becomes deduped.
+    fourth = tool(TOOL_NAME, {'block': 2})
+    assert 'already expanded' in fourth
 
 
-def test_blocks_list_with_single_element_still_wraps():
-    # Explicit list form is a commitment to multi-block semantics even
-    # if only one element is present -- wrap it so the caller (or
-    # downstream sanitizer) can treat list-form results uniformly.
-    tool = ExtractCondensed(Chunks(chunks=[
-        _condensed('c1', original='orig a')]))
-    out = tool(TOOL_NAME, {'blocks': [1]})
-    assert out == '<block_1>\norig a\n</block_1>'
-
-
-def test_blocks_list_string_integers_accepted():
-    tool = ExtractCondensed(Chunks(chunks=[
-        _condensed('c1', original='a'),
-        _condensed('c2', original='b'),
-    ]))
-    out = tool(TOOL_NAME, {'blocks': ['1', '2']})
-    assert '<block_1>\na\n</block_1>' in out
-    assert '<block_2>\nb\n</block_2>' in out
-
-
-def test_blocks_list_rejects_bool_and_float_per_element():
-    tool = ExtractCondensed(Chunks(chunks=[
-        _condensed('c1', original='a'),
-        _condensed('c2', original='b'),
-    ]))
-    out_bool = tool(TOOL_NAME, {'blocks': [1, True]})
-    assert out_bool.startswith('Error:') and 'bool' in out_bool
-    out_float = tool(TOOL_NAME, {'blocks': [1, 2.5]})
-    assert out_float.startswith('Error:') and 'float' in out_float
-
-
-def test_blocks_list_missing_blocks_embed_error_inline():
-    tool = ExtractCondensed(Chunks(chunks=[
-        _condensed('c1', original='orig one')]))
-    out = tool(TOOL_NAME, {'blocks': [1, 99]})
-    # Valid block returns its content; missing one returns an error
-    # string inside its own <block_99> wrapper so the caller can tell
-    # which one failed without the tool itself raising.
-    assert '<block_1>\norig one\n</block_1>' in out
-    assert '<block_99>' in out
-    assert 'block 99 not found' in out
-
-
-def test_blocks_empty_list_returns_error():
-    tool = ExtractCondensed(Chunks(chunks=[
-        _condensed('c1', original='a')]))
-    out = tool(TOOL_NAME, {'blocks': []})
-    assert out.startswith('Error:')
-    assert 'at least one block number' in out
+def test_already_expanded_is_trajectory_bound_fresh_instance_resets():
+    # ``MultiTurnCondenseRollout`` builds a new ExtractCondensed per
+    # trajectory, so a fresh instance must start with an empty dedup set
+    # even if a sibling trajectory just expanded block 1.
+    chunks = Chunks(chunks=[_condensed('c1', original='raw text')])
+    t1 = ExtractCondensed(chunks)
+    assert t1(TOOL_NAME, {'block': 1}) == 'raw text'
+    assert 'already expanded' in t1(TOOL_NAME, {'block': 1})
+    t2 = ExtractCondensed(chunks)  # independent trajectory
+    assert t2(TOOL_NAME, {'block': 1}) == 'raw text'
 
 
 def test_prefers_blocks_over_legacy_block_when_both_present():
@@ -334,9 +310,14 @@ def test_tool_info_shape_and_serializability():
     assert 'description' in info and info['description']
     # parameters must be a JSON string that loads back cleanly.
     params = json.loads(info['parameters'])
-    # Preferred parameter name is ``blocks`` (supports int OR list[int]).
+    # Preferred parameter name is ``blocks`` (single int per call; no list).
     assert 'blocks' in params
-    assert 'int' in params['blocks'] and 'list' in params['blocks']
+    assert 'int' in params['blocks']
+    # The old ``int OR list[int]`` signature must be gone: no list-form
+    # type annotation leaks through. (The sentence may still say the
+    # phrase "lists are rejected", which is fine.)
+    assert 'list[' not in params['blocks']
+    assert 'OR list' not in params['blocks']
 
 
 # ---------------------------------------------------------------------------

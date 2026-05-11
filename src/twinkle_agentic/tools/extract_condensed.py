@@ -32,6 +32,8 @@ class ExtractCondensed(Tool):
 
     def __init__(self, chunks: Chunks):
         self._blocks: Dict[int, Optional[str]] = {}
+        # Trajectory-bound set of block ids already returned in full.
+        self._already_expanded: set = set()
         counter = 0
         for c in chunks.chunks:
             if c.get('type') != 'text':
@@ -56,16 +58,16 @@ class ExtractCondensed(Tool):
         return {
             'tool_name': TOOL_NAME,
             'description': (
-                'Recover the full, uncompressed text of one or more '
-                'previously condensed passages, identified by their '
-                '<block_N> tags. Use this tool whenever you need to '
-                're-read the original detail of compressed blocks.'),
+                'Recover the full, uncompressed text of ONE previously '
+                'condensed passage, identified by its <block_N> tag. Use '
+                'this tool whenever you need to re-read the original '
+                'detail of a compressed block. Each call expands exactly '
+                'one block; issue separate calls for additional blocks, '
+                'and do not request the same block twice.'),
             'parameters': json.dumps({
-                'blocks': ('int OR list[int], the 1-indexed block number(s) '
-                           'N appearing inside <block_N>...</block_N>. '
-                           'Pass a single int to expand one block, or a '
-                           'list of ints to expand several in one call '
-                           '(e.g. 3 or [1, 3, 5]).'),
+                'blocks': ('int, the 1-indexed block number N appearing '
+                           'inside <block_N>...</block_N>. Exactly one '
+                           'block per call (e.g. 3); lists are rejected.'),
             }),
         }
 
@@ -85,59 +87,48 @@ class ExtractCondensed(Tool):
         else:
             return 'Error: missing required argument "blocks".'
 
-        # Normalise to a list of integers. Single int / str-int → 1-element
-        # list; list/tuple → validate every element. Preserve order,
-        # deduplicate while keeping first occurrence.
+        # Single-block-per-call contract. Reject list/tuple up front so a
+        # hallucinated ``blocks=[1..200]`` cannot balloon the tool response.
         if isinstance(raw, (list, tuple)):
-            items = list(raw)
-        else:
-            items = [raw]
+            return (f'Error: "{key}" must be a single integer; only one '
+                    f'block may be expanded per call. Issue a separate '
+                    f'extract_condensed call for each block you need.')
 
-        seen: Dict[int, None] = {}
-        parsed: List[int] = []
-        for i, item in enumerate(items):
-            # ``bool`` subclasses ``int`` (``int(True) == 1``) and ``float``
-            # coerces silently (``int(1.9) == 1``); reject both up front.
-            if isinstance(item, bool) or isinstance(item, float):
-                return (f'Error: "{key}" item at position {i} must be an '
-                        f'integer, got {type(item).__name__} {item!r}.')
-            try:
-                n = int(item)
-            except (TypeError, ValueError):
-                return (f'Error: "{key}" item at position {i} must be an '
-                        f'integer, got {item!r}.')
-            if n in seen:
-                continue
-            seen[n] = None
-            parsed.append(n)
+        # ``bool`` subclasses ``int`` (``int(True) == 1``) and ``float``
+        # coerces silently (``int(1.9) == 1``); reject both up front.
+        if isinstance(raw, bool) or isinstance(raw, float):
+            return (f'Error: "{key}" must be an integer, got '
+                    f'{type(raw).__name__} {raw!r}.')
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            return f'Error: "{key}" must be an integer, got {raw!r}.'
 
-        if not parsed:
-            return f'Error: "{key}" must contain at least one block number.'
-
-        # Single-block path preserves the legacy bare-text return shape so
-        # existing callers / prompts keep working unchanged.
-        if len(parsed) == 1 and not isinstance(raw, (list, tuple)):
-            return self._lookup_one(parsed[0])
-
-        # Multi-block path wraps each result in <block_N>...</block_N> so
-        # the model can tell them apart in the returned tool message.
-        parts: List[str] = []
-        for n in parsed:
-            value = self._lookup_one(n)
-            parts.append(f'Block_{n}:\n{value}\n\n')
-        return '\n\n'.join(parts)
-
-    def _lookup_one(self, n: int) -> str:
-        """Return the original text for block ``n`` or an ``Error: ...`` string."""
+        # Short existence check. Deliberately do NOT list every available
+        # id -- when the policy hallucinates a large range, echoing the
+        # full list back multiplies the error into thousands of tokens.
         if n not in self._blocks:
-            available = ', '.join(str(k) for k in sorted(self._blocks))
-            return (f'Error: block {n} not found. '
-                    f'Available blocks: {available or "(none)"}.')
+            count = len(self._blocks)
+            if count == 0:
+                return f'Error: block {n} not found; no blocks available.'
+            return (f'Error: block {n} not found; valid block ids are '
+                    f'1..{count}.')
+
+        # Trajectory-bound idempotency. The raw text is already in the
+        # conversation as a prior tool response -- returning it again would
+        # just double the non-trainable footprint.
+        if n in self._already_expanded:
+            return (f'Block {n} was already expanded earlier in this '
+                    f'trajectory; re-read the previous tool response '
+                    f'instead of requesting it again.')
+
         value = self._blocks[n]
         if value is None:
             return (f'Error: block {n} has no original-text snapshot. '
                     f'The upstream condenser must populate raw.original '
                     f'before registering ExtractCondensed.')
+
+        self._already_expanded.add(n)
         return value
 
     # ------------------------------------------------------------------
