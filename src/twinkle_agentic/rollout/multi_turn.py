@@ -8,7 +8,7 @@ import numpy as np
 from twinkle.data_format import Trajectory
 from twinkle.data_format.sampling import SampleResponse, SamplingParams
 from twinkle.template.base import Template
-
+from twinkle.infra import remote_class, remote_function
 from twinkle_agentic.tools.tool_manager import ToolManager
 from .base import Rollout
 
@@ -34,7 +34,7 @@ def _to_plain(obj: Any) -> Any:
         return type(obj)(conv) if isinstance(obj, tuple) else conv
     return obj
 
-
+@remote_class()
 class MultiTurnRollout(Rollout):
     """Agentic multi-turn rollout with tool use (batched).
 
@@ -119,6 +119,7 @@ class MultiTurnRollout(Rollout):
             "MultiTurnRollout does not support truncation_strategy='split'; "
             'use left/right/raise on the template.')
 
+    @remote_function()
     def __call__(self, trajectories: List[Trajectory], **kwargs) -> List[Trajectory]:
         if isinstance(trajectories, dict):
             raise TypeError(

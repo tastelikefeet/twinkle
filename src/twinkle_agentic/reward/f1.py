@@ -157,17 +157,55 @@ class CoTReward(Reward):
                     continue
 
             n = len(steps)
-            # 0 → 0.0, 1 → 0.25, 2 → 0.5, 3 → 0.75, 4+ → 1.0
-            rewards.append(min(1.0, n * 0.25))
+            if 3 <= n <= 6:
+                rewards.append(0.3)
+            elif n >= 7:
+                rewards.append(0.1)
+            else:
+                rewards.append(0.0)
 
         return rewards
 
 
 class ToolExploreReward(Reward):
 
+    def __init__(self, f1_threshold: float = 0.5, answer_pattern=None):
+        if isinstance(answer_pattern, str):
+            answer_pattern = re.compile(answer_pattern)
+        self._answer_pattern = answer_pattern
+        self._f1_threshold = float(f1_threshold)
+
+    def _extract(self, completion: str) -> str:
+        balanced = _extract_final_answer(completion)
+        if balanced:
+            return balanced
+        if self._answer_pattern is None:
+            return ''
+        matches = self._answer_pattern.findall(completion or '')
+        if not matches:
+            return ''
+        last = matches[-1]
+        if isinstance(last, tuple):
+            last = last[0] if last else ''
+        return (last or '').strip()
+
+    def _trajectory_f1(self, traj: Dict[str, Any]) -> float:
+        gold = ''
+        for key, val in traj.get('user_data', []) or []:
+            if key == 'ground_truth':
+                gold = val or ''
+                break
+        pred = self._extract(_last_assistant_text(traj))
+        f1, _ = _f1_score(pred, gold)
+        return f1
+
     def __call__(self, trajectories: List[Dict[str, Any]], **kwargs) -> List[float]:
         rewards: List[float] = []
         for t in trajectories:
+            if self._trajectory_f1(t) < self._f1_threshold:
+                rewards.append(0.0)
+                continue
+
             msgs = t.get('messages', []) or []
             n_msgs = len(msgs)
             n_success = 0

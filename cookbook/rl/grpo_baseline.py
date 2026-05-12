@@ -74,9 +74,8 @@ MAX_TURNS = int(os.environ.get('MAX_TURNS', 1))
 HOTPOTQA_NUM_PROC = int(os.environ.get('HOTPOTQA_NUM_PROC', 16))
 HOTPOTQA_MAX_LENGTH = int(os.environ.get('HOTPOTQA_MAX_LENGTH', 64000))
 
-# Reward weights — drop ToolExploreReward (no tools to use).
 F1_REWARD_WEIGHT = float(os.environ.get('F1_REWARD_WEIGHT', 1.0))
-COT_REWARD_WEIGHT = float(os.environ.get('COT_REWARD_WEIGHT', 0.5))
+COT_REWARD_WEIGHT = float(os.environ.get('COT_REWARD_WEIGHT', 0.2))
 
 WRONG_IDS_FILE = os.environ.get('WRONG_IDS_FILE', '')
 

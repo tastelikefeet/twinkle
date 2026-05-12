@@ -7,11 +7,13 @@ from twinkle.template.base import Template
 from twinkle_agentic.chunker.base import Chunker
 from twinkle_agentic.condenser.base import Condenser
 from twinkle_agentic.data_format import Chunks
+from twinkle.infra import remote_class, remote_function
 from twinkle_agentic.tools.extract_condensed import ExtractCondensed, TOOL_NAME as EXTRACT_TOOL_NAME
 from twinkle_agentic.tools.tool_manager import ToolManager
 from .multi_turn import MultiTurnRollout
 
 
+@remote_class()
 class MultiTurnCondenseRollout(MultiTurnRollout):
     """Multi-turn rollout with trajectory compression + on-demand recovery.
 
@@ -82,6 +84,7 @@ class MultiTurnCondenseRollout(MultiTurnRollout):
             self.condenser.template = template
         self.condenser_kwargs = dict(condenser_kwargs or {})
 
+    @remote_function()
     def __call__(self, trajectories: List[Trajectory], **kwargs) -> List[Trajectory]:
         if isinstance(trajectories, dict):
             raise TypeError(

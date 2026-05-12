@@ -35,7 +35,7 @@ SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS', 4))
 NUM_GPUS = MODEL_GPUS + SAMPLER_GPUS
 
 NUM_GENERATIONS = int(os.environ.get('NUM_GENERATIONS', 8))
-MAX_NEW_TOKENS = int(os.environ.get('MAX_NEW_TOKENS', 2048))
+MAX_NEW_TOKENS = int(os.environ.get('MAX_NEW_TOKENS', 4096))
 LEARNING_RATE = float(os.environ.get('LR', 1e-5))
 NUM_EPOCHS = int(os.environ.get('NUM_EPOCHS', 10))
 MAX_STEPS = int(os.environ.get('MAX_STEPS', 0))
@@ -54,10 +54,11 @@ CHUNK_SIZE = int(os.environ.get('CHUNK_SIZE', 1024))
 HOTPOTQA_NUM_PROC = int(os.environ.get('HOTPOTQA_NUM_PROC', 16))
 HOTPOTQA_MAX_LENGTH = int(os.environ.get('HOTPOTQA_MAX_LENGTH', 64000))
 
-# Reward weights
 F1_REWARD_WEIGHT = float(os.environ.get('F1_REWARD_WEIGHT', 1.0))
-COT_REWARD_WEIGHT = float(os.environ.get('COT_REWARD_WEIGHT', 0.5))
-TOOL_BONUS_WEIGHT = float(os.environ.get('TOOL_BONUS_WEIGHT', 0.05))
+COT_REWARD_WEIGHT = float(os.environ.get('COT_REWARD_WEIGHT', 0))
+TOOL_BONUS_WEIGHT = float(os.environ.get('TOOL_BONUS_WEIGHT', 0))
+TOOL_BONUS_F1_THRESHOLD = float(
+    os.environ.get('TOOL_BONUS_F1_THRESHOLD', 0.5))
 
 WRONG_IDS_FILE = os.environ.get('WRONG_IDS_FILE', '')
 
@@ -123,7 +124,8 @@ Answers not inside \\boxed{} will not be scored."""
 
 _F1_REWARD: Optional[F1Reward] = F1Reward()
 _COT_REWARD: Optional[CoTReward] = CoTReward()
-_TOOL_EXPLORE_REWARD: Optional[ToolExploreReward] = ToolExploreReward()
+_TOOL_EXPLORE_REWARD: Optional[ToolExploreReward] = ToolExploreReward(
+    f1_threshold=TOOL_BONUS_F1_THRESHOLD)
 
 
 def compute_rewards(trajectories: List[Dict[str, Any]]):
