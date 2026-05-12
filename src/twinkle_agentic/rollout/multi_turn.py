@@ -406,24 +406,42 @@ class MultiTurnRollout(Rollout):
     ) -> Dict[str, Any]:
         """Append tool messages and the next generation prompt as -100 bridge.
 
-        Strategy: decode the CURRENT pif input_ids back to a string, render
-        the canonical chat-template string for ``messages + tool_messages``
-        with ``add_generation_prompt=True``, diff at the STRING level, and
-        tokenize ONLY the delta. This avoids retokenising history (which would
-        drift through the ``decode(tokens, skip_special_tokens=True)`` round
-        trip that ``concat_input_feature`` does).
+        Strategy: compute the bridge ENTIRELY in template space. Render
+        ``messages_before`` and ``messages_before + tool_messages`` with the
+        same chat template and take ``s_after[len(s_before):]`` as the delta.
+
+        We deliberately do NOT diff against ``tokenizer.decode(pif.input_ids)``
+        because raw vLLM output and canonical template rendering differ in
+        whitespace (e.g. Qwen inserts ``\\n\\n`` between assistant content and
+        a ``<tool_call>`` block, while the model generates only ``\\n``). Such
+        cosmetic divergences would break a ``startswith`` alignment but do not
+        affect training correctness: history tokens stay in ``pif.input_ids``
+        verbatim; only the newly appended bridge is tokenized from the
+        canonical template output.
         """
         tokenizer = self.template.tokenizer
 
         messages_before = list(pif.get('messages') or [])
         messages_after = messages_before + list(tool_messages)
 
-        current_text = tokenizer.decode(pif['input_ids'], skip_special_tokens=False)
+        enable_thinking = getattr(self.template, 'enable_thinking', False)
+        s_before = tokenizer.apply_chat_template(
+            messages_before, tokenize=False, add_generation_prompt=False,
+            enable_thinking=enable_thinking)
         s_after = tokenizer.apply_chat_template(
             messages_after, tokenize=False, add_generation_prompt=True,
-            enable_thinking=getattr(self.template, 'enable_thinking', False))
+            enable_thinking=enable_thinking)
 
-        bridge_text = self._compute_bridge_text(current_text, s_after)
+        if not s_after.startswith(s_before):
+            raise RuntimeError(
+                'Canonical chat_template output for messages_after is not a '
+                'prefix-extension of messages_before; cannot compute bridge '
+                'delta. This indicates the template is non-monotonic in the '
+                'message list (e.g. reorders / rewrites earlier turns).\n'
+                f's_before tail: {s_before[-80:]!r}\n'
+                f's_after at same offset: '
+                f'{s_after[max(0, len(s_before) - 80):len(s_before) + 80]!r}')
+        bridge_text = s_after[len(s_before):]
         if not bridge_text:
             raise RuntimeError(
                 'Bridge text computation returned empty string; '
@@ -437,27 +455,6 @@ class MultiTurnRollout(Rollout):
         new_pif = self._append_bridge_tokens(pif, bridge_ids)
         new_pif['messages'] = messages_after
         return new_pif
-
-    @staticmethod
-    def _compute_bridge_text(current_text: str, s_after: str) -> str:
-        """Return the suffix of ``s_after`` beyond ``current_text``.
-
-        Handles the case where ``current_text`` has trailing whitespace that
-        the canonical chat_template rendering already consumed (e.g. the
-        assistant ``<|im_end|>`` is emitted by vLLM without a trailing ``\\n``
-        while the chat template always appends one between messages).
-        """
-        if s_after.startswith(current_text):
-            return s_after[len(current_text):]
-        # Tolerate trailing whitespace mismatch at the boundary.
-        ct_stripped = current_text.rstrip()
-        if s_after.startswith(ct_stripped):
-            return s_after[len(ct_stripped):]
-        raise RuntimeError(
-            'Cannot align decoded pif text with canonical chat_template output. '
-            f'current_text tail: {current_text[-80:]!r}; '
-            f's_after at same offset: '
-            f'{s_after[max(0, len(current_text) - 80):len(current_text) + 80]!r}')
 
     def _append_bridge_tokens(
         self,
