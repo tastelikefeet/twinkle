@@ -74,6 +74,7 @@ class _MockSampler:
         adapter_name='',
         *,
         num_samples=1,
+        **_kw,
     ) -> List[SampleResponse]:
         inputs_list = inputs if isinstance(inputs, list) else [inputs]
         out: List[SampleResponse] = []

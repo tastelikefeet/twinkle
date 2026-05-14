@@ -419,6 +419,7 @@ def main():
             'gpu_memory_utilization': 0.8, 'max_model_len': 32768,
             'max_lora_rank': 32, 'enable_lora': True,
             'enable_tower_connector_lora': True,
+            'max_loras': 5
         },
         device_mesh=sampler_mesh, remote_group='sampler')
     sampler.set_template('Qwen3_5Template', model_id=MODEL_ID, enable_thinking=False, max_length=HOTPOTQA_MAX_LENGTH)
@@ -442,12 +443,12 @@ def main():
 
     condenser = ModelCondenser(
         sampler=sampler,
-        compression_ratio=4.0,
+        compression_ratio=2.0,
         sampling_params=SamplingParams(
             max_tokens=1024, num_samples=1, temperature=0.4, top_p=0.9),
         min_chars=200,
         template=rollout_template,
-        use_base_model=True,
+        lora_path='ms://twinkle-kit/Qwen3.5-4B-Condenser',
         skip_pattern=r'^Question:',
         related_query=_extract_question,
     )

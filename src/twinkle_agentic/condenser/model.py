@@ -54,7 +54,8 @@ A collapsed index; expansion required to see specific information.
 ```
 
 Rules:
-1. Telegraphic style — drop function words ("the", "a", "is", "are", "of", ...); colons and commas mean "is" / "has".
+1. Telegraphic style — drop function words ("the", "a", "is", "are", "of", ...); colons and commas mean "is" / "has". 
+    * Exception: KEEP role-tagging verb+preposition phrases verbatim ("published by X", "written by X", "directed by X", "starring X", "founded by X", "created by X", "composed by X", "produced by X", "based on X", "adapted from X"). Collapsing these to a bare name loses the relation role (author vs publisher vs director) that the downstream question may hinge on.
 2. Summary MUST contain the passage's primary topic + 2–4 concrete core facts drawn from the source (entities, numbers, dates, relations). If a Query is given, order Query-relevant facts first, but STILL include other core facts within the budget. A Query is an ORDERING HINT, NOT a filter.
 3. Summary MUST NOT be meta-commentary about the Query. Forbidden patterns: "no X mention", "Query info: absent", "passage covers Y only", "does not contain ...", "no relevant info", or summaries that are only abstract category words like "structure/order/usage" with no facts. If the passage is unrelated to the Query, you still summarize the passage normally.
 4. More is an INDEX of category keywords, NOT inline data. Enumerate what CAN be recovered from the source (e.g. "birthplace, death place, age"); do NOT paste dates/numbers/names inline. Make sure all category of useful facts are introduced here.
@@ -134,21 +135,12 @@ class ModelCondenser(Condenser):
             not flagged ``raw.condensed``).
         sampling_params: Override for per-call sampling; when ``None`` a
             greedy config is derived from the max budget in the batch.
-        system_prompt: Override for the system prompt. May contain
-            ``{summary_words}``, ``{max_bullets}``, ``{bullet_words}``
-            (all substituted per-chunk with budget-scaled word/bullet
-            caps).
+        system_prompt: Override for the system prompt. Used verbatim.
         user_prompt_template: Override the user prompt. Must contain
-            ``{budget}`` and ``{text}``. ``{query}``,
-            ``{soft_budget}``, ``{summary_words}``, ``{max_bullets}``
-            and ``{bullet_words}`` are optional. ``{query}`` is
+            ``{budget}`` and ``{text}``. ``{query}`` is optional and is
             replaced with the trajectory's question extracted by the
             ``related_query`` callback (see below); jobs without a
-            detected query get a neutral placeholder. Scaling formulas:
-            ``soft_budget = int(budget*0.85)``;
-            ``summary_words = clamp(budget // 15, 8, 25)``;
-            ``max_bullets = clamp(budget // 75, 2, 5)``;
-            ``bullet_words = clamp(budget // 25, 6, 12)``.
+            detected query get a neutral placeholder.
         min_chars: Pre-filter; chunks shorter than this pass through.
         min_budget_chars: Floor for the soft character budget exposed
             to the prompt. When ``ceil(len / compression_ratio)`` falls
@@ -191,10 +183,14 @@ class ModelCondenser(Condenser):
         batch_size: Max chunks per sampler call. Partial batches are
             padded with a duplicate of the last trajectory so that
             distributed samplers (DP slice) always receive a full batch.
-        use_base_model: When ``True``, forwards ``use_base_model=True``
-            to :meth:`Sampler.sample` so compression bypasses any
-            currently-synced LoRA adapter — strongly recommended when
-            the sampler is also the training policy.
+        lora_path: Optional LoRA adapter to use for compression.
+            - ``None`` (default): forwards ``use_base_model=True`` to
+              :meth:`Sampler.sample` so compression bypasses any
+              currently-synced LoRA — strongly recommended when the
+              sampler is also the training policy.
+            - ``str``: forwards ``adapter_path=lora_path`` so a
+              dedicated condenser LoRA (e.g. a ModelScope slug or
+              local directory) is loaded and used instead of the base.
 
     Compressed chunks are flagged ``raw.condensed=True``; a subsequent
     :meth:`Chunks.to_trajectory` call wraps them in ``<block_N>``.
@@ -205,14 +201,14 @@ class ModelCondenser(Condenser):
         >>> sampler = vLLMSampler(model_id='Qwen/Qwen2.5-3B-Instruct',
         ...                       engine_args={'dtype': 'bfloat16'})
         >>> sampler.set_template('qwen2_5')
-        >>> cond = ModelCondenser(sampler, compression_ratio=4.0)
+        >>> cond = ModelCondenser(sampler, compression_ratio=2.0)
         >>> compressed = cond(chunks)
     """
 
     def __init__(
         self,
         sampler: 'Sampler',
-        compression_ratio: float = 4.0,
+        compression_ratio: float = 2.0,
         *,
         sampling_params: Optional['SamplingParams'] = None,
         system_prompt: Optional[str] = None,
@@ -225,7 +221,7 @@ class ModelCondenser(Condenser):
         related_query: Optional[Callable[[Chunk], Optional[str]]] = None,
         rounds: Optional[Sequence[int]] = None,
         batch_size: int = None,
-        use_base_model: bool = False,
+        lora_path: Optional[str] = None,
     ):
         if sampler is None:
             raise ValueError('sampler is required')
@@ -261,7 +257,7 @@ class ModelCondenser(Condenser):
         self.related_query = related_query
         self.rounds = set(rounds) if rounds is not None else None
         self.batch_size = batch_size
-        self.use_base_model = bool(use_base_model)
+        self.lora_path = lora_path if lora_path else None
         self._special_tokens_cache: Optional[Tuple[str, ...]] = None
 
     # ------------------------------------------------------------------
@@ -386,8 +382,10 @@ class ModelCondenser(Condenser):
 
         sp = self._sampling_params_for(max(b for _, _, b in batch))
         kwargs: Dict[str, Any] = {'sampling_params': sp}
-        if self.use_base_model:
+        if self.lora_path is None:
             kwargs['use_base_model'] = True
+        else:
+            kwargs['adapter_path'] = self.lora_path
         responses = self.sampler.sample(trajectories, **kwargs)
         # Coerce to list (some samplers may return tuples) and drop
         # padding responses so downstream ``zip`` aligns with ``batch``.
@@ -396,27 +394,9 @@ class ModelCondenser(Condenser):
     def _build_trajectory(
         self, text: str, budget: int, *, query: Optional[str] = None,
     ) -> 'Trajectory':
-        soft_budget = max(1, int(budget * 0.85))
-        summary_words = max(8, min(25, budget // 15))
-        max_bullets = max(2, min(5, budget // 75))
-        bullet_words = max(6, min(12, budget // 25))
-        replacements = (
-            ('{soft_budget}', str(soft_budget)),
-            ('{summary_words}', str(summary_words)),
-            ('{max_bullets}', str(max_bullets)),
-            ('{bullet_words}', str(bullet_words)),
-            ('{budget}', str(budget)),
-        )
         system = self.system_prompt
-        user = self.user_prompt_template
-        for k, v in replacements:
-            system = system.replace(k, v)
-            user = user.replace(k, v)
+        user = self.user_prompt_template.replace('{budget}', str(budget))
         user = user.replace('{text}', text)
-        # Query broadcast: each job gets its own trajectory's question
-        # (collected via ``_collect_jobs`` walking state). Empty/None
-        # collapses to a neutral placeholder so the prompt stays
-        # well-formed and we never leak another trajectory's query.
         q_text = (
             query.strip()
             if isinstance(query, str) and query and query.strip()
@@ -433,8 +413,8 @@ class ModelCondenser(Condenser):
         if self.sampling_params is not None:
             return self.sampling_params
         from twinkle.data_format.sampling import SamplingParams
-        # Rough heuristic: ~1 token per 2–3 English chars + headroom.
-        max_new = max(64, int(budget * 0.8) + 64)
+        # CJK worst case ~2 tokens/char; budget is a soft char ceiling, not output truth.
+        max_new = max(256, budget * 2 + 128)
         return SamplingParams(temperature=0.0, max_tokens=max_new)
 
     # ------------------------------------------------------------------
