@@ -266,7 +266,7 @@ class MultiTurnRollout(Rollout):
         # decides the filename prefix. Observability only -- any failure
         # is swallowed inside ``_write_rollout_traces``.
         if self.trace_dir:
-            self._write_rollout_traces(outs)
+            self._write_rollout_traces(outs, global_step=kwargs.get('global_step'))
         return outs
 
     # ------------------------------------------------------------------ private
@@ -348,7 +348,12 @@ class MultiTurnRollout(Rollout):
             'success': success,
         }
 
-    def _write_rollout_traces(self, outs: List[Dict[str, Any]]) -> None:
+    def _write_rollout_traces(
+        self,
+        outs: List[Dict[str, Any]],
+        *,
+        global_step: Optional[int] = None,
+    ) -> None:
         """Dump one pretty-printed JSON file per selected trajectory.
 
         ``trace_callback`` (if set) decides WHETHER to store;
@@ -382,7 +387,9 @@ class MultiTurnRollout(Rollout):
                 record = self._build_trace_record(
                     traj, idx=idx, success=success)
                 prefix = 'ok' if success else 'fail'
-                fname = f'{prefix}-{self._resolve_traj_id(traj, idx)}.json'
+                # global_step prefix lets file listings sort by training step.
+                step_tag = f'step{int(global_step):06d}-' if global_step is not None else ''
+                fname = f'{step_tag}{prefix}-{self._resolve_traj_id(traj, idx)}.json'
                 path = os.path.join(self.trace_dir, fname)
                 with open(path, 'w', encoding='utf-8') as f:
                     json.dump(record, f, ensure_ascii=False,

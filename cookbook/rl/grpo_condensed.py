@@ -37,7 +37,7 @@ NUM_GPUS = MODEL_GPUS + SAMPLER_GPUS
 
 NUM_GENERATIONS = int(os.environ.get('NUM_GENERATIONS', 8))
 MAX_NEW_TOKENS = int(os.environ.get('MAX_NEW_TOKENS', 4096))
-LEARNING_RATE = float(os.environ.get('LR', 1e-5))
+LEARNING_RATE = float(os.environ.get('LR', 5e-6))
 NUM_EPOCHS = int(os.environ.get('NUM_EPOCHS', 10))
 MAX_STEPS = int(os.environ.get('MAX_STEPS', 0))
 BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 8))
@@ -196,7 +196,9 @@ class HotpotQAProcessor(Preprocessor):
 def create_hotpotqa_dataset() -> Dataset:
     dataset = Dataset()
     dataset.add_dataset(DatasetMeta(
-        'ds_reannotated.jsonl', subset_name='fullwiki', split='train'))
+        'hf://hotpotqa/hotpot_qa', subset_name='fullwiki', split='train'))
+    # dataset.add_dataset(DatasetMeta(
+    #     'ds_reannotated.jsonl', subset_name='fullwiki', split='train'))
 
     _wrong_ids_path = WRONG_IDS_FILE.strip()
     if _wrong_ids_path:
@@ -213,8 +215,8 @@ def create_hotpotqa_dataset() -> Dataset:
     dataset.set_template(
         'Qwen3_5Template', model_id=MODEL_ID, max_length=HOTPOTQA_MAX_LENGTH,
         truncation_strategy='delete', enable_thinking=False)
-    _HOTPOTQA_COLS = ['id', 'question', 'original_answer', 'answers',
-                      'reasoning', 'level', 'type', 'context', 'supporting_facts']
+    _HOTPOTQA_COLS = ['id', 'question', 'answer', 'type', 'level',
+                      'supporting_facts', 'context']
     dataset.map(HotpotQAProcessor(system=SYSTEM_PROMPT, levels=['hard']), remove_columns=_HOTPOTQA_COLS)
     return dataset
 
@@ -535,7 +537,7 @@ def main():
         # Each returned trajectory is a flat dict containing ``messages``,
         # ``input_ids``, ``labels``, ``attention_mask``, ``position_ids``,
         # ``turns``, ``logprobs``, ``stop_reason``, ``truncated``.
-        all_trajectories: List[Dict[str, Any]] = rollout(expand_prompts)
+        all_trajectories: List[Dict[str, Any]] = rollout(expand_prompts, global_step=optim_step)
         n_turns_per_rollout = [int(t.get('turns') or 0) for t in all_trajectories]
         per_rollout_completion_length = [
             sum(1 for l in (t.get('labels') or []) if l != -100)
@@ -574,10 +576,6 @@ def main():
             metrics.reset()
             logger.info(f'[Step {optim_step}/{total_steps}] [SKIPPED] {log_dict}')
             continue
-
-        if pos_with_neg_adv > 0:
-            rollout_advantages = advantage_fn(
-                total_rewards, num_generations=NUM_GENERATIONS, scale='group').tolist()
 
         metrics.accumulate(
             completion_lengths=per_rollout_completion_length,
