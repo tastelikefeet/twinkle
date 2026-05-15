@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import re
 from typing import Any, Dict, List, Optional
@@ -56,18 +57,19 @@ HOTPOTQA_MAX_LENGTH = int(os.environ.get('HOTPOTQA_MAX_LENGTH', 64000))
 
 F1_REWARD_WEIGHT = float(os.environ.get('F1_REWARD_WEIGHT', 1.0))
 COT_REWARD_WEIGHT = float(os.environ.get('COT_REWARD_WEIGHT', 0))
-TOOL_BONUS_WEIGHT = float(os.environ.get('TOOL_BONUS_WEIGHT', 0.05))
+TOOL_BONUS_WEIGHT = float(os.environ.get('TOOL_BONUS_WEIGHT', 0.00))
 TOOL_BONUS_F1_THRESHOLD = float(
     os.environ.get('TOOL_BONUS_F1_THRESHOLD', 0.5))
 
 # KL penalty coefficient; 0 disables KL (and skips the ref forward pass entirely).
-KL_BETA = float(os.environ.get('KL_BETA', 0.05))
+KL_BETA = float(os.environ.get('KL_BETA', 0.02))
 
 # Entropy bonus coefficient; 0 disables the entropy compute path entirely.
 # Typical GRPO values: 0.001–0.01. Loss is: L = L_PPO + beta*KL - entropy_coef*H.
 ENTROPY_COEF = float(os.environ.get('ENTROPY_COEF', 0.0))
 
 WRONG_IDS_FILE = os.environ.get('WRONG_IDS_FILE', '')
+F1_BINARY_THRESHOLD = float(os.environ.get('F1_BINARY_THRESHOLD', 0.5))
 
 _ROLLOUT_TRACE_DIR = os.environ.get('ROLLOUT_TRACE_DIR', 'rollout_trace')
 
@@ -137,7 +139,8 @@ _TOOL_EXPLORE_REWARD: Optional[ToolExploreReward] = ToolExploreReward(
 
 
 def compute_rewards(trajectories: List[Dict[str, Any]]):
-    f1 = _F1_REWARD(trajectories)
+    f1_raw = _F1_REWARD(trajectories)
+    f1 = [1.0 if v >= F1_BINARY_THRESHOLD else 0.0 for v in f1_raw] if F1_BINARY_THRESHOLD > 0 else f1_raw
     cot = _COT_REWARD(trajectories)
     tool_explore = _TOOL_EXPLORE_REWARD(trajectories)
     total = [
@@ -176,20 +179,24 @@ class HotpotQAProcessor(Preprocessor):
         if self.levels is not None and (row.get('level') or '').strip().lower() not in self.levels:
             return None
         question = row['question']
-        answer = row.get('answer', '') or ''
+        answers = row.get('answers')
+        if isinstance(answers, list) and answers:
+            gold = [str(a).strip() for a in answers if str(a).strip()]
+        else:
+            gold = [(row.get('answer', '') or '').strip()]
         context_block = self._format_context(row.get('context', {}) or {})
         user_msg = f'Question: {question}\n\nContext:\n\n{context_block}'
         messages = [
             Message(role='system', content=self.system),
             Message(role='user', content=user_msg),
         ]
-        return Trajectory(messages=messages, user_data=[('ground_truth', answer.strip())])
+        return Trajectory(messages=messages, user_data=[('ground_truth', g) for g in gold])
 
 
 def create_hotpotqa_dataset() -> Dataset:
     dataset = Dataset()
     dataset.add_dataset(DatasetMeta(
-        'hf://hotpotqa/hotpot_qa', subset_name='fullwiki', split='train'))
+        'ds_reannotated.jsonl', subset_name='fullwiki', split='train'))
 
     _wrong_ids_path = WRONG_IDS_FILE.strip()
     if _wrong_ids_path:
@@ -206,8 +213,8 @@ def create_hotpotqa_dataset() -> Dataset:
     dataset.set_template(
         'Qwen3_5Template', model_id=MODEL_ID, max_length=HOTPOTQA_MAX_LENGTH,
         truncation_strategy='delete', enable_thinking=False)
-    _HOTPOTQA_COLS = ['id', 'question', 'answer', 'type', 'level',
-                      'supporting_facts', 'context']
+    _HOTPOTQA_COLS = ['id', 'question', 'original_answer', 'answers',
+                      'reasoning', 'level', 'type', 'context', 'supporting_facts']
     dataset.map(HotpotQAProcessor(system=SYSTEM_PROMPT, levels=['hard']), remove_columns=_HOTPOTQA_COLS)
     return dataset
 
@@ -282,6 +289,8 @@ def _compute_rollout_diagnostics(
     trajectories: List[Dict[str, Any]],
     n_turns_per_rollout: List[int],
     per_rollout_completion_length: List[int],
+    f1_rewards: Optional[List[float]] = None,
+    old_logps: Optional[List[List[float]]] = None,
 ) -> Dict[str, float]:
     """Aggregate rollout diagnostics for swanlab logging.
 
@@ -362,6 +371,18 @@ def _compute_rollout_diagnostics(
         out['avg_chars_total_no_sys'] = sum(msg_chars_total) / len(msg_chars_total)
         out['avg_chars_prompt_no_sys'] = sum(prompt_chars) / len(prompt_chars)
         out['avg_chars_assistant'] = sum(asst_chars) / len(asst_chars)
+
+    if f1_rewards is not None and old_logps is not None and f1_rewards:
+        per_traj_mean = [
+            (sum(lp) / len(lp)) if lp else 0.0 for lp in old_logps]
+        pos_logp = [m for m, f1 in zip(per_traj_mean, f1_rewards) if f1 > 0]
+        zero_logp = [m for m, f1 in zip(per_traj_mean, f1_rewards) if f1 <= 0]
+        out['f1_correct_rate'] = len(pos_logp) / len(f1_rewards)
+        out['f1_zero_rate'] = len(zero_logp) / len(f1_rewards)
+        out['mean_old_logp_f1_pos'] = (sum(pos_logp) / len(pos_logp)) if pos_logp else 0.0
+        out['mean_old_logp_f1_zero'] = (sum(zero_logp) / len(zero_logp)) if zero_logp else 0.0
+        out['policy_confidence_f1_pos'] = math.exp(out['mean_old_logp_f1_pos'])
+        out['policy_confidence_f1_zero'] = math.exp(out['mean_old_logp_f1_zero'])
     return out
 
 
@@ -523,13 +544,45 @@ def main():
         total_rewards, f1_rewards, cot_rewards, tool_explore_rewards = \
             compute_rewards(all_trajectories)
 
+        rollout_advantages = advantage_fn(
+            total_rewards, num_generations=NUM_GENERATIONS, scale='group').tolist()
+
+        all_f1_labels: List[bool] = [f > 0 for f in f1_rewards]
+        n_pos = sum(1 for p in all_f1_labels if p)
+        n_neg = sum(1 for p in all_f1_labels if not p)
+        pos_with_neg_adv = sum(1 for p, a in zip(all_f1_labels, rollout_advantages) if p and a < 0)
+        neg_with_pos_adv = sum(1 for p, a in zip(all_f1_labels, rollout_advantages) if not p and a > 0)
+
+        # Skip homogeneous groups where gradient signal is meaningless
+        f1_pos_rate = n_pos / len(f1_rewards) if f1_rewards else 0.5
+        if f1_pos_rate > 0.9 or f1_pos_rate < 0.1:
+            logger.info('[skip-homogeneous] f1_pos_rate=%.3f, skipping training update', f1_pos_rate)
+            metrics.accumulate(
+                completion_lengths=per_rollout_completion_length,
+                rewards={'total': total_rewards, 'f1': f1_rewards,
+                         'cot': cot_rewards, 'tool_explore': tool_explore_rewards})
+            log_dict = metrics.calculate()
+            log_dict.update(_compute_rollout_diagnostics(
+                all_trajectories, n_turns_per_rollout, per_rollout_completion_length,
+                f1_rewards=f1_rewards, old_logps=[[lp[0][1] for lp in (t.get('logprobs') or [])] for t in all_trajectories]))
+            log_dict['skipped'] = True
+            log_dict['pos_neg_adv_rate'] = pos_with_neg_adv / n_pos if n_pos else 0.0
+            log_dict['neg_pos_adv_rate'] = neg_with_pos_adv / n_neg if n_neg else 0.0
+            log_dict['adv_max'] = max(rollout_advantages) if rollout_advantages else 0.0
+            log_dict['adv_min'] = min(rollout_advantages) if rollout_advantages else 0.0
+            swanlab.log(_coerce_for_swanlab(log_dict))
+            metrics.reset()
+            logger.info(f'[Step {optim_step}/{total_steps}] [SKIPPED] {log_dict}')
+            continue
+
+        if pos_with_neg_adv > 0:
+            rollout_advantages = advantage_fn(
+                total_rewards, num_generations=NUM_GENERATIONS, scale='group').tolist()
+
         metrics.accumulate(
             completion_lengths=per_rollout_completion_length,
             rewards={'total': total_rewards, 'f1': f1_rewards,
                      'cot': cot_rewards, 'tool_explore': tool_explore_rewards})
-
-        rollout_advantages = advantage_fn(
-            total_rewards, num_generations=NUM_GENERATIONS, scale='group').tolist()
 
         all_input_data: List[Any] = []
         all_old_logps: List[List[float]] = []
@@ -560,6 +613,7 @@ def main():
                 old_logps=all_old_logps[mb_start:mb_end],
                 advantages=advantages[mb_start:mb_end],
                 ref_logps=ref_logps,
+                positive_mask=all_f1_labels[mb_start:mb_end],
                 micro_batch_size=MICRO_BATCH_SIZE)
             model.clip_grad_and_step()
             optim_step += 1
@@ -571,7 +625,12 @@ def main():
         log_dict = metrics.calculate()
         log_dict.update(model.calculate_metric(is_training=True))
         log_dict.update(_compute_rollout_diagnostics(
-            all_trajectories, n_turns_per_rollout, per_rollout_completion_length))
+            all_trajectories, n_turns_per_rollout, per_rollout_completion_length,
+            f1_rewards=f1_rewards, old_logps=all_old_logps))
+        log_dict['pos_neg_adv_rate'] = pos_with_neg_adv / n_pos if n_pos else 0.0
+        log_dict['neg_pos_adv_rate'] = neg_with_pos_adv / n_neg if n_neg else 0.0
+        log_dict['adv_max'] = max(rollout_advantages) if rollout_advantages else 0.0
+        log_dict['adv_min'] = min(rollout_advantages) if rollout_advantages else 0.0
         swanlab.log(_coerce_for_swanlab(log_dict))
         metrics.reset()
         logger.info(f'[Step {optim_step}/{total_steps}] {log_dict}')

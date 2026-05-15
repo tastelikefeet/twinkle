@@ -75,6 +75,12 @@ class GRPOMetric(Metric):
         self.kl_values: list = []
         self.n_tokens: int = 0
         self.has_old: bool = False
+        self.sum_new_f1_pos: float = 0.0
+        self.sum_new_f1_zero: float = 0.0
+        self.sum_diff_f1_pos: float = 0.0
+        self.sum_diff_f1_zero: float = 0.0
+        self.n_tokens_f1_pos: int = 0
+        self.n_tokens_f1_zero: int = 0
 
     @staticmethod
     def _as_mb_list(logps_val) -> Optional[List]:
@@ -94,6 +100,7 @@ class GRPOMetric(Metric):
         labels: 'torch.Tensor',
         logps: 'torch.Tensor',
         old_slice: Any,
+        f1_slice: Optional[List[float]] = None,
     ) -> int:
         """Reduce one microbatch into ``self.sum_*`` counters.
 
@@ -142,6 +149,19 @@ class GRPOMetric(Metric):
         self.sum_new += float((logps_f * mask_f).sum().item())
         self.sum_new_sq += float(((logps_f ** 2) * mask_f).sum().item())
 
+        if f1_slice is not None and len(f1_slice) >= logps_f.shape[0]:
+            for i in range(logps_f.shape[0]):
+                n_i = int(mask[i].sum().item())
+                if n_i == 0:
+                    continue
+                s_i = float((logps_f[i] * mask_f[i]).sum().item())
+                if f1_slice[i]:
+                    self.sum_new_f1_pos += s_i
+                    self.n_tokens_f1_pos += n_i
+                else:
+                    self.sum_new_f1_zero += s_i
+                    self.n_tokens_f1_zero += n_i
+
         if old_slice is None:
             return num_seq
 
@@ -155,6 +175,17 @@ class GRPOMetric(Metric):
         d = logps_f - old_f  # new - old
         self.sum_old += float((old_f * mask_f).sum().item())
         self.sum_diff += float((d * mask_f).sum().item())
+
+        if f1_slice is not None and len(f1_slice) >= d.shape[0]:
+            for i in range(d.shape[0]):
+                n_i = int(mask[i].sum().item())
+                if n_i == 0:
+                    continue
+                d_i = float((d[i] * mask_f[i]).sum().item())
+                if f1_slice[i]:
+                    self.sum_diff_f1_pos += d_i
+                else:
+                    self.sum_diff_f1_zero += d_i
         # Schulman K3 estimator of KL(old || new):
         #   samples x ~ old,  r(x) = new(x) / old(x),
         #   k3 = r - 1 - log(r) = exp(new - old) - (new - old) - 1.
@@ -184,6 +215,7 @@ class GRPOMetric(Metric):
         outputs: ModelOutput,
         *,
         old_logps: Any = None,
+        positive_mask: Any = None,
         **kwargs,
     ):
         import torch
@@ -206,6 +238,9 @@ class GRPOMetric(Metric):
         flat_old: Optional[List] = None
         if old_logps is not None and isinstance(old_logps, (list, tuple)):
             flat_old = list(old_logps)
+        flat_pos: Optional[List[bool]] = None
+        if positive_mask is not None and isinstance(positive_mask, (list, tuple)):
+            flat_pos = list(positive_mask)
 
         cursor = 0
         n_mb = min(len(inputs_list), len(logps_list))
@@ -233,7 +268,8 @@ class GRPOMetric(Metric):
             else:
                 old_slice = None
 
-            advanced = self._accumulate_mb(labels, logps_mb, old_slice)
+            f1_mb = flat_pos[cursor:cursor + num_seq_est] if flat_pos is not None else None
+            advanced = self._accumulate_mb(labels, logps_mb, old_slice, f1_mb)
             cursor += advanced
 
     def calculate(self) -> Dict[str, Any]:
@@ -248,6 +284,12 @@ class GRPOMetric(Metric):
             'max_token_ratio': self.max_token_ratio,
             'n': self.n_tokens,
             'has_old': self.has_old,
+            'sum_new_f1_pos': self.sum_new_f1_pos,
+            'sum_new_f1_zero': self.sum_new_f1_zero,
+            'sum_diff_f1_pos': self.sum_diff_f1_pos,
+            'sum_diff_f1_zero': self.sum_diff_f1_zero,
+            'n_f1_pos': self.n_tokens_f1_pos,
+            'n_f1_zero': self.n_tokens_f1_zero,
         }]
         all_results = self.gather_results(local)
 
@@ -283,6 +325,15 @@ class GRPOMetric(Metric):
                 if all_kl.numel() >= 10:
                     results['train/token_kl_p95'] = float(torch.quantile(all_kl.float(), 0.95).item())
                     results['train/token_kl_p99'] = float(torch.quantile(all_kl.float(), 0.99).item())
+
+        n_f1_pos = sum(r.get('n_f1_pos', 0) for r in all_results)
+        n_f1_zero = sum(r.get('n_f1_zero', 0) for r in all_results)
+        if n_f1_pos > 0:
+            results['train/mean_new_logp_pos'] = sum(r.get('sum_new_f1_pos', 0) for r in all_results) / n_f1_pos
+            results['train/logp_diff_pos'] = sum(r.get('sum_diff_f1_pos', 0) for r in all_results) / n_f1_pos
+        if n_f1_zero > 0:
+            results['train/mean_new_logp_neg'] = sum(r.get('sum_new_f1_zero', 0) for r in all_results) / n_f1_zero
+            results['train/logp_diff_neg'] = sum(r.get('sum_diff_f1_zero', 0) for r in all_results) / n_f1_zero
 
         self.reset()
         return results

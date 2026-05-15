@@ -154,14 +154,18 @@ class HotpotQAProcessor(Preprocessor):
         if self.levels is not None and (row.get('level') or '').strip().lower() not in self.levels:
             return None
         question = row['question']
-        answer = row.get('answer', '') or ''
+        answers = row.get('answers')
+        if isinstance(answers, list) and answers:
+            gold = [str(a).strip() for a in answers if str(a).strip()]
+        else:
+            gold = (row.get('answer', '') or '').strip()
         context_block = self._format_context(row.get('context', {}) or {})
         user_msg = f'Question: {question}\n\nContext:\n\n{context_block}'
         messages = [
             Message(role='system', content=self.system),
             Message(role='user', content=user_msg),
         ]
-        return Trajectory(messages=messages, user_data=[('ground_truth', answer.strip())])
+        return Trajectory(messages=messages, user_data=[('ground_truth', gold)])
 
 
 def create_hotpotqa_dataset() -> Dataset:

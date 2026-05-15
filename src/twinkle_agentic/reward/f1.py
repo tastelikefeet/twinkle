@@ -117,13 +117,12 @@ class F1Reward(Reward):
     def __call__(self, trajectories: List[Dict[str, Any]], **kwargs) -> List[float]:
         rewards = []
         for traj in trajectories:
-            gold = ''
-            for key, val in traj.get('user_data', []) or []:
-                if key == 'ground_truth':
-                    gold = val or ''
-                    break
+            golds = [val for key, val in traj.get('user_data', []) or [] if key == 'ground_truth' and val]
             pred = self._extract(_last_assistant_text(traj))
-            f1, _ = _f1_score(pred, gold)
+            if golds:
+                f1 = max(_f1_score(pred, g)[0] for g in golds)
+            else:
+                f1, _ = _f1_score(pred, '')
             rewards.append(f1)
         return rewards
 
@@ -190,13 +189,11 @@ class ToolExploreReward(Reward):
         return (last or '').strip()
 
     def _trajectory_f1(self, traj: Dict[str, Any]) -> float:
-        gold = ''
-        for key, val in traj.get('user_data', []) or []:
-            if key == 'ground_truth':
-                gold = val or ''
-                break
+        golds = [val for key, val in traj.get('user_data', []) or [] if key == 'ground_truth' and val]
         pred = self._extract(_last_assistant_text(traj))
-        f1, _ = _f1_score(pred, gold)
+        if golds:
+            return max(_f1_score(pred, g)[0] for g in golds)
+        f1, _ = _f1_score(pred, '')
         return f1
 
     def __call__(self, trajectories: List[Dict[str, Any]], **kwargs) -> List[float]:
