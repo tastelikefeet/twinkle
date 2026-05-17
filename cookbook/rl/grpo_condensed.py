@@ -1,3 +1,4 @@
+import copy
 import json
 import math
 import os
@@ -69,6 +70,10 @@ KL_BETA = float(os.environ.get('KL_BETA', 0.02))
 # Typical GRPO values: 0.001–0.01. Loss is: L = L_PPO + beta*KL - entropy_coef*H.
 ENTROPY_COEF = float(os.environ.get('ENTROPY_COEF', 0.0))
 
+# Per-token oracle bonus coefficient; 0 disables. Typical: 0.05–0.2.
+# Loss becomes: L = L_PPO + beta*KL - entropy_coef*H - token_bonus_coef*(oracle_logps - rollout_logps)
+ORACLE_BONUS_COEF = float(os.environ.get('ORACLE_BONUS_COEF', 0.0))
+
 # CISPO token-level IS clamp thresholds (MiniMax CISPO defaults: 0.2 / 0.28 asymmetric).
 CISPO_EPS_LOW = float(os.environ.get('CISPO_EPS_LOW', 0.2))
 CISPO_EPS_HIGH = float(os.environ.get('CISPO_EPS_HIGH', 0.2))
@@ -80,6 +85,64 @@ WRONG_IDS_FILE = os.environ.get('WRONG_IDS_FILE', '')
 F1_BINARY_THRESHOLD = float(os.environ.get('F1_BINARY_THRESHOLD', 0.5))
 
 _ROLLOUT_TRACE_DIR = os.environ.get('ROLLOUT_TRACE_DIR', 'rollout_trace')
+
+
+# [EXP-ORACLE] staged hint injection — appended to the Question line so skip_pattern keeps it uncompressed.
+def _oracle_hint_stage(step: int, total_steps: int) -> int:
+    """0 = explicit titles, 1 = vague count, 2 = no hint."""
+    if total_steps <= 0:
+        return 0
+    third = max(1, total_steps // 3)
+    if step < third:
+        return 0
+    if step < 2 * third:
+        return 1
+    return 2
+
+
+def _apply_oracle_hints(prompts: List[Any], stage: int) -> List[Any]:
+    """Return a (possibly deep-copied) prompt list with per-stage oracle hints in the Question line.
+
+    The hint is appended directly after 'Question: ...' and before '\\n\\nContext:' so it
+    lands in the same chunk as the question — which skip_pattern=r'^Question:' preserves.
+    """
+    if stage == 2:
+        return prompts
+    out = []
+    _q_split = re.compile(r'(Question:\s*.+?)(\n\nContext:)', re.DOTALL)
+    for p in prompts:
+        sf_titles = [v for (k, v) in (p.get('user_data') or []) if k == 'sf_title' and v]
+        if not sf_titles:
+            out.append(p)
+            continue
+        p = copy.deepcopy(p)
+        sf_unique = list(dict.fromkeys(sf_titles))
+        if stage == 0:
+            titles_str = ', '.join(f'"{t}"' for t in sf_unique)
+            hint = (f'\n[Oracle Hint] The passage(s) titled {titles_str} contain the '
+                    'supporting facts. After compression, find the block whose Summary '
+                    'heading matches these titles, then call the tool to expand if compressed.')
+        else:
+            n = len(sf_unique)
+            word = {1: 'One', 2: 'Two', 3: 'Three'}.get(n, str(n))
+            hint = (f'\n[Oracle Hint] {word} block(s) contain the supporting facts; '
+                    'call the tool to expand them if compressed.')
+        for m in (p.get('messages') or []):
+            if m.get('role') != 'user':
+                continue
+            c = m.get('content')
+            if isinstance(c, str):
+                # Insert hint between Question line and Context separator
+                m['content'] = _q_split.sub(lambda g: g.group(1) + hint + g.group(2), c, count=1)
+            elif isinstance(c, list):
+                for part in c:
+                    if isinstance(part, dict) and part.get('type') == 'text':
+                        part['text'] = _q_split.sub(
+                            lambda g: g.group(1) + hint + g.group(2), part.get('text') or '', count=1)
+                        break
+            break
+        out.append(p)
+    return out
 
 SYSTEM_PROMPT = """You are a careful multi-hop QA assistant.
 
@@ -198,7 +261,12 @@ class HotpotQAProcessor(Preprocessor):
             Message(role='system', content=self.system),
             Message(role='user', content=user_msg),
         ]
-        return Trajectory(messages=messages, user_data=[('ground_truth', g) for g in gold])
+        # [EXP-ORACLE] carry supporting_facts titles via user_data; rollout injects post-compression block hint
+        sf = row.get('supporting_facts') or {}
+        sf_titles = sf.get('title') or []
+        sf_unique = list(dict.fromkeys(t for t in sf_titles if t))
+        user_data = [('ground_truth', g) for g in gold] + [('sf_title', t) for t in sf_unique]
+        return Trajectory(messages=messages, user_data=user_data)
 
 
 def create_hotpotqa_dataset() -> Dataset:
@@ -396,6 +464,169 @@ def _compute_rollout_diagnostics(
     return out
 
 
+def _build_oracle_inputs(
+    mb_inputs: List[Dict[str, Any]],
+    f1_labels: List[bool],
+    template,
+) -> Optional[List[Dict[str, Any]]]:
+    """Build oracle-context inputs at the TOKEN level for per-token bonus computation.
+
+    The approach:
+      1. Find ``first_trainable`` from labels (first position != -100).
+         Due to NTP shift, input_ids[first_trainable] is the last prefix token (e.g. \\n
+         after ``assistant``) and labels[first_trainable] is the first response token target.
+      2. Construct oracle messages: [system, user_with_oracle_suffix].
+      3. Encode with template (add_generation_prompt=True) → oracle_prefix_ids ending with
+         the same assistant header token.
+      4. Concatenate: oracle_prefix_ids + input_ids[first_trainable+1:] (response tokens).
+      5. Labels: [-100]*(len(oracle_prefix)-1) + labels[first_trainable:] so the last prefix
+         position predicts the first response token.
+
+    For F1=0 samples: copied unchanged (bonus zeroed by _compute_token_bonus).
+    """
+    _q_line_re = re.compile(r'Question:\s*(.+?)(?:\n|$)', re.DOTALL)
+    oracle_inputs = []
+    any_modified = False
+
+    for inp, is_pos in zip(mb_inputs, f1_labels):
+        if not is_pos:
+            oracle_inputs.append(inp)
+            continue
+
+        user_data = inp.get('user_data') or []
+        sf_titles = [v for k, v in user_data if k == 'sf_title' and v]
+        gts = [v for k, v in user_data if k == 'ground_truth' and v]
+        if not sf_titles and not gts:
+            oracle_inputs.append(inp)
+            continue
+
+        labels = inp.get('labels') or []
+        input_ids = inp.get('input_ids') or []
+        if not labels or not input_ids:
+            oracle_inputs.append(inp)
+            continue
+
+        # 1. Find first trainable position
+        first_trainable = None
+        for i, l in enumerate(labels):
+            if l != -100:
+                first_trainable = i
+                break
+        if first_trainable is None or first_trainable + 1 >= len(input_ids):
+            oracle_inputs.append(inp)
+            continue
+
+        # 2. Extract question from first user message
+        question = None
+        msgs = inp.get('messages') or []
+        for m in msgs:
+            if m.get('role') != 'user':
+                continue
+            c = m.get('content')
+            text = c if isinstance(c, str) else (
+                next((p.get('text') for p in c if isinstance(p, dict) and p.get('type') == 'text'), '')
+                if isinstance(c, list) else '')
+            q_match = _q_line_re.match(text or '')
+            if q_match:
+                question = q_match.group(1).strip()
+            break
+
+        if not question:
+            oracle_inputs.append(inp)
+            continue
+
+        # 3. Build oracle user message (concise: question + oracle hints only)
+        hint_parts = []
+        if sf_titles:
+            hint_parts.append('Supporting passages: ' + ', '.join(f'"{t}"' for t in sf_titles))
+        if gts:
+            hint_parts.append('Answer: ' + '; '.join(gts))
+        hint_parts += '\nYou must call `extract_condensed` to read the right original passage from by the condensed block with thinking steps, and give the final correct answer.\n'
+        oracle_suffix = '\n[Oracle Context] ' + '. '.join(hint_parts) + '.'
+        oracle_user_content = f'Question: {question}{oracle_suffix}'
+
+        oracle_msgs = [
+            Message(role='system', content=SYSTEM_PROMPT),
+            Message(role='user', content=oracle_user_content),
+        ]
+
+        # 4. Encode oracle prefix (ends with <|im_start|>assistant\n)
+        oracle_feature = template.encode(
+            Trajectory(messages=oracle_msgs), add_generation_prompt=True)
+        oracle_prefix_ids = list(oracle_feature['input_ids'])
+
+        # 5. Splice: oracle_prefix + response_tokens
+        response_tokens = list(input_ids[first_trainable + 1:])
+        response_labels = list(labels[first_trainable:])
+
+        oracle_input_ids = oracle_prefix_ids + response_tokens
+        # Last position of oracle prefix predicts first response token
+        oracle_labels = [-100] * (len(oracle_prefix_ids) - 1) + response_labels
+
+        assert len(oracle_input_ids) == len(oracle_labels)
+        seq_len = len(oracle_input_ids)
+        oi = {
+            'input_ids': oracle_input_ids,
+            'labels': oracle_labels,
+            'attention_mask': [1] * seq_len,
+            'position_ids': list(range(seq_len)),
+        }
+        oracle_inputs.append(oi)
+        any_modified = True
+
+    return oracle_inputs if any_modified else None
+
+
+def _compute_token_bonus(
+    oracle_logps: Any,
+    old_logps: List[List[float]],
+    f1_labels: List[bool],
+    oracle_inputs: List[Dict[str, Any]],
+) -> List[List[float]]:
+    """Compute per-token bonus = oracle_logps - rollout_logps, zeroed for F1=0 samples.
+
+    oracle_logps is full-sequence form [batch, padded_seq] from forward_only + collector.
+    We extract valid positions using oracle_inputs[i]['labels'] mask to get response-only
+    logps aligned 1:1 with old_logps.
+    """
+    import torch
+
+    if isinstance(oracle_logps, torch.Tensor):
+        oracle_logps = oracle_logps.float().cpu()
+
+    bonus = []
+    for i, (is_pos, old_lp) in enumerate(zip(f1_labels, old_logps)):
+        if not is_pos or not old_lp:
+            bonus.append([0.0] * len(old_lp) if old_lp else [])
+            continue
+
+        n = len(old_lp)
+        oracle_labels = oracle_inputs[i].get('labels') or []
+
+        # Build mask from oracle labels to extract valid (trainable) positions
+        if isinstance(oracle_logps, torch.Tensor):
+            orc_row = oracle_logps[i]
+            mask = torch.tensor([l != -100 for l in oracle_labels], dtype=torch.bool)
+            seq_len = min(len(mask), orc_row.numel())
+            orc_valid = orc_row[:seq_len][mask[:seq_len]].tolist()
+        else:
+            orc_row = oracle_logps[i] if i < len(oracle_logps) else []
+            if isinstance(orc_row, torch.Tensor):
+                orc_row = orc_row.float().cpu().tolist()
+            elif not isinstance(orc_row, (list, tuple)):
+                orc_row = []
+            orc_valid = [v for v, l in zip(orc_row, oracle_labels) if l != -100]
+
+        # Align lengths (should match; pad/truncate as safety net)
+        if len(orc_valid) >= n:
+            orc_valid = orc_valid[:n]
+        else:
+            orc_valid = orc_valid + [0.0] * (n - len(orc_valid))
+
+        bonus.append([o - r for o, r in zip(orc_valid, old_lp)])
+    return bonus
+
+
 def main():
     swanlab.init(project='twinkle')
 
@@ -446,7 +677,7 @@ def main():
         model.set_lr_scheduler('CosineAnnealingLR', T_max=total_steps, eta_min=0)
 
     model.set_loss('GRPOLoss', epsilon=CISPO_EPS_LOW, epsilon_high=CISPO_EPS_HIGH,
-                   beta=KL_BETA, entropy_coef=ENTROPY_COEF)
+                   beta=KL_BETA, entropy_coef=ENTROPY_COEF, token_bonus_coef=ORACLE_BONUS_COEF)
     model.set_processor(InputProcessor, padding_free=True)
     model.set_template('Qwen3_5Template', model_id=MODEL_ID, enable_thinking=False, max_length=HOTPOTQA_MAX_LENGTH)
 
@@ -545,6 +776,10 @@ def main():
         metrics.reset()
         expand_prompts = [p for prompt in batch for p in [prompt] * NUM_GENERATIONS]
 
+        # [EXP-ORACLE] inject stage-dependent hint into the Question line before rollout
+        hint_stage = _oracle_hint_stage(batch_step, total_steps)
+        expand_prompts = _apply_oracle_hints(expand_prompts, hint_stage)
+
         ckpt_manager.sync_weights(merge_and_sync=False)
         sampler.reset_prefix_cache()
 
@@ -621,14 +856,24 @@ def main():
             if KL_BETA > 0.0:
                 ref_outputs = model.forward_only(inputs=mb_inputs, disable_lora=True)
                 ref_logps = ref_outputs.get('logps') if isinstance(ref_outputs, dict) else getattr(ref_outputs, 'logps', None)
-            # for input in mb_inputs:
-            #     if len(input['messages']) > 4:
-            #         print()
+            # [EXP-ORACLE] per-token bonus: forward with oracle context, diff against rollout logps
+            mb_token_bonus = None
+            if ORACLE_BONUS_COEF > 0.0:
+                mb_oracle_inputs = _build_oracle_inputs(
+                    mb_inputs, all_f1_labels[mb_start:mb_end], rollout_template)
+                if mb_oracle_inputs is not None:
+                    oracle_outputs = model.forward_only(inputs=mb_oracle_inputs)
+                    oracle_logps = oracle_outputs.get('logps') if isinstance(oracle_outputs, dict) else getattr(oracle_outputs, 'logps', None)
+                    if oracle_logps is not None:
+                        mb_token_bonus = _compute_token_bonus(
+                            oracle_logps, all_old_logps[mb_start:mb_end],
+                            all_f1_labels[mb_start:mb_end], mb_oracle_inputs)
             model.forward_backward(
                 inputs=mb_inputs,
                 old_logps=all_old_logps[mb_start:mb_end],
                 advantages=advantages[mb_start:mb_end],
                 ref_logps=ref_logps,
+                token_bonus=mb_token_bonus,
                 positive_mask=all_f1_labels[mb_start:mb_end],
                 micro_batch_size=MICRO_BATCH_SIZE)
             model.clip_grad_and_step()

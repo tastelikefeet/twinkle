@@ -22,6 +22,9 @@ class GRPOLoss(Loss):
             subtracts ``entropy_coef * H(pi)`` per token to encourage exploration and
             prevent mode-collapse / repetition. Requires the model forward to supply
             ``outputs['entropies']`` — enabled automatically via ``require_entropy``.
+        token_bonus_coef: Per-token oracle bonus coefficient (0.0 = disabled). When > 0,
+            subtracts ``token_bonus_coef * token_bonus`` from the per-token loss, where
+            ``token_bonus`` is typically ``oracle_logps - rollout_logps``.
         ignore_index: Index to ignore in labels (default: -100)
     """
 
@@ -31,6 +34,7 @@ class GRPOLoss(Loss):
         epsilon_high: Optional[float] = None,
         beta: float = 0.0,
         entropy_coef: float = 0.0,
+        token_bonus_coef: float = 0.0,
         ignore_index: int = -100,
         **kwargs,
     ):
@@ -38,6 +42,7 @@ class GRPOLoss(Loss):
         self.epsilon_high = epsilon_high if epsilon_high is not None else epsilon
         self.beta = beta
         self.entropy_coef = entropy_coef
+        self.token_bonus_coef = token_bonus_coef
         # Gate the expensive entropy compute path in the model forward.
         self.require_entropy = entropy_coef > 0.0
         self.ignore_index = ignore_index
@@ -211,6 +216,7 @@ class GRPOLoss(Loss):
         old_logps: Optional[Union['torch.Tensor', List[List[float]]]] = None,
         ref_logps: Optional['torch.Tensor'] = None,
         advantages: Optional[Union['torch.Tensor', List[float], np.ndarray]] = None,
+        token_bonus: Optional[Union['torch.Tensor', List[List[float]]]] = None,
         **kwargs,
     ):
         """
@@ -229,6 +235,9 @@ class GRPOLoss(Loss):
             ref_logps: Optional [batch, seq_len] reference model log probs for KL penalty.
                       Same padding/alignment rules as old_logps.
             advantages: advantage values
+            token_bonus: Optional per-token bonus signal (e.g. oracle_logps - rollout_logps).
+                        Same ragged/padding rules as old_logps. Reduces per-token loss when
+                        token_bonus_coef > 0.
             **kwargs: Additional arguments
         """
         import torch
@@ -311,6 +320,11 @@ class GRPOLoss(Loss):
             # entropies may come in fp32 from the kernel; cast to match logps dtype
             # so the final per_token_loss stays consistent (bf16 under amp).
             per_token_loss = per_token_loss - self.entropy_coef * entropies.to(per_token_loss.dtype)
+
+        # Per-token oracle bonus: tokens the oracle favors get reduced loss.
+        if self.token_bonus_coef > 0.0 and token_bonus is not None:
+            token_bonus = self._pad_and_align_to_batch(token_bonus, loss_mask, device, logps.dtype)
+            per_token_loss = per_token_loss - self.token_bonus_coef * token_bonus
 
         loss = self._aggregate_loss(per_token_loss, loss_mask, **kwargs)
 
