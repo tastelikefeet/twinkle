@@ -249,7 +249,7 @@ def _build_initial_trajectory(row: Dict[str, Any]) -> Dict[str, Any]:
     sentences_list = list(ctx.get('sentences') or [])
     user_msg = (
         f"Question: {row['question']}\n\n"
-        f"Context:\n\n{_format_context(titles, sentences_list)}")
+        f'Context:\n\n{_format_context(titles, sentences_list)}')
     return {
         'messages': [
             {'role': 'system', 'content': SYSTEM_PROMPT},

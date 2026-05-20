@@ -3,9 +3,7 @@ from typing import Any, Dict, List, Optional
 
 from twinkle.data_format.message import Tool as ToolInfo
 from twinkle_agentic.data_format import Chunks
-
 from .base import Tool
-
 
 TOOL_NAME = 'extract_condensed'
 
@@ -48,8 +46,7 @@ class ExtractCondensed(Tool):
                 continue
             counter += 1
             original = raw.get('original')
-            self._blocks[counter] = (
-                original if isinstance(original, str) and original else None)
+            self._blocks[counter] = (original if isinstance(original, str) and original else None)
 
     # ------------------------------------------------------------------
     # Tool interface
@@ -58,14 +55,14 @@ class ExtractCondensed(Tool):
         return {
             'type': 'function',
             'function': {
-                'name': TOOL_NAME,
-                'description': (
-                    'Recover the full, uncompressed text of ONE previously '
-                    'condensed passage, identified by its <block_N> tag. Use '
-                    'this tool whenever you need to re-read the original '
-                    'detail of a compressed block. Each call expands exactly '
-                    'one block; issue separate calls for additional blocks, '
-                    'and do not request the same block twice.'),
+                'name':
+                TOOL_NAME,
+                'description': ('Recover the full, uncompressed text of ONE previously '
+                                'condensed passage, identified by its <block_N> tag. Use '
+                                'this tool whenever you need to re-read the original '
+                                'detail of a compressed block. Each call expands exactly '
+                                'one block; issue separate calls for additional blocks, '
+                                'and do not request the same block twice.'),
                 'parameters': {
                     'blocks': ('int, the 1-indexed block number N appearing '
                                'inside <block_N>...</block_N>. Exactly one '

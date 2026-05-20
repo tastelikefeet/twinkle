@@ -687,7 +687,8 @@ def remote_function(dispatch: Union[Literal['slice', 'all', 'slice_dp'], Callabl
                             rank = Platform.get_rank()
                             # Redispatch here
                             _workers_and_args = _dispatch_args(
-                                _get_workers([None] * world_size, execute), dispatch, execute, device_mesh, args, kwargs)
+                                _get_workers([None] * world_size, execute), dispatch, execute, device_mesh, args,
+                                kwargs)
                             _, args, kwargs = _workers_and_args[rank]
                         return func(self, *args, **kwargs)
                     else:
@@ -751,10 +752,9 @@ def remote_function(dispatch: Union[Literal['slice', 'all', 'slice_dp'], Callabl
                                     _notify_exception(_ctx, _e)
                                     raise
 
-                            for _attr in ('_futures',):
+                            for _attr in ('_futures', ):
                                 if hasattr(_orig_result_func, _attr):
-                                    setattr(_notifying_result_func, _attr,
-                                            getattr(_orig_result_func, _attr))
+                                    setattr(_notifying_result_func, _attr, getattr(_orig_result_func, _attr))
                             return _notifying_result_func
                         return result_func()
                 else:

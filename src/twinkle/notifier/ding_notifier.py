@@ -66,7 +66,9 @@ class DingNotifier(Notifier):
 
         payload = {
             'msgtype': 'text',
-            'text': {'content': str(message)},
+            'text': {
+                'content': str(message)
+            },
         }
         resp = requests.post(
             self._build_url(),
@@ -77,7 +79,6 @@ class DingNotifier(Notifier):
         resp.raise_for_status()
         result = resp.json()
         if result.get('errcode', 0) != 0:
-            raise RuntimeError(
-                f'DingTalk notify failed: errcode={result.get("errcode")}, '
-                f'errmsg={result.get("errmsg")}')
+            raise RuntimeError(f'DingTalk notify failed: errcode={result.get("errcode")}, '
+                               f'errmsg={result.get("errmsg")}')
         return result

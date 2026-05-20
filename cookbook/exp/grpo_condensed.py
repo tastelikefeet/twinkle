@@ -542,7 +542,7 @@ def _build_oracle_inputs(
             if l != -100:
                 first_trainable = i
                 break
-        
+
         assert first_trainable is not None
 
         # 2. Extract question from first user message
