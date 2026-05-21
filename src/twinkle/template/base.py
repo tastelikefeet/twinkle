@@ -89,6 +89,32 @@ class Template:
         # TODO: Other models
         return (decoded or '').rstrip()
 
+    def parse_tool_call_stream(
+        self,
+        state: Dict[str, Any],
+        new_text: str,
+        finished: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Convert incremental decoded text into a list of OpenAI streaming ``delta`` parts.
+
+        Subclasses with a delimiter-based tool-call format override this to buffer
+        partial markup and emit ``{'tool_calls': [...]}`` parts on closure. The
+        default emits ``new_text`` verbatim as a single ``content`` part.
+
+        Args:
+            state: Per-sequence opaque dict; caller allocates ``{}`` once per
+                sequence and the template owns its keys.
+            new_text: Incremental decoded text since the previous call.
+            finished: True on the final call so templates can flush partial buffers.
+
+        Returns:
+            List of delta dicts; each carries at most one of ``content`` /
+            ``tool_calls``.
+        """
+        if not new_text:
+            return []
+        return [{'content': new_text}]
+
     @property
     def tokenizer(self):
         tokenizer = self.processor

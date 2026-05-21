@@ -1,10 +1,12 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 import functools
 import inspect
+import itertools
 import json
 import numpy as np
 import os
-from typing import Any, Callable, List, Literal, Optional, TypeVar, Union
+import random
+from typing import Any, AsyncIterator, Callable, List, Literal, Optional, TypeVar, Union
 
 from twinkle.notifier import Notifier, notify_exception
 from twinkle.utils import DeviceGroup, DeviceMesh, Platform, check_unsafe, framework_util, get_logger, requires
@@ -787,6 +789,93 @@ def remote_function(dispatch: Union[Literal['slice', 'all', 'slice_dp'], Callabl
         wrapper._dispatch = dispatch
         wrapper._lazy_collect = _lazy_collect
         wrapper._sync = sync
+        return wrapper
+
+    return decorator
+
+
+async def _wrap_async_iter_with_notify(gen: AsyncIterator, ctx: str) -> AsyncIterator:
+    """Re-emit chunks from a local async generator and forward exceptions to the notifier."""
+    try:
+        async for chunk in gen:
+            yield chunk
+    except Exception as _e:  # noqa: BLE001
+        notify_exception(_notifier, ctx, _e, _name)
+        raise
+
+
+async def _wrap_objrefgen_with_notify(ref_gen: Any, ctx: str) -> AsyncIterator:
+    """Drain a Ray ObjectRefGenerator chunk-by-chunk; forward exceptions to the notifier."""
+    import ray
+    try:
+        async for ref in ref_gen:
+            yield await ref
+    except Exception as _e:  # noqa: BLE001
+        notify_exception(_notifier, ctx, _e, _name)
+        raise
+
+
+def remote_generator(execute: Literal['first', 'balanced', 'random'] = 'balanced'):
+    """Streaming counterpart of ``remote_function`` for async-generator methods.
+
+    The decorated method must be ``async def`` with ``yield``. Driver-side
+    returns an async iterator that yields each chunk as soon as the worker
+    emits it; under Ray this is backed by ``ObjectRefGenerator``.
+
+    Args:
+        execute: How to pick the actor for a given call. Streaming is single-rank
+            inference (no NCCL collective), so we route the whole call to ONE actor.
+
+            - 'first':    always ``_actors[0]``. Useful for debugging or when
+                          a particular rank holds privileged state.
+            - 'balanced': round-robin across ``_actors`` (DEFAULT). Each
+                          decorated method owns an independent counter.
+            - 'random':   uniform random pick.
+
+    Notes:
+        - Bypasses ``_dispatch_args`` entirely (no ``slice_dp`` "batch too small"
+          guard fires for streaming).
+        - On the worker side the decorator is a transparent passthrough; Ray
+          turns the actor's ``async def + yield`` method into a streaming
+          generator handle automatically.
+    """
+
+    def decorator(func: Callable[..., AsyncIterator[T1]]) -> Callable[..., AsyncIterator[T1]]:
+
+        # Per-method counter, isolated from any other @remote_generator call site.
+        _rr_counter = itertools.count()
+
+        @functools.wraps(func)
+        def wrapper(self, *args, **kwargs) -> AsyncIterator[T1]:
+            _ctx = f'{type(self).__name__}.{func.__name__}'
+            try:
+                if _mode == 'local' or not hasattr(self, '_actors'):
+                    # Worker-side OR pure local mode: just invoke the async generator.
+                    return _wrap_async_iter_with_notify(func(self, *args, **kwargs), _ctx)
+                if _mode != 'ray':
+                    raise NotImplementedError(f'Unsupported mode {_mode}')
+
+                check_unsafe(*args, **kwargs)
+                actors = self._actors
+                if not actors:
+                    raise RuntimeError(f'{_ctx}: no actors available for streaming dispatch')
+                if execute == 'first':
+                    actor = actors[0]
+                elif execute == 'random':
+                    actor = random.choice(actors)
+                elif execute == 'balanced':
+                    actor = actors[next(_rr_counter) % len(actors)]
+                else:
+                    raise ValueError(f'Unsupported execute mode for remote_generator: {execute}')
+
+                ref_gen = getattr(actor, func.__name__).remote(*args, **kwargs)
+                return _wrap_objrefgen_with_notify(ref_gen, _ctx)
+            except Exception as _e:  # noqa: BLE001
+                notify_exception(_notifier, _ctx, _e, _name)
+                raise
+
+        wrapper._execute = execute
+        wrapper._is_generator = True
         return wrapper
 
     return decorator
