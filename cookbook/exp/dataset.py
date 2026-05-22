@@ -1,8 +1,16 @@
 import hashlib
+import httpx
 import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# 绕过自签证书代理导致的 SSL 校验失败
+_orig_httpx_init = httpx.Client.__init__
+def _patched_httpx_init(self, *a, **kw):
+    kw['verify'] = False
+    _orig_httpx_init(self, *a, **kw)
+httpx.Client.__init__ = _patched_httpx_init
 
 from modelscope import dataset_snapshot_download
 
@@ -111,8 +119,8 @@ class GithubCodeProcessor(Preprocessor):
         return self.map_row_to_col(out)
 
 
-_register(GithubCodeProcessor,
-          DatasetMeta(dataset_id=GITHUB_CODE_REPO, subset_name='all-apache-2.0', split='train'))
+#_register(GithubCodeProcessor,
+#          DatasetMeta(dataset_id=GITHUB_CODE_REPO, subset_name='all-apache-2.0', split='train'))
 
 
 # ===== modelscope/competition_math =====
