@@ -197,3 +197,93 @@ class ChineseR1DistillProcessor(Preprocessor):
 
 _register(ChineseR1DistillProcessor,
           DatasetMeta(dataset_id=CN_R1_DISTILL_REPO, split='train'))
+
+
+# ===== nohurry/Opus-4.6-Reasoning-3000x-filtered =====
+OPUS_REASONING_REPO = 'ms://nohurry/Opus-4.6-Reasoning-3000x-filtered'
+
+
+class OpusReasoningProcessor(Preprocessor):
+    """Opus-4.6-Reasoning-3000x-filtered row → ``{id, source, query, cot, response}``。
+
+    输入已有三列: ``problem`` → query, ``thinking`` → cot, ``solution`` → response。
+    """
+
+    def __call__(self, rows: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
+        rows = self.map_col_to_row(rows)
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            query = (row.get('problem') or '').strip()
+            cot = (row.get('thinking') or '').strip()
+            response = (row.get('solution') or '').strip()
+            if not query or not response:
+                continue
+            out.append({
+                'id': _hash_id('opus_reasoning', f'{query}\n{response}'),
+                'source': 'Opus-4.6-Reasoning-3000x-filtered',
+                'query': query,
+                'cot': cot,
+                'response': response,
+            })
+        return self.map_row_to_col(out)
+
+
+_register(OpusReasoningProcessor,
+          DatasetMeta(dataset_id=OPUS_REASONING_REPO, split='train'))
+
+
+# ===== Roman1111111/claude-opus-4.6-10000x =====
+CLAUDE_OPUS_REPO = 'ms://Roman1111111/claude-opus-4.6-10000x'
+
+
+class ClaudeOpusProcessor(Preprocessor):
+    """claude-opus-4.6-10000x row → ``{id, source, query, cot, response}``。
+
+    输入 schema: ``messages`` (OpenAI 格式 list[{role, content}])。
+    取首个 user 作 query，首个 assistant 按 ``<think>...</think>`` 拆 cot/response。
+    """
+
+    def __call__(self, rows: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
+        rows = self.map_col_to_row(rows)
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            messages = row.get('messages')
+            if not isinstance(messages, list):
+                continue
+            query = ''
+            assistant_text = ''
+            for msg in messages:
+                if not isinstance(msg, dict):
+                    continue
+                role = msg.get('role') or ''
+                content = msg.get('content') or ''
+                if not isinstance(content, str):
+                    continue
+                if role == 'user' and not query:
+                    query = content.strip()
+                elif role == 'assistant' and not assistant_text:
+                    assistant_text = content.strip()
+                    break
+            if not query or not assistant_text:
+                continue
+            m = _THINK_RE.search(assistant_text)
+            if m:
+                cot = m.group(1).strip()
+                response = assistant_text[m.end():].strip()
+            else:
+                cot = ''
+                response = assistant_text
+            if not response:
+                continue
+            out.append({
+                'id': _hash_id('claude_opus', f'{query}\n{response}'),
+                'source': 'claude-opus-4.6-10000x',
+                'query': query,
+                'cot': cot,
+                'response': response,
+            })
+        return self.map_row_to_col(out)
+
+
+_register(ClaudeOpusProcessor,
+          DatasetMeta(dataset_id=CLAUDE_OPUS_REPO, split='train'))

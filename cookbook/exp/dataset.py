@@ -154,7 +154,7 @@ _register(MathProcessor,
 
 
 # ===== nampdn-ai/tiny-textbooks =====
-TINY_TEXTBOOKS_REPO = 'hf://nampdn-ai/tiny-textbooks'
+TINY_TEXTBOOKS_REPO = 'ms://AI-ModelScope/tiny-textbooks'
 
 
 class TinyTextbooksProcessor(Preprocessor):
@@ -242,7 +242,7 @@ _register(MessagesNormalizeProcessor,
 
 
 _register(MessagesNormalizeProcessor,
-          DatasetMeta(dataset_id='ms://SWE-bench/SWE-smith-trajectories', split='train'),
+          DatasetMeta(dataset_id='ms://SWE-bench/SWE-smith-trajectories', split='tool'),
           init_args={'source': 'swe-smith'})
 
 
