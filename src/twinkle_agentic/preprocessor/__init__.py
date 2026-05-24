@@ -64,10 +64,13 @@ class QualityPreprocessor(Preprocessor):
         # ── Phase 8: near-duplicate removal ───────────────────────────────────
         minhash_dedup: bool = False,
         jaccard_threshold: float = 0.7,
-        # ── Phase 9: neural PPL via vLLM (optional) ───────────────────────────
-        sampler=None,
+        # ── Phase 9: neural PPL via OpenAI-compatible API (optional) ────────────────
+        ppl_api_endpoint: str = '',      # '' = skip
+        ppl_model: str = 'default',
+        ppl_tokenizer: str = '',         # HF tokenizer for chat-template rendering
         ppl_min: float = 2.0,
         ppl_max: float = 100.0,
+        ppl_max_workers: int = 8,
         # ── Phase 10: LLM API filters (optional) ──────────────────────────────
         llm_api_endpoint: str = '',          # '' = skip all LLM filters
         llm_model: str = 'default',
@@ -135,8 +138,15 @@ class QualityPreprocessor(Preprocessor):
             pipeline.append(partial(dj.minhash_dedup, jaccard_threshold=jaccard_threshold))
 
         # Phase 9: neural PPL
-        if sampler is not None:
-            pf = PerplexityFilter(sampler=sampler, ppl_min=ppl_min, ppl_max=ppl_max)
+        if ppl_api_endpoint:
+            pf = PerplexityFilter(
+                api_endpoint=ppl_api_endpoint,
+                model=ppl_model,
+                tokenizer_name_or_path=ppl_tokenizer,
+                ppl_min=ppl_min,
+                ppl_max=ppl_max,
+                max_workers=ppl_max_workers,
+            )
             pipeline.append(pf.ppl_filter)
 
         # Phase 10: LLM API filters

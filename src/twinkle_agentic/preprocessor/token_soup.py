@@ -24,7 +24,7 @@ _REPLACEMENT_CHAR_RE = re.compile(r'\ufffd')
 _CONTROL_CHAR_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
 
 # Unicode private use area (E000–F8FF, F0000–FFFFF, 100000–10FFFF)
-_PRIVATE_USE_RE = re.compile(r'[\ue000-\uf8ff\U000f0000-\U000fffff]')
+_PRIVATE_USE_RE = re.compile(r'[\ue000-\uf8ff\U000f0000-\U000fffff\U00100000-\U0010ffff]')
 
 # Chat-template special tokens repeated ≥ _SPECIAL_TOKEN_COUNT times
 _SPECIAL_TOKEN_RE = re.compile(

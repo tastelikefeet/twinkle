@@ -1,38 +1,26 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
-from twinkle.data_format import InputFeature, SamplingParams
+import httpx
+
 from twinkle.preprocessor import Preprocessor
-from twinkle.sampler.base import Sampler
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
-# PPL range that indicates the data is a good fit for the current model.
-# Too low  → trivially memorized / degenerate output.
-# Too high → out-of-distribution, garbled, or badly formatted.
 _DEFAULT_PPL_MIN = 2.0
 _DEFAULT_PPL_MAX = 100.0
-
-# Ignore response tokens shorter than this (stats unreliable)
 _MIN_RESPONSE_TOKENS = 5
-
-# Reusable sampling params: generate no tokens, only score prompt logprobs.
-# max_tokens=0 triggers vLLMSampler's logprobs_only path.
-_SCORE_SP = SamplingParams(max_tokens=0, prompt_logprobs=1)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _encode_pair(
-    sampler: Sampler,
+    tokenizer,
     messages: List[Dict[str, Any]],
-) -> Optional[Tuple[InputFeature, int]]:
-    """Encode (prompt, full_sequence) and return (full_feat, prompt_length).
-
-    Returns None if the trajectory has no assistant turn or encoding fails.
-    """
-    # Find last assistant message index
+) -> Optional[Tuple[List[Dict[str, Any]], int]]:
+    """Return (messages, n_prompt_tokens) or None."""
     last_asst = next(
         (i for i in range(len(messages) - 1, -1, -1)
          if isinstance(messages[i], dict) and messages[i].get('role') == 'assistant'),
@@ -41,32 +29,65 @@ def _encode_pair(
     if last_asst is None:
         return None
 
-    prompt_traj = {'messages': messages[:last_asst]}
-    full_traj   = {'messages': messages}
-
     try:
-        prompt_feat = sampler.encode_trajectory(prompt_traj, add_generation_prompt=True)
-        full_feat   = sampler.encode_trajectory(full_traj,   add_generation_prompt=False)
+        prompt_text = tokenizer.apply_chat_template(
+            messages[:last_asst], tokenize=False, add_generation_prompt=True,
+        )
+        full_text = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=False,
+        )
     except Exception:
         return None
 
-    n_prompt   = len(prompt_feat['input_ids'])
-    n_response = len(full_feat['input_ids']) - n_prompt
-    if n_response < _MIN_RESPONSE_TOKENS:
+    # Template already embeds special tokens as text; avoid double-adding them
+    n_prompt = len(tokenizer(prompt_text, add_special_tokens=False)['input_ids'])
+    n_full   = len(tokenizer(full_text,   add_special_tokens=False)['input_ids'])
+    if n_full - n_prompt < _MIN_RESPONSE_TOKENS:
         return None
-    return full_feat, n_prompt
+    return messages, n_prompt
+
+
+def _extract_logprob(lp) -> Optional[float]:
+    """Extract scalar log-prob from a vLLM prompt_logprobs element after JSON round-trip."""
+    if lp is None:
+        return None
+    if isinstance(lp, (int, float)):
+        return float(lp)
+    # vLLM JSON format: {str(token_id): {"logprob": float, "rank": int, "decoded_token": str}}
+    if isinstance(lp, dict):
+        v = next(iter(lp.values()), None)
+        if isinstance(v, dict):
+            return float(v['logprob'])
+        if isinstance(v, (int, float)):
+            return float(v)
+    return None
 
 
 def _ppl_from_logprobs(
-    prompt_logprobs: List[Optional[float]],
+    prompt_logprobs: List,
     n_prompt: int,
 ) -> Optional[float]:
-    """Compute PPL from a response-token slice of prompt_logprobs."""
-    response_lps = [lp for lp in prompt_logprobs[n_prompt:] if lp is not None]
+    response_lps = [_extract_logprob(lp) for lp in prompt_logprobs[n_prompt:]]
+    response_lps = [lp for lp in response_lps if lp is not None]
     if len(response_lps) < _MIN_RESPONSE_TOKENS:
         return None
-    avg_nll = -sum(response_lps) / len(response_lps)
-    return math.exp(avg_nll)
+    return math.exp(-sum(response_lps) / len(response_lps))
+
+
+def _score_one(
+    client: httpx.Client,
+    endpoint: str,
+    model: str,
+    messages: List[Dict[str, Any]],
+) -> List[Optional[float]]:
+    resp = client.post(endpoint, json={
+        'model': model,
+        'messages': messages,
+        'max_tokens': 0,
+        'prompt_logprobs': 1,
+    })
+    resp.raise_for_status()
+    return resp.json()['prompt_logprobs']
 
 
 # ── Preprocessor ─────────────────────────────────────────────────────────────
@@ -74,27 +95,34 @@ def _ppl_from_logprobs(
 class PerplexityFilter(Preprocessor):
     """Filter dataset rows by model perplexity on the assistant response.
 
-    The sampler scores the assistant's tokens conditioned on the prompt
-    (prompt_logprobs mode, no tokens generated). PPL outside [ppl_min, ppl_max]
-    is treated as low quality:
-      - PPL too low  → trivial / highly memorized content
-      - PPL too high → out-of-distribution, garbled, or badly formatted
+    Uses the OpenAI-compatible /v1/chat/completions endpoint with prompt_logprobs
+    so it is safe to use in multiprocessing contexts — no shared GPU state.
 
-    Requirements:
-      - ``sampler.set_template(...)`` must be called before using this filter.
-      - Works with any Sampler subclass that supports ``sample()`` with
-        ``SamplingParams(max_tokens=0, prompt_logprobs=1)``.
+    ppl_min / ppl_max define the keep window:
+      - Too low  → trivially memorized / degenerate output.
+      - Too high → out-of-distribution, garbled, or badly formatted.
+
+    Requirement: tokenizer_name_or_path must match the model served at api_endpoint.
     """
 
     def __init__(
         self,
-        sampler: Sampler,
+        api_endpoint: str,
+        model: str,
+        tokenizer_name_or_path: str,
         ppl_min: float = _DEFAULT_PPL_MIN,
         ppl_max: float = _DEFAULT_PPL_MAX,
+        max_workers: int = 8,
     ):
-        self.sampler = sampler
-        self.ppl_min = ppl_min
-        self.ppl_max = ppl_max
+        from transformers import AutoTokenizer
+
+        self._client      = httpx.Client(timeout=120.0)
+        self._endpoint    = f'{api_endpoint.rstrip("/")}/v1/chat/completions'
+        self._model       = model
+        self._tokenizer   = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
+        self.ppl_min      = ppl_min
+        self.ppl_max      = ppl_max
+        self._max_workers = max_workers
 
     def __call__(self, rows: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
         rows = self.map_col_to_row(rows)
@@ -103,37 +131,32 @@ class PerplexityFilter(Preprocessor):
         return rows
 
     def ppl_filter(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Score a batch via one sampler call; keep rows with PPL in [ppl_min, ppl_max]."""
-        # Encode each row; track which rows are scoreable
-        scoreable: List[Tuple[int, InputFeature, int]] = []  # (row_idx, full_feat, n_prompt)
+        """Parallel-score rows via chat completions; keep rows with PPL in [ppl_min, ppl_max]."""
+        scoreable: List[Tuple[int, List[Dict[str, Any]], int]] = []  # (row_idx, messages, n_prompt)
         for i, row in enumerate(rows):
             messages = row.get('messages') or []
-            result = _encode_pair(self.sampler, messages)
+            result = _encode_pair(self._tokenizer, messages)
             if result is not None:
                 scoreable.append((i, result[0], result[1]))
 
         if not scoreable:
             return rows
 
-        # One batched sampler call for all scoreable rows
-        try:
-            responses = self.sampler.sample(
-                [s[1] for s in scoreable],
-                sampling_params=_SCORE_SP,
-            )
-        except Exception:
-            return rows  # pass through on sampler error
-
-        # Determine which rows to drop
-        drop = set()
-        for (row_idx, _, n_prompt), resp in zip(scoreable, responses):
-            lps = resp.prompt_logprobs
-            if not lps:
-                continue
-            ppl = _ppl_from_logprobs(lps, n_prompt)
-            if ppl is None:
-                continue
-            if not (self.ppl_min <= ppl <= self.ppl_max):
-                drop.add(row_idx)
+        drop: set = set()
+        n_workers = min(self._max_workers, len(scoreable))
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            future_to_meta = {
+                pool.submit(_score_one, self._client, self._endpoint, self._model, messages): (row_idx, n_prompt)
+                for row_idx, messages, n_prompt in scoreable
+            }
+            for future in as_completed(future_to_meta):
+                row_idx, n_prompt = future_to_meta[future]
+                try:
+                    prompt_logprobs = future.result()
+                except Exception:
+                    continue
+                ppl = _ppl_from_logprobs(prompt_logprobs, n_prompt)
+                if ppl is not None and not (self.ppl_min <= ppl <= self.ppl_max):
+                    drop.add(row_idx)
 
         return [row for i, row in enumerate(rows) if i not in drop]

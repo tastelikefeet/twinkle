@@ -65,11 +65,19 @@ def _dj_dataset(texts: List[str]):
 
 
 def _keep_mask(op, texts: List[str]) -> List[bool]:
-    """Run a DJ Filter op and return a boolean keep-mask."""
-    nd = _dj_dataset(texts)
+    """Run a DJ Filter op; returns keep-mask via index tracking."""
+    from data_juicer.core.data import NestedDataset
+    from data_juicer.utils.constant import Fields
+    import datasets
+
+    n = len(texts)
+    ds = datasets.Dataset.from_dict({'text': texts, '_orig_idx': list(range(n))})
+    ds = ds.map(lambda x: {Fields.stats: {}, Fields.meta: {}}, batched=False)
+    nd = NestedDataset(ds)
     nd = op.compute_stats(nd)
-    # process returns an iterable of booleans aligned with nd
-    return list(op.process(nd))
+    filtered = op.process(nd)  # returns filtered NestedDataset, not booleans
+    kept = set(filtered['_orig_idx'])
+    return [i in kept for i in range(n)]
 
 
 class DataJuicerPreprocessor(Preprocessor):
@@ -79,6 +87,16 @@ class DataJuicerPreprocessor(Preprocessor):
     All public methods accept and return List[Dict] (row-level).
     Use __call__ to invoke the full default pipeline.
     """
+
+    def __init__(self) -> None:
+        self._op_cache: Dict = {}
+
+    def _get_op(self, op_class, **kwargs):
+        """Get or create a cached DJ op; same (class, params) → same instance."""
+        key = (op_class, repr(tuple(sorted(kwargs.items()))))
+        if key not in self._op_cache:
+            self._op_cache[key] = op_class(**kwargs)
+        return self._op_cache[key]
 
     def __call__(self, rows: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
         rows = self.map_col_to_row(rows)
@@ -100,7 +118,7 @@ class DataJuicerPreprocessor(Preprocessor):
     ) -> List[Dict[str, Any]]:
         """Filter rows where word-level n-gram repetition ratio > max_ratio."""
         from data_juicer.ops.filter import WordRepetitionFilter
-        op = WordRepetitionFilter(rep_len=rep_len, min_ratio=0.0, max_ratio=max_ratio)
+        op = self._get_op(WordRepetitionFilter, rep_len=rep_len, min_ratio=0.0, max_ratio=max_ratio)
         texts = [_get_text(r, role) for r in rows]
         mask = _keep_mask(op, texts)
         return [r for r, keep in zip(rows, mask) if keep]
@@ -114,7 +132,7 @@ class DataJuicerPreprocessor(Preprocessor):
     ) -> List[Dict[str, Any]]:
         """Filter rows where char-level n-gram repetition ratio > max_ratio."""
         from data_juicer.ops.filter import CharacterRepetitionFilter
-        op = CharacterRepetitionFilter(rep_len=rep_len, min_ratio=0.0, max_ratio=max_ratio)
+        op = self._get_op(CharacterRepetitionFilter, rep_len=rep_len, min_ratio=0.0, max_ratio=max_ratio)
         texts = [_get_text(r, role) for r in rows]
         mask = _keep_mask(op, texts)
         return [r for r, keep in zip(rows, mask) if keep]
@@ -129,7 +147,7 @@ class DataJuicerPreprocessor(Preprocessor):
     ) -> List[Dict[str, Any]]:
         """Filter rows whose special-character ratio exceeds max_ratio."""
         from data_juicer.ops.filter import SpecialCharactersFilter
-        op = SpecialCharactersFilter(min_ratio=0.0, max_ratio=max_ratio)
+        op = self._get_op(SpecialCharactersFilter, min_ratio=0.0, max_ratio=max_ratio)
         texts = [_get_text(r, role) for r in rows]
         mask = _keep_mask(op, texts)
         return [r for r, keep in zip(rows, mask) if keep]
@@ -142,7 +160,7 @@ class DataJuicerPreprocessor(Preprocessor):
     ) -> List[Dict[str, Any]]:
         """Filter rows whose alphanumeric-char ratio is below min_ratio."""
         from data_juicer.ops.filter import AlphanumericFilter
-        op = AlphanumericFilter(tokenization=False, min_ratio=min_ratio)
+        op = self._get_op(AlphanumericFilter, tokenization=False, min_ratio=min_ratio)
         texts = [_get_text(r, role) for r in rows]
         mask = _keep_mask(op, texts)
         return [r for r, keep in zip(rows, mask) if keep]
@@ -161,7 +179,7 @@ class DataJuicerPreprocessor(Preprocessor):
         If lang is empty string, filter only on confidence (any language).
         """
         from data_juicer.ops.filter import LanguageIDScoreFilter
-        op = LanguageIDScoreFilter(lang=lang, min_score=min_score)
+        op = self._get_op(LanguageIDScoreFilter, lang=lang, min_score=min_score)
         texts = [_get_text(r, role) for r in rows]
         mask = _keep_mask(op, texts)
         return [r for r, keep in zip(rows, mask) if keep]
@@ -177,7 +195,7 @@ class DataJuicerPreprocessor(Preprocessor):
     ) -> List[Dict[str, Any]]:
         """Filter rows exceeding the flagged-word ratio threshold."""
         from data_juicer.ops.filter import FlaggedWordsFilter
-        op = FlaggedWordsFilter(lang=lang, min_ratio=0.0, max_ratio=max_ratio)
+        op = self._get_op(FlaggedWordsFilter, lang=lang, min_ratio=0.0, max_ratio=max_ratio)
         texts = [_get_text(r, role) for r in rows]
         mask = _keep_mask(op, texts)
         return [r for r, keep in zip(rows, mask) if keep]
@@ -198,7 +216,7 @@ class DataJuicerPreprocessor(Preprocessor):
         Too high → low-density filler text.
         """
         from data_juicer.ops.filter import StopWordsFilter
-        op = StopWordsFilter(lang=lang, min_ratio=min_ratio, max_ratio=max_ratio)
+        op = self._get_op(StopWordsFilter, lang=lang, min_ratio=min_ratio, max_ratio=max_ratio)
         texts = [_get_text(r, role) for r in rows]
         mask = _keep_mask(op, texts)
         return [r for r, keep in zip(rows, mask) if keep]
@@ -220,7 +238,7 @@ class DataJuicerPreprocessor(Preprocessor):
         the *current training model* rather than a reference corpus).
         """
         from data_juicer.ops.filter import PerplexityFilter as KenLMPPLFilter
-        op = KenLMPPLFilter(lang=lang, min_ppl=min_ppl, max_ppl=max_ppl)
+        op = self._get_op(KenLMPPLFilter, lang=lang, min_ppl=min_ppl, max_ppl=max_ppl)
         texts = [_get_text(r, role) for r in rows]
         mask = _keep_mask(op, texts)
         return [r for r, keep in zip(rows, mask) if keep]
@@ -250,7 +268,7 @@ class DataJuicerPreprocessor(Preprocessor):
         ds = ds.map(lambda x: {Fields.stats: {}, Fields.meta: {}}, batched=False)
         nd = NestedDataset(ds)
 
-        op = DocumentMinhashDeduplicator(
+        op = self._get_op(DocumentMinhashDeduplicator,
             tokenization=tokenization,
             window_size=window_size,
             num_permutations=num_permutations,
@@ -281,7 +299,7 @@ class DataJuicerPreprocessor(Preprocessor):
         Catches responses that are too short (boilerplate) or too long (bloat).
         """
         from data_juicer.ops.filter import TokenNumFilter
-        op = TokenNumFilter(hf_tokenizer=hf_tokenizer, min_num=min_num, max_num=max_num)
+        op = self._get_op(TokenNumFilter, hf_tokenizer=hf_tokenizer, min_num=min_num, max_num=max_num)
         texts = [_get_text(r, role) for r in rows]
         mask = _keep_mask(op, texts)
         return [r for r, keep in zip(rows, mask) if keep]
@@ -300,7 +318,7 @@ class DataJuicerPreprocessor(Preprocessor):
         lang: 'en' or 'zh'.
         """
         from data_juicer.ops.filter import TextActionFilter
-        op = TextActionFilter(lang=lang, min_action_num=min_action_num)
+        op = self._get_op(TextActionFilter, lang=lang, min_action_num=min_action_num)
         texts = [_get_text(r, role) for r in rows]
         mask = _keep_mask(op, texts)
         return [r for r, keep in zip(rows, mask) if keep]
@@ -318,7 +336,7 @@ class DataJuicerPreprocessor(Preprocessor):
         Run this BEFORE any filter that inspects character content.
         """
         from data_juicer.ops.mapper import FixUnicodeMapper
-        op = FixUnicodeMapper(normalization=normalization)
+        op = self._get_op(FixUnicodeMapper, normalization=normalization)
         for row in rows:
             for msg in row.get('messages') or []:
                 if msg.get('role') == role:
@@ -342,7 +360,7 @@ class DataJuicerPreprocessor(Preprocessor):
         Does not remove cross-turn repetitions (use word_repeat_filter for that).
         """
         from data_juicer.ops.mapper import RemoveRepeatSentencesMapper
-        op = RemoveRepeatSentencesMapper(
+        op = self._get_op(RemoveRepeatSentencesMapper,
             lowercase=lowercase,
             ignore_special_character=ignore_special_character,
         )
@@ -373,7 +391,7 @@ class DataJuicerPreprocessor(Preprocessor):
         min_score: normalised 0-1 threshold (each dim is 1-5; avg / 5).
         """
         from data_juicer.ops.filter import LLMQualityScoreFilter
-        op = LLMQualityScoreFilter(
+        op = self._get_op(LLMQualityScoreFilter,
             api_or_hf_model=model,
             api_endpoint=api_endpoint,
             min_score=min_score,
@@ -397,7 +415,7 @@ class DataJuicerPreprocessor(Preprocessor):
         Useful for curriculum: keep medium-to-hard queries only.
         """
         from data_juicer.ops.filter import LLMDifficultyScoreFilter
-        op = LLMDifficultyScoreFilter(
+        op = self._get_op(LLMDifficultyScoreFilter,
             api_or_hf_model=model,
             api_endpoint=api_endpoint,
             min_score=min_score,
@@ -423,7 +441,7 @@ class DataJuicerPreprocessor(Preprocessor):
             condition='the response is in the same language as the question'
         """
         from data_juicer.ops.filter import LLMConditionFilter
-        op = LLMConditionFilter(
+        op = self._get_op(LLMConditionFilter,
             condition=condition,
             api_or_hf_model=model,
             api_endpoint=api_endpoint,
@@ -448,7 +466,7 @@ class DataJuicerPreprocessor(Preprocessor):
         to characterise the target domain. High score = likely to help downstream.
         """
         from data_juicer.ops.filter import LLMTaskRelevanceFilter
-        op = LLMTaskRelevanceFilter(
+        op = self._get_op(LLMTaskRelevanceFilter,
             api_or_hf_model=model,
             api_endpoint=api_endpoint,
             min_score=min_score,
@@ -478,19 +496,18 @@ class DataJuicerPreprocessor(Preprocessor):
         Typical range: keep 0.5-2.0 (discard near-zero = trivial, >2 = noisy).
         """
         from data_juicer.ops.filter import InstructionFollowingDifficultyFilter
-        op = InstructionFollowingDifficultyFilter(
+        from data_juicer.utils.constant import Fields
+        op = self._get_op(InstructionFollowingDifficultyFilter,
             hf_model=hf_model,
             min_score=min_score,
             max_score=max_score,
         )
         # IFD op works on {messages: [...]} samples directly
-        nd = _dj_dataset([''])  # placeholder; op reads 'messages' field
-        # build per-row samples for single-sample processing
         results = []
         for row in rows:
-            sample = {'messages': row.get('messages') or [], '__dj__stats__': {}, '__dj__meta__': {}}
+            sample = {'messages': row.get('messages') or [], Fields.stats: {}, Fields.meta: {}}
             sample = op.compute_stats_single(sample)
-            score = sample['__dj__stats__'].get('ifd_score', 1.0)
+            score = sample[Fields.stats].get('ifd_score', 1.0)
             if min_score <= score <= max_score:
                 results.append(row)
         return results

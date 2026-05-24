@@ -85,6 +85,8 @@ def _openai_body_to_trajectory_and_params(
         sp_kwargs['stop'] = body['stop']
     if body.get('logprobs'):
         sp_kwargs['logprobs'] = int(body.get('top_logprobs') or 0)
+    if body.get('prompt_logprobs') is not None:
+        sp_kwargs['prompt_logprobs'] = int(body['prompt_logprobs'])
     fp = body.get('frequency_penalty')
     if fp is not None and fp != 0:
         # OpenAI frequency_penalty (-2..2, 0 == no penalty) -> repetition_penalty
@@ -123,7 +125,10 @@ def _format_openai_choice(seq: Any, idx: int, template: Any) -> Dict[str, Any]:
     message: Dict[str, Any] = {'role': 'assistant', 'content': decoded}
     if tool_calls:
         message['tool_calls'] = tool_calls
-    return {'index': idx, 'message': message, 'finish_reason': finish_reason}
+    choice: Dict[str, Any] = {'index': idx, 'message': message, 'finish_reason': finish_reason}
+    if seq.logprobs:
+        choice['logprobs'] = {'token_logprobs': [lp[0][1] if lp else None for lp in seq.logprobs]}
+    return choice
 
 
 def _build_openai_completion(
@@ -134,18 +139,21 @@ def _build_openai_completion(
         for i, seq in enumerate(response.sequences)
     ]
     completion_tokens = sum(len(seq.tokens) for seq in response.sequences)
-    return {
+    result: Dict[str, Any] = {
         'id': f'chatcmpl-{uuid.uuid4().hex}',
         'object': 'chat.completion',
         'created': int(time.time()),
         'model': model_id,
         'choices': choices,
         'usage': {
-            'prompt_tokens': 0,
+            'prompt_tokens': len(response.prompt_token_ids or []),
             'completion_tokens': completion_tokens,
-            'total_tokens': completion_tokens,
+            'total_tokens': len(response.prompt_token_ids or []) + completion_tokens,
         },
     }
+    if response.prompt_logprobs is not None:
+        result['prompt_logprobs'] = response.prompt_logprobs
+    return result
 
 
 def _build_openai_chunk(

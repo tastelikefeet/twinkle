@@ -57,7 +57,7 @@ _ZH_HESITATE = re.compile(
     r'让我(重新|再次?)(想|试|来|考虑|计算)|'
     r'我(再|重新)(想想|试试|来一次|考虑)|'
     # Confusion / disorientation
-    r'我(越来越|有点|越来越)?(搞不清楚?|不确定|迷糊了?|乱了?)|'
+    r'我(越来越|有点)?(搞不清楚?|不确定|迷糊了?|乱了?)|'
     r'这(变得|太|越来越)(复杂|乱|难以?理清)|'
     # Repeated-mistake
     r'我(好像|似乎|又)(搞|弄)错(了)?|我(又犯|再次犯)(了)?错|'
@@ -164,7 +164,6 @@ class DeadLoopFilter(Preprocessor):
             if not asst_msgs:
                 out.append(row)
                 continue
-            reply = (asst_msgs[0].get('content') or '').strip()
-            if not _is_stuck(reply):
+            if not any(_is_stuck((m.get('content') or '').strip()) for m in asst_msgs):
                 out.append(row)
         return out
