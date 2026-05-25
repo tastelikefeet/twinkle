@@ -54,7 +54,7 @@ class MusiqueProcessor(Preprocessor):
                     'source': 'musique',
                     'messages': [{'role': 'user', 'content': text}],
                 })
-        return self.map_row_to_col(out)
+        return self.map_row_to_col(out, keys=['id', 'source', 'messages'])
 
 
 # Repo 仅含原始 JSONL 无 HF 元数据，必须先快照下载再以文件路径注册。
@@ -107,7 +107,7 @@ class GithubCodeProcessor(Preprocessor):
                 'source': 'github-code',
                 'messages': [{'role': 'user', 'content': code}],
             })
-        return self.map_row_to_col(out)
+        return self.map_row_to_col(out, keys=['id', 'source', 'messages'])
 
 
 _register(GithubCodeProcessor,
@@ -137,7 +137,7 @@ class MathProcessor(Preprocessor):
                     {'role': 'assistant', 'content': solution},
                 ],
             })
-        return self.map_row_to_col(out)
+        return self.map_row_to_col(out, keys=['id', 'source', 'messages'])
 
 
 _register(MathProcessor,
@@ -167,7 +167,7 @@ class TinyTextbooksProcessor(Preprocessor):
                     {'role': 'assistant', 'content': textbook},
                 ],
             })
-        return self.map_row_to_col(out)
+        return self.map_row_to_col(out, keys=['id', 'source', 'messages'])
 
 
 _register(TinyTextbooksProcessor,
@@ -224,7 +224,7 @@ class MessagesNormalizeProcessor(Preprocessor):
                 'source': self.source,
                 'messages': normalized,
             })
-        return self.map_row_to_col(out)
+        return self.map_row_to_col(out, keys=['id', 'source', 'messages'])
 
 
 _register(MessagesNormalizeProcessor,

@@ -20,12 +20,12 @@ class Preprocessor:
         return _new_rows
 
     @staticmethod
-    def map_row_to_col(rows: List[Dict[str, Any]]) -> Dict[str, List[Any]]:
+    def map_row_to_col(rows: List[Dict[str, Any]], keys: List[str] = None) -> Dict[str, List[Any]]:
         if not rows:
-            return {}
+            return {k: [] for k in keys} if keys else {}
 
         columns: Dict[str, List[Any]] = {}
-        keys = rows[0].keys()
+        keys = keys or rows[0].keys()
 
         for key in keys:
             columns[key] = [row[key] for row in rows]

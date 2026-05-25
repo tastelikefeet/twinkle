@@ -289,8 +289,7 @@ _register(ClaudeOpusProcessor,
           DatasetMeta(dataset_id=CLAUDE_OPUS_REPO, split='train'))
 
 
-# ===== hf://angrygiraffe/claude-opus-4.6-4.7-reasoning-8.7k =====
-ANGRYGIRAFFE_REPO = 'hf://angrygiraffe/claude-opus-4.6-4.7-reasoning-8.7k'
+ANGRYGIRAFFE_REPO = 'ms://hf/angrygiraffe-claude-opus-4.6-4.7-reasoning-8.7k'
 
 
 class AngrygiraffeOpusReasoningProcessor(Preprocessor):
