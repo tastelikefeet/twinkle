@@ -923,6 +923,21 @@ class SequenceParallelStrategy:
             return torch.cat(pieces, dim=1).contiguous() if pieces else tensor[:, :0].contiguous()
         return tensor[:, :real_position_ids.shape[-1]].contiguous()
 
+    def gather_features(self, features: torch.Tensor) -> torch.Tensor:
+        """All-gather SP-sharded per-token features ``[B, T_local, H]`` -> ``[B, T_real, H]``.
+
+        Mirrors the gather + trim path used for logps but operates directly on
+        hidden_states, so embedding pooling can run on the full sequence with
+        the same ``real_position_ids`` source of truth.
+        """
+        if features is None or not torch.is_tensor(features):
+            return features
+        if not self.enabled or self.ulysses_size <= 1:
+            return features
+        real_position_ids = sequence_parallel.real_position_ids
+        gathered, _ = GatherLoss.apply(features, None, 1, real_position_ids)
+        return self._trim_gathered_sequence_padding(gathered, real_position_ids)
+
     def gather_loss_tensors(
         self,
         inputs: Dict[str, Any],

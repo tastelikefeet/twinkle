@@ -3,8 +3,9 @@
 
 Inputs convention:
     inputs['labels']: pair / multi-negative grouping labels (see each class docstring).
-    outputs['logits']: sentence embeddings produced by the model
-        (shape [B, D] or [B, T, D]; CLS pooling is applied for the 3-D case).
+    outputs['embeddings']: sentence embeddings produced by the model
+        (shape ``[B, D]``). Falls back to ``outputs['logits']`` for
+        backward-compatibility with the legacy hook-side pooling layout.
 
 All classes return :class:`LossOutput` with ``num_tokens=0`` (no per-token
 normalization, matching the convention used by ``DPOLoss``/``GRPOLoss``).
@@ -33,8 +34,14 @@ class SiameseDistanceMetric(Enum):
 
 
 def _extract_sentences(outputs) -> torch.Tensor:
-    """Return [B, D] sentence embeddings, applying CLS pooling for 3-D tensors."""
-    sentences = outputs['logits']
+    """Return [B, D] sentence embeddings from postprocess_tensor_sp output.
+
+    Prefers the canonical ``embeddings`` key (post-pooling); falls back to
+    ``logits`` (legacy hook-side pooling) and applies CLS pooling for 3-D.
+    """
+    sentences = outputs.get('embeddings')
+    if sentences is None:
+        sentences = outputs['logits']
     if sentences.dim() == 3:
         sentences = sentences[:, 0]
     return sentences
@@ -77,52 +84,6 @@ def _parse_multi_negative_sentences(sentences: torch.Tensor,
     return split_tensors
 
 
-class CosineSimilarityLoss(Loss):
-    """MSE between cosine similarity of paired sentences and target scores."""
-
-    def __call__(self, inputs, outputs, **kwargs) -> LossOutput:
-        labels = inputs['labels']
-        s1, s2 = _parse_pair_sentence(outputs)
-        sim = torch.cosine_similarity(s1, s2)
-        loss = nn.MSELoss()(sim, labels.to(sim.dtype).view(-1))
-        return LossOutput(loss=loss, num_tokens=0)
-
-
-class ContrastiveLoss(Loss):
-    """Contrastive loss with cosine distance and a fixed margin."""
-
-    def __init__(self, margin: float = 0.5, **kwargs):
-        self.margin = margin
-
-    def __call__(self, inputs, outputs, **kwargs) -> LossOutput:
-        labels = inputs['labels']
-        s1, s2 = _parse_pair_sentence(outputs)
-        distances = SiameseDistanceMetric.COSINE_DISTANCE(s1, s2)
-        labels = labels.to(s1.dtype)
-        losses = 0.5 * (labels * distances.pow(2) + (1 - labels) * F.relu(self.margin - distances).pow(2))
-        return LossOutput(loss=losses.mean(), num_tokens=0)
-
-
-class OnlineContrastiveLoss(Loss):
-    """Online hard-pair mining variant of :class:`ContrastiveLoss`."""
-
-    def __init__(self, margin: float = 0.5, **kwargs):
-        self.margin = margin
-
-    def __call__(self, inputs, outputs, **kwargs) -> LossOutput:
-        labels = inputs['labels']
-        s1, s2 = _parse_pair_sentence(outputs)
-        distance_matrix = SiameseDistanceMetric.COSINE_DISTANCE(s1, s2)
-        negs = distance_matrix[labels == 0]
-        poss = distance_matrix[labels == 1]
-        # hard pair mining: keep negatives closer than the hardest positive and vice versa
-        negative_pairs = negs[negs < (poss.max() if len(poss) > 1 else negs.mean())]
-        positive_pairs = poss[poss > (negs.min() if len(negs) > 1 else poss.mean())]
-        positive_loss = positive_pairs.pow(2).sum()
-        negative_loss = F.relu(self.margin - negative_pairs).pow(2).sum()
-        return LossOutput(loss=positive_loss + negative_loss, num_tokens=0)
-
-
 class InfonceLoss(Loss):
     """InfoNCE contrastive loss with optional cross-DP gathering.
 
@@ -144,7 +105,11 @@ class InfonceLoss(Loss):
         process_group: Distributed process group used for the all-gather.
             When ``None``, the default group (``dist.group.WORLD``) is used.
     """
-
+    
+    require_logits = True
+    require_entropy = False
+    require_logps = False
+    
     def __init__(
         self,
         temperature: float = 0.1,

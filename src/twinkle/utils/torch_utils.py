@@ -268,6 +268,45 @@ def pad_and_stack_tensors(tensors: List['torch.Tensor'], pad_value: float = -200
         return torch.stack(padded_tensors, dim=0)
 
 
+def gather_cp_load_balanced(tensor: 'torch.Tensor', cp_group, seq_dim: int = 1) -> 'torch.Tensor':
+    """All-gather a CP-load-balanced shard along ``seq_dim`` into the full sequence.
+
+    Inverse of :func:`split_cp_inputs`: each CP rank ``r`` holds chunks ``[r, 2*cp - r - 1]``
+    of the original ``2*cp`` sequence chunks. The local rank's slice keeps autograd;
+    other ranks' slices are detached copies, so backward through the gathered tensor
+    only produces gradients for the local chunk.
+    """
+    import torch
+    cp_size = cp_group.size()
+    if cp_size <= 1:
+        return tensor
+    cp_rank = torch.distributed.get_rank(group=cp_group)
+    gathered = [torch.empty_like(tensor) for _ in range(cp_size)]
+    torch.distributed.all_gather(gathered, tensor.contiguous(), group=cp_group)
+    gathered[cp_rank] = tensor
+    seq_local = tensor.shape[seq_dim]
+    half_len = seq_local // 2
+    full_seq = seq_local * cp_size
+    chunk_len = full_seq // (2 * cp_size)
+    out_shape = list(tensor.shape)
+    out_shape[seq_dim] = full_seq
+    output = tensor.new_zeros(*out_shape)
+    for j in range(cp_size):
+        o = gathered[j]
+        front = [slice(None)] * tensor.ndim
+        front[seq_dim] = slice(j * chunk_len, (j + 1) * chunk_len)
+        rev = 2 * cp_size - j - 1
+        back = [slice(None)] * tensor.ndim
+        back[seq_dim] = slice(rev * chunk_len, (rev + 1) * chunk_len)
+        local_front = [slice(None)] * tensor.ndim
+        local_front[seq_dim] = slice(0, half_len)
+        local_back = [slice(None)] * tensor.ndim
+        local_back[seq_dim] = slice(half_len, seq_local)
+        output[tuple(front)] = o[tuple(local_front)]
+        output[tuple(back)] = o[tuple(local_back)]
+    return output
+
+
 def split_cp_inputs(inputs: 'torch.Tensor', cu_seqlens: Optional['torch.Tensor'], dim: int):
     import torch
     from megatron.core import mpu
