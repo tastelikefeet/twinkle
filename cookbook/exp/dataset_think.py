@@ -6,8 +6,6 @@ from typing import Any, Dict, List, Optional
 from twinkle.dataset import Dataset, DatasetMeta
 from twinkle.preprocessor import Preprocessor
 
-dataset = Dataset()
-
 _THINK_RE = re.compile(r'<think>(.*?)</think>', re.DOTALL)
 
 
@@ -15,7 +13,7 @@ def _hash_id(prefix: str, content: str) -> str:
     return f'{prefix}__{hashlib.md5(content.encode("utf-8")).hexdigest()[:16]}'
 
 
-def _register(processor_cls, meta: DatasetMeta, init_args: Optional[Dict[str, Any]] = None) -> None:
+def _register(dataset, processor_cls, meta: DatasetMeta, init_args: Optional[Dict[str, Any]] = None) -> None:
     """Add dataset and run preprocessor; auto-strip every input column to enforce
     the universal ``{id, source, query, cot, response}`` output schema."""
     dataset.add_dataset(meta)
@@ -64,10 +62,6 @@ class CodeXThinkingProcessor(Preprocessor):
                 'response': response,
             })
         return self.map_row_to_col(out)
-
-
-_register(CodeXThinkingProcessor,
-          DatasetMeta(dataset_id=CODEX_THINKING_REPO, split='train', data_slice=range(200000)))
 
 
 # ===== open-thoughts/OpenThoughts3-1.2M =====
@@ -119,10 +113,6 @@ class OpenThoughtsProcessor(Preprocessor):
         return self.map_row_to_col(out)
 
 
-_register(OpenThoughtsProcessor,
-          DatasetMeta(dataset_id=OPEN_THOUGHTS_REPO, split='train', data_slice=range(100000)))
-
-
 # ===== GAIR/LIMO-v2 =====
 LIMO_REPO = 'ms://GAIR/LIMO-v2'
 
@@ -162,10 +152,6 @@ class LIMOProcessor(Preprocessor):
         return self.map_row_to_col(out)
 
 
-_register(LIMOProcessor,
-          DatasetMeta(dataset_id=LIMO_REPO, split='train'))
-
-
 # ===== AI-ModelScope/Chinese-DeepSeek-R1-Distill-data-110k =====
 CN_R1_DISTILL_REPO = 'ms://AI-ModelScope/Chinese-DeepSeek-R1-Distill-data-110k'
 
@@ -195,10 +181,6 @@ class ChineseR1DistillProcessor(Preprocessor):
         return self.map_row_to_col(out)
 
 
-_register(ChineseR1DistillProcessor,
-          DatasetMeta(dataset_id=CN_R1_DISTILL_REPO, split='train', data_slice=range(100000)))
-
-
 # ===== nohurry/Opus-4.6-Reasoning-3000x-filtered =====
 OPUS_REASONING_REPO = 'ms://nohurry/Opus-4.6-Reasoning-3000x-filtered'
 
@@ -226,10 +208,6 @@ class OpusReasoningProcessor(Preprocessor):
                 'response': response,
             })
         return self.map_row_to_col(out)
-
-
-_register(OpusReasoningProcessor,
-          DatasetMeta(dataset_id=OPUS_REASONING_REPO, split='train'))
 
 
 # ===== Roman1111111/claude-opus-4.6-10000x =====
@@ -285,10 +263,6 @@ class ClaudeOpusProcessor(Preprocessor):
         return self.map_row_to_col(out)
 
 
-_register(ClaudeOpusProcessor,
-          DatasetMeta(dataset_id=CLAUDE_OPUS_REPO, split='train'))
-
-
 ANGRYGIRAFFE_REPO = 'ms://hf/angrygiraffe-claude-opus-4.6-4.7-reasoning-8.7k'
 
 
@@ -341,8 +315,68 @@ class AngrygiraffeOpusReasoningProcessor(Preprocessor):
         return self.map_row_to_col(out)
 
 
-_register(AngrygiraffeOpusReasoningProcessor,
-          DatasetMeta(dataset_id=ANGRYGIRAFFE_REPO, split='train'))
+def _build_dataset() -> Dataset:
+    dataset = Dataset()
 
-dataset.mix_dataset(False)
-print()
+    _register(dataset, CodeXThinkingProcessor,
+              DatasetMeta(dataset_id=CODEX_THINKING_REPO, split='train', data_slice=range(200000)))
+
+    _register(dataset, OpenThoughtsProcessor,
+              DatasetMeta(dataset_id=OPEN_THOUGHTS_REPO, split='train', data_slice=range(100000)))
+
+    _register(dataset, LIMOProcessor,
+              DatasetMeta(dataset_id=LIMO_REPO, split='train'))
+
+    _register(dataset, ChineseR1DistillProcessor,
+              DatasetMeta(dataset_id=CN_R1_DISTILL_REPO, split='train', data_slice=range(100000)))
+
+    _register(dataset, OpusReasoningProcessor,
+              DatasetMeta(dataset_id=OPUS_REASONING_REPO, split='train'))
+
+    _register(dataset, ClaudeOpusProcessor,
+              DatasetMeta(dataset_id=CLAUDE_OPUS_REPO, split='train'))
+
+    _register(dataset, AngrygiraffeOpusReasoningProcessor,
+              DatasetMeta(dataset_id=ANGRYGIRAFFE_REPO, split='train'))
+
+    dataset.mix_dataset(False)
+    return dataset
+
+
+class ToMessagesProcessor(Preprocessor):
+    """Convert {query, cot, response} → {id, source, messages}."""
+
+    def __call__(self, rows: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
+        rows = self.map_col_to_row(rows)
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            query = row.get('query') or ''
+            cot = row.get('cot') or ''
+            response = row.get('response') or ''
+            if not cot:
+                continue
+            assistant_content = f'<think>{cot}</think>'
+            out.append({
+                'id': row.get('id', ''),
+                'source': row.get('source', ''),
+                'messages': [
+                    {'role': 'user', 'content': query},
+                    {'role': 'assistant', 'content': assistant_content},
+                ],
+            })
+        return self.map_row_to_col(out, keys=['id', 'source', 'messages'])
+
+
+if __name__ == '__main__':
+    import os
+    from twinkle_agentic.preprocessor import QualityPreprocessor
+    dataset = _build_dataset()
+
+    dropped_log = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dropped.jsonl')
+    if os.path.exists(dropped_log):
+        os.remove(dropped_log)
+
+    dataset.map(ToMessagesProcessor(), remove_columns=['query', 'cot', 'response'])
+    dataset.map(QualityPreprocessor(special_chars_max_ratio=0.4, token_num_max=32768,
+                                    dropped_log_path=dropped_log), num_proc=16)
+    print(len(dataset))

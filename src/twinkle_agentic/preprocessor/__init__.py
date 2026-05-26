@@ -1,9 +1,11 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
+import json
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional
 
 from twinkle.preprocessor import Preprocessor
-
+from twinkle.utils import get_logger
+from twinkle.utils.parallel import PosixFileLock
 from .consistency_filter import ConsistencyFilter
 from .data_juicer import DataJuicerPreprocessor
 from .dead_loop_filter import DeadLoopFilter
@@ -12,6 +14,8 @@ from .majority_vote import MajorityVoteFilter
 from .perplexity import PerplexityFilter
 from .refuse_filter import RefuseFilter
 from .token_soup import TokenSoupFilter
+
+logger = get_logger(only_local_master=False)
 
 
 class QualityPreprocessor(Preprocessor):
@@ -53,7 +57,7 @@ class QualityPreprocessor(Preprocessor):
         token_num_filter: bool = True,
         token_num_min: int = 10,
         token_num_max: int = 8192,
-        hf_tokenizer: str = 'Qwen/Qwen2.5-0.5B',
+        hf_tokenizer: str = 'Qwen/Qwen3.5-4B',
         # ── Phase 5: vocabulary quality ───────────────────────────────────────
         content_lang: str = 'en',           # language code for vocab filters
         stopwords_min_ratio: float = 0.1,
@@ -98,6 +102,8 @@ class QualityPreprocessor(Preprocessor):
         llm_difficulty_min_score: float = 0.0,  # 0.0 = skip
         llm_condition: str = '',             # '' = skip
         llm_task_desc: str = '',             # '' = skip
+        # ── Diagnostics ───────────────────────────────────────────────────────
+        dropped_log_path: str = '',          # '' = skip; otherwise JSONL append
     ) -> None:
         super().__init__()
 
@@ -220,12 +226,35 @@ class QualityPreprocessor(Preprocessor):
                                         model=llm_model))
 
         self._pipelines = pipeline
+        self._dropped_log_path = dropped_log_path
+        self._lock: Optional[PosixFileLock] = (
+            PosixFileLock(dropped_log_path + '.lock') if dropped_log_path else None)
+
+    def _log_dropped(self, step_name: str, prev: List[Dict[str, Any]],
+                     kept: List[Dict[str, Any]]) -> None:
+        if not self._lock or len(kept) == len(prev):
+            return
+        kept_ids = {id(r) for r in kept}
+        dropped = [r for r in prev if id(r) not in kept_ids]
+        if not dropped:
+            return
+        with self._lock:
+            with open(self._dropped_log_path, 'a', encoding='utf-8') as f:
+                for r in dropped:
+                    f.write(json.dumps({'step': step_name, 'row': r},
+                                       ensure_ascii=False, default=str) + '\n')
 
     def __call__(self, rows: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
         rows = self.map_col_to_row(rows)
         for step in self._pipelines:
             if not rows:
                 break
+            before = len(rows)
+            prev = rows
             rows = step(rows)
+            after = len(rows)
+            step_name = getattr(step, '__name__', str(step))
+            logger.debug(f'[QualityPreprocessor] {step_name}: {before} -> {after} (dropped {before - after})')
+            self._log_dropped(step_name, prev, rows)
         return self.map_row_to_col(rows)
 

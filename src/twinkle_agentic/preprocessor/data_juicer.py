@@ -54,6 +54,13 @@ def _get_text(row: Dict[str, Any], role: str = 'assistant') -> str:
     return ' '.join(parts)
 
 
+def _get_response_text(row: Dict[str, Any], role: str = 'assistant') -> str:
+    """Like _get_text but strips <think>...</think> blocks, returning only the response."""
+    import re
+    text = _get_text(row, role)
+    return re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL).strip()
+
+
 def _dj_dataset(texts: List[str]):
     """Wrap a list of strings into a Data-Juicer NestedDataset."""
     from data_juicer.core.data import NestedDataset
@@ -65,19 +72,12 @@ def _dj_dataset(texts: List[str]):
 
 
 def _keep_mask(op, texts: List[str]) -> List[bool]:
-    """Run a DJ Filter op; returns keep-mask via index tracking."""
-    from data_juicer.core.data import NestedDataset
+    """Run a DJ Filter op directly; no dataset/multiprocessing overhead."""
     from data_juicer.utils.constant import Fields
-    import datasets
 
-    n = len(texts)
-    ds = datasets.Dataset.from_dict({'text': texts, '_orig_idx': list(range(n))})
-    ds = ds.map(lambda x: {Fields.stats: {}, Fields.meta: {}}, batched=False)
-    nd = NestedDataset(ds)
-    nd = op.compute_stats(nd)
-    filtered = op.process(nd)  # returns filtered NestedDataset, not booleans
-    kept = set(filtered['_orig_idx'])
-    return [i in kept for i in range(n)]
+    samples = {op.text_key: texts, Fields.stats: [{} for _ in texts], Fields.meta: [{} for _ in texts]}
+    samples = op.compute_stats_batched(samples)
+    return list(op.process_batched(samples))
 
 
 class DataJuicerPreprocessor(Preprocessor):
@@ -96,6 +96,13 @@ class DataJuicerPreprocessor(Preprocessor):
         key = (op_class, repr(tuple(sorted(kwargs.items()))))
         if key not in self._op_cache:
             self._op_cache[key] = op_class(**kwargs)
+        return self._op_cache[key]
+
+    def _get_tokenizer(self, hf_tokenizer: str):
+        key = ('_tokenizer', hf_tokenizer)
+        if key not in self._op_cache:
+            from modelscope import AutoTokenizer
+            self._op_cache[key] = AutoTokenizer.from_pretrained(hf_tokenizer, trust_remote_code=True)
         return self._op_cache[key]
 
     def __call__(self, rows: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
@@ -148,7 +155,7 @@ class DataJuicerPreprocessor(Preprocessor):
         """Filter rows whose special-character ratio exceeds max_ratio."""
         from data_juicer.ops.filter import SpecialCharactersFilter
         op = self._get_op(SpecialCharactersFilter, min_ratio=0.0, max_ratio=max_ratio)
-        texts = [_get_text(r, role) for r in rows]
+        texts = [_get_response_text(r, role) for r in rows]
         mask = _keep_mask(op, texts)
         return [r for r, keep in zip(rows, mask) if keep]
 
@@ -194,8 +201,8 @@ class DataJuicerPreprocessor(Preprocessor):
         role: str = 'assistant',
     ) -> List[Dict[str, Any]]:
         """Filter rows exceeding the flagged-word ratio threshold."""
-        from data_juicer.ops.filter import FlaggedWordsFilter
-        op = self._get_op(FlaggedWordsFilter, lang=lang, min_ratio=0.0, max_ratio=max_ratio)
+        from data_juicer.ops.filter import FlaggedWordFilter
+        op = self._get_op(FlaggedWordFilter, lang=lang, min_ratio=0.0, max_ratio=max_ratio)
         texts = [_get_text(r, role) for r in rows]
         mask = _keep_mask(op, texts)
         return [r for r, keep in zip(rows, mask) if keep]
@@ -298,11 +305,10 @@ class DataJuicerPreprocessor(Preprocessor):
 
         Catches responses that are too short (boilerplate) or too long (bloat).
         """
-        from data_juicer.ops.filter import TokenNumFilter
-        op = self._get_op(TokenNumFilter, hf_tokenizer=hf_tokenizer, min_num=min_num, max_num=max_num)
+        tokenizer = self._get_tokenizer(hf_tokenizer)
         texts = [_get_text(r, role) for r in rows]
-        mask = _keep_mask(op, texts)
-        return [r for r, keep in zip(rows, mask) if keep]
+        encoded = tokenizer(texts, add_special_tokens=False)
+        return [r for r, ids in zip(rows, encoded['input_ids']) if min_num <= len(ids) <= max_num]
 
     def text_action_filter(
         self,
@@ -337,14 +343,18 @@ class DataJuicerPreprocessor(Preprocessor):
         """
         from data_juicer.ops.mapper import FixUnicodeMapper
         op = self._get_op(FixUnicodeMapper, normalization=normalization)
-        for row in rows:
-            for msg in row.get('messages') or []:
+        indices = []
+        texts = []
+        for ri, row in enumerate(rows):
+            for mi, msg in enumerate(row.get('messages') or []):
                 if msg.get('role') == role:
-                    content = msg.get('content') or ''
-                    if isinstance(content, str):
-                        nd = _dj_dataset([content])
-                        nd = op.run(nd)
-                        msg['content'] = nd['text'][0]
+                    texts.append(msg.get('content') or '')
+                    indices.append((ri, mi))
+        if not texts:
+            return rows
+        result = op.process_batched({op.text_key: list(texts)})
+        for (ri, mi), new_text in zip(indices, result[op.text_key]):
+            rows[ri]['messages'][mi]['content'] = new_text
         return rows
 
     def remove_repeat_sentences(
@@ -364,14 +374,18 @@ class DataJuicerPreprocessor(Preprocessor):
             lowercase=lowercase,
             ignore_special_character=ignore_special_character,
         )
-        for row in rows:
-            for msg in row.get('messages') or []:
+        indices = []
+        texts = []
+        for ri, row in enumerate(rows):
+            for mi, msg in enumerate(row.get('messages') or []):
                 if msg.get('role') == role:
-                    content = msg.get('content') or ''
-                    if isinstance(content, str):
-                        nd = _dj_dataset([content])
-                        nd = op.run(nd)
-                        msg['content'] = nd['text'][0]
+                    texts.append(msg.get('content') or '')
+                    indices.append((ri, mi))
+        if not texts:
+            return rows
+        result = op.process_batched({op.text_key: list(texts)})
+        for (ri, mi), new_text in zip(indices, result[op.text_key]):
+            rows[ri]['messages'][mi]['content'] = new_text
         return rows
 
     # ── LLM-based filters (API mode → route to our sampler) ──────────────────────

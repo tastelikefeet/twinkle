@@ -18,6 +18,11 @@ _REPETITION_THRESHOLD = 0.45
 _NGRAM_SIZE = 8        # word n-gram size for repetition check
 _NGRAM_MIN_WORDS = 30  # skip check for very short texts
 
+# Relaxed thresholds for <think> sections where hesitation is expected
+_THINK_HESITATION_DENSITY_THRESHOLD = 15.0
+_THINK_CASCADE_THRESHOLD = 12
+_THINK_REPETITION_THRESHOLD = 0.65
+
 # ── Hesitation-marker regexes ─────────────────────────────────────────────────
 #
 # Matches thinking-aloud / self-interruption signals.
@@ -108,27 +113,56 @@ def _hesitation_density(text: str) -> float:
 
 def _has_correction_cascade(text: str) -> bool:
     """True if CASCADE_THRESHOLD signals appear within any CASCADE_WINDOW-char span."""
+    return _has_correction_cascade_with_threshold(text, _CASCADE_THRESHOLD)
+
+
+def _has_correction_cascade_with_threshold(text: str, threshold: int) -> bool:
     matches = [m.start() for m in _CASCADE_RE.finditer(text)]
-    if len(matches) < _CASCADE_THRESHOLD:
+    if len(matches) < threshold:
         return False
-    for i in range(len(matches) - _CASCADE_THRESHOLD + 1):
-        if matches[i + _CASCADE_THRESHOLD - 1] - matches[i] <= _CASCADE_WINDOW:
+    for i in range(len(matches) - threshold + 1):
+        if matches[i + threshold - 1] - matches[i] <= _CASCADE_WINDOW:
             return True
     return False
 
 
 def _high_repetition(text: str) -> bool:
     """True if repeated word n-grams dominate the text (content looping)."""
+    return _high_repetition_with_threshold(text, _REPETITION_THRESHOLD)
+
+
+def _high_repetition_with_threshold(text: str, threshold: float) -> bool:
     words = text.split()
     if len(words) < _NGRAM_MIN_WORDS:
         return False
     ngrams = [' '.join(words[i:i + _NGRAM_SIZE]) for i in range(len(words) - _NGRAM_SIZE + 1)]
     unique_ratio = len(set(ngrams)) / len(ngrams)
-    return (1.0 - unique_ratio) > _REPETITION_THRESHOLD
+    return (1.0 - unique_ratio) > threshold
 
 
 def _is_stuck(text: str) -> bool:
-    """Return True if the text exhibits signs of a hesitation / dead-loop."""
+    """Return True if the text exhibits signs of a hesitation / dead-loop.
+
+    Uses relaxed thresholds for <think> sections.
+    """
+    import re as _re
+    think_match = _re.search(r'<think>(.*?)</think>', text, _re.DOTALL)
+    if think_match:
+        think_part = think_match.group(1)
+        response_part = text[think_match.end():]
+        # Check think part with relaxed thresholds
+        think_stuck = (
+            _hesitation_density(think_part) > _THINK_HESITATION_DENSITY_THRESHOLD
+            or _has_correction_cascade_with_threshold(think_part, _THINK_CASCADE_THRESHOLD)
+            or _high_repetition_with_threshold(think_part, _THINK_REPETITION_THRESHOLD)
+        )
+        # Check response part with normal thresholds
+        response_stuck = response_part.strip() and (
+            _hesitation_density(response_part) > _HESITATION_DENSITY_THRESHOLD
+            or _has_correction_cascade(response_part)
+            or _high_repetition(response_part)
+        )
+        return think_stuck or response_stuck
     return (
         _hesitation_density(text) > _HESITATION_DENSITY_THRESHOLD
         or _has_correction_cascade(text)

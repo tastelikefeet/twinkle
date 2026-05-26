@@ -61,6 +61,7 @@ class Dataset(TorchDataset):
 
     def __init__(self, dataset_meta: DatasetMeta = None, **kwargs):
         self.template = None
+        self._mixed = False
         if dataset_meta is None:
             self.datasets = {}
             self.dataset = None
@@ -218,16 +219,20 @@ class Dataset(TorchDataset):
             # which will cause unexpected behaviors.
             kwargs['load_from_cache_file'] = False
         preprocess_func = construct_class(preprocess_func, Preprocessor, twinkle.preprocessor, **init_args)
-        if dataset_meta is None:
-            assert len(self.datasets) == 1
-            key = next(iter(self.datasets.keys()))
+        if self._mixed:
+            kwargs['batched'] = True
+            self.dataset = self.dataset.map(preprocess_func, **kwargs)
         else:
-            key = dataset_meta.get_id()
-        kwargs['batched'] = True
-        with processing_lock(key):
-            self.datasets[key] = self.datasets[key].map(preprocess_func, **kwargs)
-        if len(self.datasets) == 1:
-            self.dataset = self.datasets[key]
+            if dataset_meta is None:
+                assert len(self.datasets) == 1
+                key = next(iter(self.datasets.keys()))
+            else:
+                key = dataset_meta.get_id()
+            kwargs['batched'] = True
+            with processing_lock(key):
+                self.datasets[key] = self.datasets[key].map(preprocess_func, **kwargs)
+            if len(self.datasets) == 1:
+                self.dataset = self.datasets[key]
 
     @remote_function()
     def filter(self,
@@ -245,16 +250,20 @@ class Dataset(TorchDataset):
         """
         init_args = init_args or {}
         filter_func = construct_class(filter_func, DataFilter, twinkle.preprocessor, **init_args)
-        if dataset_meta is None:
-            assert len(self.datasets) == 1
-            key = next(iter(self.datasets.keys()))
+        if self._mixed:
+            kwargs['batched'] = False
+            self.dataset = self.dataset.filter(filter_func, **kwargs)
         else:
-            key = dataset_meta.get_id()
-        kwargs['batched'] = False
-        with processing_lock(key):
-            self.datasets[key] = self.datasets[key].filter(filter_func, **kwargs)
-        if len(self.datasets) == 1:
-            self.dataset = self.datasets[key]
+            if dataset_meta is None:
+                assert len(self.datasets) == 1
+                key = next(iter(self.datasets.keys()))
+            else:
+                key = dataset_meta.get_id()
+            kwargs['batched'] = False
+            with processing_lock(key):
+                self.datasets[key] = self.datasets[key].filter(filter_func, **kwargs)
+            if len(self.datasets) == 1:
+                self.dataset = self.datasets[key]
 
     @remote_function()
     def add_dataset(self, dataset_meta: DatasetMeta, **kwargs):
@@ -298,6 +307,7 @@ class Dataset(TorchDataset):
                 self.dataset = interleave_datasets(aligned)
             else:
                 self.dataset = concatenate_datasets(aligned)
+            self._mixed = True
 
     @remote_function()
     def save_as(self, output_path: str, format: Optional[str] = None,
