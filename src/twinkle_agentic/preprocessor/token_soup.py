@@ -11,7 +11,8 @@ from twinkle.preprocessor import Preprocessor
 _REPLACEMENT_CHAR_RATIO = 0.02   # \ufffd (UTF-8 decode failure)
 _CONTROL_CHAR_RATIO     = 0.01   # non-printable control chars
 _PRIVATE_USE_RATIO      = 0.03   # Unicode private-use-area glyphs
-_SPECIAL_TOKEN_COUNT    = 4      # repeated chat special tokens in one reply
+# Raised from 4 → 20: NLP tutorials legitimately quote <|endoftext|>/[CLS] up to ~15 times.
+_SPECIAL_TOKEN_COUNT    = 20     # repeated chat special tokens in one reply
 _SCRIPT_CHAOS_THRESHOLD = 0.55   # fraction of adjacent non-space char pairs that switch script
 _SCRIPT_CHAOS_MIN_CHARS = 40     # skip chaos check for very short text
 
@@ -26,14 +27,24 @@ _CONTROL_CHAR_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
 # Unicode private use area (E000–F8FF, F0000–FFFFF, 100000–10FFFF)
 _PRIVATE_USE_RE = re.compile(r'[\ue000-\uf8ff\U000f0000-\U000fffff\U00100000-\U0010ffff]')
 
-# Chat-template special tokens repeated ≥ _SPECIAL_TOKEN_COUNT times
+# Chat-template special tokens repeated ≥ _SPECIAL_TOKEN_COUNT times.
+# Bracket-style BERT tokens (PAD/UNK/SEP/CLS/MASK) are case-sensitive via (?-i:...) —
+# lowercase "[mask]"/"[pad]" collide with ordinary bitmask-DP variable names like dp[mask].
 _SPECIAL_TOKEN_RE = re.compile(
-    r'(<\|[^|>\n]{1,40}\|>|</s>|\[/?(?:PAD|UNK|SEP|CLS|MASK)\]|</?unk>|</?pad>|<0x[0-9A-Fa-f]{2}>)',
+    r'(<\|[^|>\n]{1,40}\|>|</s>|(?-i:\[/?(?:PAD|UNK|SEP|CLS|MASK)\])|</?unk>|</?pad>|<0x[0-9A-Fa-f]{2}>)',
     re.IGNORECASE,
 )
 
-# Same printable character repeated 20+ times consecutively (excluding space/newline)
-_SINGLE_CHAR_REPEAT_RE = re.compile(r'([^\s\n])\1{19,}')
+# Same printable character repeated 20+ times consecutively.
+# Excludes whitespace and chars commonly used as legitimate decorations / numerical output:
+#   - ASCII rule/separator chars: - = _ . * + ~ # | > <
+#   - Digits 0-9 (float precision padding, test fixtures like 999999..., 111111...)
+#   - Box drawing (U+2500-257F), Block elements (U+2580-259F),
+#     Geometric shapes (U+25A0-25FF), Braille patterns (U+2800-28FF)
+#   - Em/en dash (U+2013-2015), fullwidth dash/hyphen (U+30FC, U+FF0D)
+_SINGLE_CHAR_REPEAT_RE = re.compile(
+    r'([^\s\n\-=_.\*\+~#|><0-9\u2013-\u2015\u2500-\u25ff\u2800-\u28ff\u30fc\uff0d])\1{19,}'
+)
 
 
 # ── Unicode script classifier ─────────────────────────────────────────────────

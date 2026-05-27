@@ -7,13 +7,13 @@ from twinkle.preprocessor import Preprocessor
 # ── Thresholds ────────────────────────────────────────────────────────────────
 
 # User message: below this many chars is unconditionally trivial
-_MIN_USER_CHARS = 20
+_MIN_USER_CHARS = 10
 
 # For CJK text, one char ≈ one word — scale threshold down accordingly
-_MIN_USER_CHARS_CJK = 10
+_MIN_USER_CHARS_CJK = 6
 
 # 2-turn filter: assistant reply below this length with no thinking → filtered
-_MIN_ASSISTANT_CHARS_2TURN = 150
+_MIN_ASSISTANT_CHARS_2TURN = 80
 
 # ── Language detection ────────────────────────────────────────────────────────
 
@@ -42,15 +42,15 @@ _EN_GREETING_RE = re.compile(
 
 _EN_SIMPLE_RE = re.compile(
     r'^('
-    # bare wh-question: interrogative word + ≤ 12 words + optional ?
-    r'(what|who|where|when|why|how)\s+(is|are|was|were|does|do|did|has|have|can|could|would|should)\b.{0,80}|'
-    r'(what|who|where|when|why|how)\'s\b.{0,80}|'
+    # bare wh-question: interrogative word + short tail
+    r'(what|who|where|when|why|how)\s+(is|are|was|were|does|do|did|has|have|can|could|would|should)\b.{0,30}|'
+    r'(what|who|where|when|why|how)\'s\b.{0,30}|'
     # polar question opener
-    r'(is|are|was|were|do|does|did|can|could|would|should|may|might)\s+(it|this|that|you|there|they|he|she)\b.{0,80}|'
+    r'(is|are|was|were|do|does|did|can|could|would|should|may|might)\s+(it|this|that|you|there|they|he|she)\b.{0,30}|'
     # imperative with no body
-    r'(tell\s+me(\s+(about|more))?|explain(\s+to\s+me)?|define|describe|list|summarize|give\s+me)\b.{0,60}|'
+    r'(tell\s+me(\s+(about|more))?|explain(\s+to\s+me)?|define|describe|list|summarize|give\s+me)\b.{0,20}|'
     # help-me opener (no task detail)
-    r'(please\s+)?(help\s+me|assist\s+me)\b.{0,40}'
+    r'(please\s+)?(help\s+me|assist\s+me)\b.{0,20}'
     r')\s*[?!.]?$',
     re.IGNORECASE | re.DOTALL,
 )
@@ -66,10 +66,10 @@ _ZH_GREETING_RE = re.compile(
 _ZH_SIMPLE_RE = re.compile(
     r'^('
     # "X是什么" / "什么是X" / "X怎么样"
-    r'.{0,20}(是什么|是啥|啥意思|是何|什么意思|怎么样|如何|为什么|为啥)[？?。]?|'
-    r'(什么|啥|哪|谁|何|怎么|怎样|为什么|为啥|几|多少|何时|何地).{0,12}[？?。]?|'
+    r'.{0,7}(是什么|是啥|啥意思|是何|什么意思|怎么样|如何|为什么|为啥)[？?。]?|'
+    r'(什么|啥|哪|谁|何|怎么|怎样|为什么|为啥|几|多少|何时|何地).{0,7}[？?。]?|'
     # single-verb imperative with no substantive object
-    r'(介绍|解释|说明|告诉我|帮我说说|请问|能说说|讲讲).{0,20}'
+    r'(介绍|解释|说明|告诉我|帮我说说|请问|能说说|讲讲).{0,5}'
     r')\s*[？?！!。]?$',
     re.UNICODE,
 )
@@ -84,8 +84,8 @@ _JA_GREETING_RE = re.compile(
 
 _JA_SIMPLE_RE = re.compile(
     r'^('
-    r'.{0,20}(とは何ですか|って何|とはなんですか|について教えて(ください)?|はどうですか|ですか)[？?]?|'
-    r'(何|なに|どこ|いつ|誰|だれ|なぜ|どうして|どう|どれ|どの).{0,25}[？?。]?'
+    r'.{0,7}(とは何ですか|って何|とはなんですか|について教えて(ください)?|はどうですか|ですか)[？?]?|'
+    r'(何|なに|どこ|いつ|誰|だれ|なぜ|どうして|どう|どれ|どの).{0,7}[？?。]?'
     r')\s*[？?！!。]?$',
     re.UNICODE,
 )
@@ -100,9 +100,9 @@ _KO_GREETING_RE = re.compile(
 
 _KO_SIMPLE_RE = re.compile(
     r'^('
-    r'.{0,20}(이?란\s*무엇|는\s*무엇|은\s*무엇|이?\s*뭐|가\s*뭐)[인가요까요]?[？?]?|'
-    r'(무엇|뭐|어디|언제|누가|왜|어떻게).{0,25}[？?]?|'
-    r'.{0,20}(에\s*대해|에\s*관해)\s*(알려주|설명해)[세요주십시오]?'
+    r'.{0,7}(이?란\s*무엇|는\s*무엇|은\s*무엇|이?\s*뭐|가\s*뭐)[인가요까요]?[？?]?|'
+    r'(무엇|뭐|어디|언제|누가|왜|어떻게).{0,7}[？?]?|'
+    r'.{0,7}(에\s*대해|에\s*관해)\s*(알려주|설명해)[세요주십시오]?'
     r')\s*[？?！!]?$',
     re.UNICODE,
 )

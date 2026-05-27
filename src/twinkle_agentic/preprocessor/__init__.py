@@ -60,8 +60,11 @@ class QualityPreprocessor(Preprocessor):
         hf_tokenizer: str = 'Qwen/Qwen3.5-4B',
         # ── Phase 5: vocabulary quality ───────────────────────────────────────
         content_lang: str = 'all',          # language code for vocab filters ('all' covers multilingual data)
-        stopwords_min_ratio: float = 0.1,
-        flagged_words_max_ratio: float = 0.045,
+        stopwords_min_ratio: float = 0.0,
+        # 'all' merges low-resource lists where 2-letter math vars (BF/AF/...) collide as profanity
+        flagged_words_lang: str = 'en',
+        # raised from 0.045 to tolerate proper nouns like "Dick"/"Cock"/"Wang" in narratives
+        flagged_words_max_ratio: float = 0.10,
         # ── Phase 6: language identification ──────────────────────────────────
         language: str = '',                  # '' = skip; 'en'/'zh'/... = enforce
         language_min_score: float = 0.7,
@@ -144,7 +147,7 @@ class QualityPreprocessor(Preprocessor):
                                 lang=content_lang,
                                 min_ratio=stopwords_min_ratio))
         pipeline.append(partial(dj.flagged_words_filter,
-                                lang=content_lang,
+                                lang=flagged_words_lang,
                                 max_ratio=flagged_words_max_ratio))
 
         # Phase 6: language identification
