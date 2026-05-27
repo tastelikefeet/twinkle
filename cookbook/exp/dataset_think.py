@@ -1,5 +1,4 @@
 import hashlib
-import httpx
 import re
 from typing import Any, Dict, List, Optional
 
@@ -171,6 +170,10 @@ class ChineseR1DistillProcessor(Preprocessor):
             response = (row.get('content') or '').strip()
             if not query or not response:
                 continue
+            if cot:
+                response = _THINK_RE.sub('', response).strip()
+            if not response:
+                continue
             out.append({
                 'id': _hash_id('cn_r1_distill', f'{query}\n{response}'),
                 'source': 'Chinese-DeepSeek-R1-Distill-data-110k',
@@ -199,6 +202,10 @@ class OpusReasoningProcessor(Preprocessor):
             cot = (row.get('thinking') or '').strip()
             response = (row.get('solution') or '').strip()
             if not query or not response:
+                continue
+            if cot:
+                response = _THINK_RE.sub('', response).strip()
+            if not response:
                 continue
             out.append({
                 'id': _hash_id('opus_reasoning', f'{query}\n{response}'),
