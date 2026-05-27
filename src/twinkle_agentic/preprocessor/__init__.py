@@ -59,7 +59,7 @@ class QualityPreprocessor(Preprocessor):
         token_num_max: int = 8192,
         hf_tokenizer: str = 'Qwen/Qwen3.5-4B',
         # ── Phase 5: vocabulary quality ───────────────────────────────────────
-        content_lang: str = 'en',           # language code for vocab filters
+        content_lang: str = 'all',          # language code for vocab filters ('all' covers multilingual data)
         stopwords_min_ratio: float = 0.1,
         flagged_words_max_ratio: float = 0.045,
         # ── Phase 6: language identification ──────────────────────────────────

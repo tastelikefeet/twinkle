@@ -20,7 +20,7 @@ _NGRAM_MIN_WORDS = 30  # skip check for very short texts
 
 # Relaxed thresholds for <think> sections where hesitation is expected
 _THINK_HESITATION_DENSITY_THRESHOLD = 15.0
-_THINK_CASCADE_THRESHOLD = 12
+_THINK_CASCADE_THRESHOLD = 20
 _THINK_REPETITION_THRESHOLD = 0.65
 
 # ── Hesitation-marker regexes ─────────────────────────────────────────────────

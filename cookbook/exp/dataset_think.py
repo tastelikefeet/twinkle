@@ -361,7 +361,8 @@ class ToMessagesProcessor(Preprocessor):
                 'source': row.get('source', ''),
                 'messages': [
                     {'role': 'user', 'content': query},
-                    {'role': 'assistant', 'content': assistant_content},
+                    {'role': 'assistant', 'content': assistant_content,
+                     'reasoning_content': cot},
                 ],
             })
         return self.map_row_to_col(out, keys=['id', 'source', 'messages'])

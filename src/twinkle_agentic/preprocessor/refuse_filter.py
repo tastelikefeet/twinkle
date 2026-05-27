@@ -139,6 +139,9 @@ class RefuseFilter(Preprocessor):
                 out.append(row)
                 continue
             first_reply = (asst_msgs[0].get('content') or '').strip()
-            if not _is_refusal(first_reply):
+            # Strip <think> blocks: refusal phrasing inside CoT is reasoning, not a refusal.
+            response = re.sub(r'<think>.*?</think>\s*', '', first_reply, flags=re.DOTALL).strip()
+            # Think-only data has no response to judge — keep it.
+            if not response or not _is_refusal(response):
                 out.append(row)
         return out
