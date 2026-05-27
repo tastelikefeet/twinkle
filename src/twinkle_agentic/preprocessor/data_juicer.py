@@ -91,6 +91,13 @@ class DataJuicerPreprocessor(Preprocessor):
     def __init__(self) -> None:
         self._op_cache: Dict = {}
 
+    # Memoization cache only; exclude from pickle so HF datasets fingerprint stays stable.
+    def __getstate__(self):
+        return {}
+
+    def __setstate__(self, state):
+        self._op_cache = {}
+
     def _get_op(self, op_class, **kwargs):
         """Get or create a cached DJ op; same (class, params) → same instance."""
         key = (op_class, repr(tuple(sorted(kwargs.items()))))

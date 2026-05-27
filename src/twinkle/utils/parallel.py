@@ -125,6 +125,16 @@ class PosixFileLock:
     def __exit__(self, *exc):
         self.release()
 
+    def __getstate__(self):
+        return {'_path': self._path}
+
+    def __setstate__(self, state):
+        import fcntl
+        self._path = state['_path']
+        self._fcntl = fcntl
+        self._fd = open(self._path, 'w')
+        self._pid = os.getpid()
+
 
 @contextmanager
 def processing_lock(lock_file: str):
