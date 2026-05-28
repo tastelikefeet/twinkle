@@ -27,6 +27,7 @@ from twinkle.dataset.odps_dataset import OdpsIterableDataset
 from twinkle.model import TransformersModel
 from twinkle.sampler import vLLMSampler
 from twinkle_agentic.preprocessor import QualityPreprocessor, SamplerBackend
+from ncs_odps_init import get_odps
 
 logger = get_logger()
 
@@ -74,6 +75,7 @@ def build_dataset(backend: SamplerBackend) -> OdpsIterableDataset:
     dataset = OdpsIterableDataset(
         table_name=ODPS_TABLE,
         partition=ODPS_PARTITION or None,
+        odps=get_odps(),
     )
 
     qp = QualityPreprocessor(
