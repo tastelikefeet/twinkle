@@ -384,7 +384,7 @@ def iter_dataset_py(total: Optional[int], load_from_cache_file: bool) -> Iterato
     # Lazy import: dataset.py triggers HF / ModelScope downloads at module load.
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from dataset import get_dataset
-    hf = get_dataset(total=total, load_from_cache_file=False)
+    hf = get_dataset(total=total, load_from_cache_file=load_from_cache_file)
     sys.stderr.write(f'Loaded dataset.py::get_dataset: {len(hf)} rows\n')
     for row in hf:
         yield row
