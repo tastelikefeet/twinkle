@@ -10,9 +10,14 @@ from .consistency_filter import ConsistencyFilter
 from .data_juicer import DataJuicerPreprocessor
 from .dead_loop_filter import DeadLoopFilter
 from .hard_filter import HardFilter
+from .ifd_filter import IFDFilter
+from .intent_classifier import IntentClassifier
+from .llm_backend import LLMBackend, OpenAIBackend, SamplerBackend  # noqa: F401
 from .majority_vote import MajorityVoteFilter
+from .message_sanity import MessageSanityFilter
 from .perplexity import PerplexityFilter
 from .refuse_filter import RefuseFilter
+from .response_refiner import ResponseRefiner
 from .token_soup import TokenSoupFilter
 
 logger = get_logger(only_local_master=False)
@@ -26,6 +31,7 @@ class QualityPreprocessor(Preprocessor):
     empty-string to skip that stage.
 
     Phase 1  Text normalisation    fix_unicode, remove_repeat_sentences
+    Phase 1.5 Message sanity        role order, trim-to-assistant, sensitive words
     Phase 2  Structural rules      hard_filter, refuse_filter, dead_loop_filter
     Phase 3  Character quality     token_soup, word/char repeat, special chars, alnum
     Phase 4  Token length          token_num_filter (HF tokenizer)
@@ -36,13 +42,21 @@ class QualityPreprocessor(Preprocessor):
     Phase 9  Neural PPL            PerplexityFilter (vLLM sampler, off by default)
     Phase 9.5 2D Consistency       ConsistencyFilter (rollout + embed, off by default)
     Phase 10 LLM API filters       quality/difficulty/condition (off by default)
+    Phase 11 Intent classification  annotate intent label (off by default)
     """
 
     def __init__(
         self,
+        # ── Shared LLM backend (alternative to per-phase endpoints) ───────────
+        backend: Optional[LLMBackend] = None,
+        embed_backend: Optional[LLMBackend] = None,
         # ── Phase 1: text normalisation ───────────────────────────────────────
         fix_unicode: bool = True,
         remove_repeat_sentences: bool = True,
+        # ── Phase 1.5: message sanity ──────────────────────────────────────────
+        message_sanity_filter: bool = True,
+        sensitive_words_file: str = '',  # '' = use built-in defaults; path to .json/.txt
+        extra_sensitive_words: Optional[List[str]] = None,
         # ── Phase 2: structural rule filters ──────────────────────────────────
         hard_filter: bool = True,
         refuse_filter: bool = True,
@@ -108,6 +122,24 @@ class QualityPreprocessor(Preprocessor):
         llm_difficulty_min_score: float = 0.0,  # 0.0 = skip
         llm_condition: str = '',             # '' = skip
         llm_task_desc: str = '',             # '' = skip
+        # ── Phase 11: intent classification (annotation, not filter) ────────────
+        intent_api_endpoint: str = '',       # '' = skip
+        intent_model: str = 'default',
+        intent_api_key: str = '',
+        intent_max_workers: int = 8,
+        # ── Phase 12: IFD hard-example filter (requires Phase 11) ───────────
+        ifd_api_endpoint: str = '',          # '' = skip
+        ifd_model: str = 'default',
+        ifd_tokenizer: str = '',
+        ifd_threshold: float = 0.8,
+        ifd_max_workers: int = 8,
+        # ── Phase 13: response refinement (requires key_rounds) ─────────────
+        refine_api_endpoint: str = '',       # '' = skip
+        refine_model: str = 'default',
+        refine_api_key: str = '',
+        refine_temperature: float = 0.6,
+        refine_max_tokens: int = 4096,
+        refine_max_workers: int = 8,
         # ── Diagnostics ───────────────────────────────────────────────────────
         dropped_log_path: str = '',          # '' = skip; otherwise JSONL append
     ) -> None:
@@ -121,6 +153,13 @@ class QualityPreprocessor(Preprocessor):
             pipeline.append(dj.fix_unicode)
         if remove_repeat_sentences:
             pipeline.append(dj.remove_repeat_sentences)
+
+        # Phase 1.5: message sanity
+        if message_sanity_filter:
+            pipeline.append(MessageSanityFilter(
+                sensitive_words_file=sensitive_words_file or None,
+                extra_sensitive_words=extra_sensitive_words,
+            ).message_sanity_filter)
 
         # Phase 2: structural rules
         if hard_filter:
@@ -170,8 +209,9 @@ class QualityPreprocessor(Preprocessor):
             pipeline.append(partial(dj.minhash_dedup, jaccard_threshold=jaccard_threshold))
 
         # Phase 9: neural PPL
-        if ppl_api_endpoint:
+        if backend or ppl_api_endpoint:
             pf = PerplexityFilter(
+                backend=backend,
                 api_endpoint=ppl_api_endpoint,
                 model=ppl_model,
                 tokenizer_name_or_path=ppl_tokenizer,
@@ -182,8 +222,10 @@ class QualityPreprocessor(Preprocessor):
             pipeline.append(pf.ppl_filter)
 
         # Phase 9.5: 2D consistency filter
-        if consistency_sampler_endpoint and consistency_embed_endpoint:
+        if backend or (consistency_sampler_endpoint and consistency_embed_endpoint):
             cf = ConsistencyFilter(
+                backend=backend,
+                embed_backend=embed_backend,
                 sampler_endpoint=consistency_sampler_endpoint,
                 embed_endpoint=consistency_embed_endpoint,
                 sampler_model=consistency_sampler_model,
@@ -230,6 +272,42 @@ class QualityPreprocessor(Preprocessor):
                                         api_endpoint=llm_api_endpoint,
                                         task_desc=llm_task_desc,
                                         model=llm_model))
+
+        # Phase 11: intent classification
+        if backend or intent_api_endpoint:
+            ic = IntentClassifier(
+                backend=backend,
+                api_endpoint=intent_api_endpoint,
+                model=intent_model,
+                api_key=intent_api_key,
+                max_workers=intent_max_workers,
+            )
+            pipeline.append(ic.classify_intent)
+
+        # Phase 12: IFD hard-example filter
+        if (backend or ifd_api_endpoint) and ifd_tokenizer:
+            ifd = IFDFilter(
+                backend=backend,
+                api_endpoint=ifd_api_endpoint,
+                model=ifd_model,
+                tokenizer_name_or_path=ifd_tokenizer,
+                ifd_threshold=ifd_threshold,
+                max_workers=ifd_max_workers,
+            )
+            pipeline.append(ifd.ifd_filter)
+
+        # Phase 13: response refinement
+        if backend or refine_api_endpoint:
+            refiner = ResponseRefiner(
+                backend=backend,
+                api_endpoint=refine_api_endpoint,
+                model=refine_model,
+                api_key=refine_api_key,
+                temperature=refine_temperature,
+                max_tokens=refine_max_tokens,
+                max_workers=refine_max_workers,
+            )
+            pipeline.append(refiner.refine)
 
         self._pipelines = pipeline
         self._dropped_log_path = dropped_log_path

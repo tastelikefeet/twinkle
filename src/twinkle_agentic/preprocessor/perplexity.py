@@ -3,9 +3,9 @@ import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
-import httpx
-
 from twinkle.preprocessor import Preprocessor
+
+from .llm_backend import LLMBackend, OpenAIBackend
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
@@ -75,19 +75,10 @@ def _ppl_from_logprobs(
 
 
 def _score_one(
-    client: httpx.Client,
-    endpoint: str,
-    model: str,
+    backend: LLMBackend,
     messages: List[Dict[str, Any]],
 ) -> List[Optional[float]]:
-    resp = client.post(endpoint, json={
-        'model': model,
-        'messages': messages,
-        'max_tokens': 0,
-        'prompt_logprobs': 1,
-    })
-    resp.raise_for_status()
-    return resp.json()['prompt_logprobs']
+    return backend.prompt_logprobs(messages)
 
 
 # ── Preprocessor ─────────────────────────────────────────────────────────────
@@ -107,18 +98,21 @@ class PerplexityFilter(Preprocessor):
 
     def __init__(
         self,
-        api_endpoint: str,
-        model: str,
-        tokenizer_name_or_path: str,
+        backend: LLMBackend = None,
+        tokenizer_name_or_path: str = '',
         ppl_min: float = _DEFAULT_PPL_MIN,
         ppl_max: float = _DEFAULT_PPL_MAX,
         max_workers: int = 8,
+        # Legacy params
+        api_endpoint: str = '',
+        model: str = 'default',
     ):
         from transformers import AutoTokenizer
 
-        self._client      = httpx.Client(timeout=120.0)
-        self._endpoint    = f'{api_endpoint.rstrip("/")}/v1/chat/completions'
-        self._model       = model
+        if backend is not None:
+            self._backend = backend
+        else:
+            self._backend = OpenAIBackend(endpoint=api_endpoint, model=model)
         self._tokenizer   = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
         self.ppl_min      = ppl_min
         self.ppl_max      = ppl_max
@@ -146,7 +140,7 @@ class PerplexityFilter(Preprocessor):
         n_workers = min(self._max_workers, len(scoreable))
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
             future_to_meta = {
-                pool.submit(_score_one, self._client, self._endpoint, self._model, messages): (row_idx, n_prompt)
+                pool.submit(_score_one, self._backend, messages): (row_idx, n_prompt)
                 for row_idx, messages, n_prompt in scoreable
             }
             for future in as_completed(future_to_meta):

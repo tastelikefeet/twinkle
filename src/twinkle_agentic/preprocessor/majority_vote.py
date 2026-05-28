@@ -2,9 +2,9 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
 
-import httpx
-
 from twinkle.preprocessor import Preprocessor
+
+from .llm_backend import LLMBackend, OpenAIBackend
 
 _DEFAULT_SYSTEM_PROMPT = (
     'You are a strict trajectory quality judge. '
@@ -17,21 +17,21 @@ _DEFAULT_TIMEOUT = 120.0
 
 
 class JudgeSource:
-    """One OpenAI-compatible judge endpoint."""
+    """One LLM judge backend."""
 
     def __init__(
         self,
-        api_endpoint: str,
+        backend: LLMBackend = None,
+        api_endpoint: str = '',
         model: str = 'default',
         api_key: str = '',
         timeout: float = _DEFAULT_TIMEOUT,
     ):
-        self.endpoint = f'{api_endpoint.rstrip("/")}/v1/chat/completions'
-        self.model = model
-        headers = {'Content-Type': 'application/json'}
-        if api_key:
-            headers['Authorization'] = f'Bearer {api_key}'
-        self.client = httpx.Client(timeout=timeout, headers=headers)
+        if backend is not None:
+            self.backend = backend
+        else:
+            self.backend = OpenAIBackend(
+                endpoint=api_endpoint, model=model, api_key=api_key, timeout=timeout)
 
 
 def _build_judge_messages(
@@ -60,25 +60,15 @@ def _vote_one(
     temperature: float,
 ) -> Optional[bool]:
     """Send one judge request. Returns True=PASS, False=FAIL, None=error."""
-    try:
-        resp = source.client.post(source.endpoint, json={
-            'model': source.model,
-            'messages': judge_messages,
-            'temperature': temperature,
-            'max_tokens': 16,
-        })
-        resp.raise_for_status()
-        choices = resp.json().get('choices', [])
-        if not choices:
-            return None
-        text = (choices[0].get('message') or {}).get('content', '').strip().upper()
-        if 'PASS' in text:
-            return True
-        if 'FAIL' in text:
-            return False
+    choices = source.backend.chat(judge_messages, temperature=temperature, max_tokens=16)
+    if not choices:
         return None
-    except Exception:
-        return None
+    text = choices[0].get('content', '').strip().upper()
+    if 'PASS' in text:
+        return True
+    if 'FAIL' in text:
+        return False
+    return None
 
 
 class MajorityVoteFilter(Preprocessor):

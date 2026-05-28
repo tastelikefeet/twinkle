@@ -2,10 +2,11 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
 
-import httpx
 import numpy as np
 
 from twinkle.preprocessor import Preprocessor
+
+from .llm_backend import LLMBackend, OpenAIBackend
 
 _DEFAULT_N_ROLLOUTS = 8
 _DEFAULT_C_THRESH = 0.7
@@ -48,47 +49,25 @@ def _pairwise_cosine_mean(embeddings: np.ndarray) -> float:
 
 
 def _generate_rollouts(
-    client: httpx.Client,
-    endpoint: str,
-    model: str,
+    backend: LLMBackend,
     prompt_messages: List[Dict[str, Any]],
     n: int,
     temperature: float,
 ) -> List[str]:
-    resp = client.post(endpoint, json={
-        'model': model,
-        'messages': prompt_messages,
-        'n': n,
-        'temperature': temperature,
-        'max_tokens': 4096,
-    })
-    resp.raise_for_status()
-    choices = resp.json().get('choices', [])
-    return [(c.get('message') or {}).get('content', '') for c in choices]
+    choices = backend.chat(prompt_messages, temperature=temperature, max_tokens=4096, n=n)
+    return [c.get('content', '') for c in choices]
 
 
 def _embed_texts(
-    client: httpx.Client,
-    endpoint: str,
-    model: str,
+    backend: LLMBackend,
     texts: List[str],
 ) -> np.ndarray:
-    resp = client.post(endpoint, json={
-        'model': model,
-        'input': texts,
-    })
-    resp.raise_for_status()
-    data = resp.json().get('data', [])
-    data_sorted = sorted(data, key=lambda x: x.get('index', 0))
-    return np.array([d['embedding'] for d in data_sorted], dtype=np.float32)
+    return backend.embeddings(texts)
 
 
 def _process_row(
-    client: httpx.Client,
-    sampler_endpoint: str,
-    embed_endpoint: str,
-    sampler_model: str,
-    embed_model: str,
+    backend: LLMBackend,
+    embed_backend: LLMBackend,
     messages: List[Dict[str, Any]],
     n_rollouts: int,
     temperature: float,
@@ -104,7 +83,7 @@ def _process_row(
 
     try:
         rollout_texts = _generate_rollouts(
-            client, sampler_endpoint, sampler_model,
+            backend,
             prompt_msgs, n_rollouts, temperature,
         )
     except Exception:
@@ -116,7 +95,7 @@ def _process_row(
 
     try:
         embeddings = _embed_texts(
-            client, embed_endpoint, embed_model, [traj_text] + rollout_texts)
+            embed_backend, [traj_text] + rollout_texts)
     except Exception:
         return None
 
@@ -161,10 +140,8 @@ class ConsistencyFilter(Preprocessor):
 
     def __init__(
         self,
-        sampler_endpoint: str,
-        embed_endpoint: str,
-        sampler_model: str = 'default',
-        embed_model: str = 'bge-m3',
+        backend: LLMBackend = None,
+        embed_backend: LLMBackend = None,
         n_rollouts: int = _DEFAULT_N_ROLLOUTS,
         c_thresh: float = _DEFAULT_C_THRESH,
         d_thresh: float = _DEFAULT_D_THRESH,
@@ -174,12 +151,22 @@ class ConsistencyFilter(Preprocessor):
         annotate: bool = False,
         replace: bool = False,
         min_density_ratio: float = _DEFAULT_MIN_DENSITY_RATIO,
+        # Legacy params
+        sampler_endpoint: str = '',
+        embed_endpoint: str = '',
+        sampler_model: str = 'default',
+        embed_model: str = 'bge-m3',
     ):
-        self._client = httpx.Client(timeout=300.0)
-        self._sampler_endpoint = f'{sampler_endpoint.rstrip("/")}/v1/chat/completions'
-        self._embed_endpoint = f'{embed_endpoint.rstrip("/")}/v1/embeddings'
-        self._sampler_model = sampler_model
-        self._embed_model = embed_model
+        if backend is not None:
+            self._backend = backend
+        else:
+            self._backend = OpenAIBackend(
+                endpoint=sampler_endpoint, model=sampler_model, timeout=300.0)
+        if embed_backend is not None:
+            self._embed_backend = embed_backend
+        else:
+            self._embed_backend = OpenAIBackend(
+                endpoint=embed_endpoint, model=embed_model, timeout=300.0)
         self._n_rollouts = n_rollouts
         self._c_thresh = c_thresh
         self._d_thresh = d_thresh
@@ -254,8 +241,7 @@ class ConsistencyFilter(Preprocessor):
             future_to_idx = {
                 pool.submit(
                     _process_row,
-                    self._client, self._sampler_endpoint, self._embed_endpoint,
-                    self._sampler_model, self._embed_model,
+                    self._backend, self._embed_backend,
                     row.get('messages') or [], self._n_rollouts, self._temperature,
                 ): i
                 for i, row in enumerate(rows)
