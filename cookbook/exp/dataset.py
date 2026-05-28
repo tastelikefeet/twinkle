@@ -370,7 +370,7 @@ class AngrygiraffeOpusReasoningProcessor(CotExplodeProcessor):
 
 
 _BASE_SIZES = {
-    'tiny_textbooks': 30000,
+    'tiny_textbooks': 10000,
     'musique': 1000,
     'github_code': 30000,
     'competition_math': 7500,
@@ -455,5 +455,5 @@ def get_dataset(total: Optional[int] = None, load_from_cache_file: bool = True) 
 
 
 if __name__ == '__main__':
-    dataset = get_dataset(load_from_cache_file=False)
+    dataset = get_dataset(load_from_cache_file=True)
     print(len(dataset))

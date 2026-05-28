@@ -1,36 +1,14 @@
-"""Two-phase query-diverse condenser dataset builder.
-
-Pipeline per item (from dataset.py output: {id, source, messages}):
-  Phase 1 — Query Generation:
-      Ask the LLM: "Given this text, what distinct information queries can be asked?"
-      System prompt hints categories (interface extraction, error summary, abstract
-      analysis, information summary, experience/skill extraction, etc.).
-      The LLM returns a JSON list of query strings.
-
-  Phase 2 — Query-Specific Compression:
-      For each (text, query) pair, call the LLM to produce a maximally dense
-      compression tailored to that query. No fixed compression ratio; the goal
-      is maximum information density with continuous characters.
-
-Output: one JSONL row per (text, query) pair:
-    {id, source, original_len, compressed_len, query, messages: [system, user, assistant]}
-
-Run:
-    python make_condenser_dataset.py \
-        --input condenser_input.jsonl \
-        --output condenser_sft.jsonl \
-        --model qwen3-235b-a22b \
-        --base-url http://localhost:8000/v1 \
-        --concurrency 32
-"""
 import argparse
+import hashlib
 import json
 import os
 import re
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from typing import Any, Dict, Iterator, List, Optional, Set
+
+from tqdm import tqdm
 
 from twinkle.data_format.sampling import SamplingParams
 from twinkle_agentic.protocol.openai import OpenAI
@@ -41,82 +19,186 @@ from twinkle_agentic.protocol.openai import OpenAI
 # ═══════════════════════════════════════════════════════════════════════════════
 
 QUERY_GEN_SYSTEM = """\
-You are a query designer. Given a piece of text, enumerate distinct "information \
-queries" that a reader might ask about it. Each query represents a DIFFERENT \
-perspective or information need that would lead to a DIFFERENT compression of the \
-same source.
+You are a query designer. Given a source passage, enumerate distinct information \
+queries a reader might ask of it. Each query must steer toward a meaningfully \
+DIFFERENT compression of the same source — different facets, not rephrasings of \
+the same need.
 
-Category hints (not exhaustive — invent more if appropriate):
-- Interface extraction: class names, method signatures, input/output types
-- Functional summary: what does this code/text accomplish at a high level
+Category hints (not exhaustive — combine or invent as fits the source):
+- Interface extraction (code): class / method signatures, parameter and return types
+- Functional summary: what the passage accomplishes at a high level
 - Error & pitfall analysis: bugs, anti-patterns, failure modes, edge cases
 - Experience distillation: lessons learned, best practices, do's and don'ts
-- Skill extraction: reusable step-by-step procedures or techniques
+- Skill extraction (knowledge-as-skill): WHAT this passage lets you do, HOW to \
+apply it as reusable steps, WHEN to invoke it (trigger conditions / use cases)
 - Abstract analysis: design patterns, architectural decisions, trade-offs
 - Information summary: key facts, entities, numbers, relationships
 - Dependency & context: prerequisites, imports, environment, related modules
 
 Rules:
-1. Each query must be a short imperative sentence (e.g. "List all public method \
-signatures with parameter types and return types").
-2. Queries must be MUTUALLY DISTINCT — different queries should lead to different \
-compressions.
-3. Skip trivial queries that would just reproduce the source verbatim.
-4. Output a JSON array of strings, nothing else.
-5. Generate 1–4 queries depending on text richness. Simple texts get 1; rich texts get up to 3.
-6. Query language MUST match the source language.\
+1. SHAPE — each query is one short imperative or interrogative sentence (e.g. \
+"List all public method signatures with parameter and return types", "What race \
+conditions does this code contain?").
+2. DISTINCT — reject any pair whose answers would substantially overlap; \
+rephrasings of the same information need do NOT count as separate queries.
+3. SKILL FOR KNOWLEDGE — when the source reads as tutorial / experience / \
+how-to / domain knowledge, ALWAYS include exactly one skill-style query asking \
+what the reader can accomplish with it and how to apply it (phrased in the \
+source language).
+4. ANSWERABLE — skip queries the source cannot actually answer, and skip \
+trivial queries that would just reproduce the source verbatim.
+5. SCALE — short / single-purpose → 1; medium → 2; rich / multi-topic → 3–4. \
+Do not pad.
+6. LANGUAGE — query language MUST match the source language.
+7. OUTPUT — a single JSON array of strings; no preamble, no code fences, \
+nothing else.\
 """
 
 QUERY_GEN_USER = "Analyze the following text and return a JSON array of queries.\n\n{text}"
 
 COMPRESS_SYSTEM = """\
-You are a text compression assistant. Compress the source text to answer the \
-given query with maximum information density.
+You are a compression assistant. For the (query, source) pair, emit a Markdown \
+answer with TWO sections, designed to pair with the `extract_compressed` tool: \
+the reader absorbs `## Read inline` directly, then calls `extract_compressed` \
+on any topic-key listed under `## Call extract_compressed for` to recover its \
+fuller content.
 
-Format selection — pick the MOST COMPACT representation for the query type:
-- Interface/signature queries → use code notation directly (e.g. `func(a:int)->str`)
-- Factual/entity queries → telegraphic prose: drop function words, colons = "is", commas = "has"
-- Procedural/skill queries → numbered short steps (1.xxx 2.xxx)
-- Analytical/design queries → hierarchical bullets with abbreviations
-Mix formats within one output if different parts benefit from different styles.
+  `## Read inline`               — extreme-density text the reader reads directly.
+  `## Call extract_compressed for` — a topic index whose keys are valid arguments \
+to `extract_compressed` for recovering material not captured inline.
 
-Rules:
-1. Maximally DENSE — every token must carry query-relevant information.
-2. Preserve ALL facts relevant to the query — no fabrication, no omission.
-3. SELF-CONTAINED — reader understands without seeing the original.
-4. Output language MUST match source language.
-5. Do NOT wrap in markdown fences or add meta-commentary.
-6. No fixed length — be as short as faithfully possible.
+Together the two sections must form a COMPLETE, NON-DISTORTING inventory of the \
+source for the query — nothing essential lost, nothing implied that the source \
+does not support. NO preamble, NO meta-commentary, NO code fences wrapping the \
+whole output.
+
+Output skeleton:
+
+## Read inline
+Topic: <what the source is about + scope, one line>
+<dense body answering the query>
+
+## Call extract_compressed for
+- <topic-key>: <one-line hint of what is revealed when expanded>
+- ...
+
+Format selection for the inline body (pick the MOST COMPACT form per query, mix \
+when helpful):
+- Interface / signature → code notation directly: `func(a:int)->str`
+- Factual / entity → telegraphic prose; drop function words; ":" for "is", "," \
+for "has"
+- Skill / how-to / usage → lead with `Use when: <trigger>`; numbered telegraphic \
+steps `1.do X 2.then Y`; close with `Output: <result>` when relevant
+- Procedural → numbered short steps
+- Analytical / design → hierarchical bullets with abbreviations
+
+`## Read inline` rules:
+1. TOPIC LINE — line 1 is ALWAYS `Topic: <subject — scope>`, even when the \
+query is narrow. Anchors both the reader and the tool.
+2. DENSITY — every token in the body carries query-relevant signal; cut filler.
+3. PRIMARY-COMPLETE — never silently drop a fact essential to answering the \
+query. Anything cut for length MUST appear as a key under \
+`## Call extract_compressed for`.
+4. NON-MISLEADING — phrasing must not let the reader infer anything the source \
+does not support; partial truths that mislead are worse than honest omissions \
+flagged in the index.
+5. SELF-CONTAINED — the reader can act on the answer without re-opening the source.
+6. FAITHFUL — only content the source supports; no fabrication, no extrapolation.
+7. LANGUAGE — match the source language.
+8. NO outer code fences around the whole answer; no meta-commentary.
+
+`## Call extract_compressed for` rules (MANDATORY — this section is never omitted):
+1. FORMAT — each bullet is `- <topic-key>: <one-line hint>`:
+   • topic-key — short, unambiguous, grounded in source vocabulary so the \
+`extract_compressed` tool can locate the aspect (e.g. `decorators`, \
+`error handling`, `pitfalls`).
+   • hint — tells WHAT the reader gains by expanding (concrete numbers, code \
+listings, secondary cases, edge details, related context, …); do NOT restate \
+the inline answer.
+2. CRITERION — each bullet names an aspect that EXISTS in the source but is \
+NOT fully captured inline. Material that genuinely fits inline without \
+distortion MUST NOT be duplicated here.
+3. FAITHFUL — hints must be grounded in the source; never speculate or invent.
+4. ORDER — by relevance to the query, then by importance.
+5. EMPTY CASE — if the source is so short / single-purpose that everything \
+fits inline, write a single line `- (none)`.
 
 Examples:
 
 Query: List all public method signatures with parameter and return types
-Source: (a Python class with retry decorator, logging, and HTTP request methods)
-Compressed:
+Source: (a Python HTTP client class with retry decorator, structured logging, \
+and request helpers)
+## Read inline
+Topic: Python HTTP client class — public surface of retried request helpers.
 retry_request(url:str, max_retries:int=3, timeout:float=10.0) -> Response
 fetch_json(endpoint:str, params:dict|None=None) -> dict
 post_data(endpoint:str, payload:dict, headers:dict|None=None) -> Response
+
+## Call extract_compressed for
+- decorators: @retry config — exponential backoff (base=2.0, max=60s)
+- logging: structured per-request logs with request_id and latency_ms
+- private helpers: _build_headers, _parse_error — not in public surface
 ───
-Query: Summarize key facts of this context
-Source: (a biography paragraph about Alan Turing)
-Compressed:
-Alan Turing: British mathematician/logician, father of CS + AI
-- Turing machine (1936): universal computation model
-- Enigma codebreaker, WWII Bletchley Park
-- Turing test (1950): machine intelligence criterion
-- Death 1954, cyanide, aged 41; royal pardon 2013
+Query: What can this passage help you accomplish, and how to use it?
+Source: (a tutorial on configuring Linux cgroups v2 caps for a systemd service)
+## Read inline
+Topic: Linux cgroups v2 — per-service CPU / memory caps via systemd slice units.
+Use when: needing per-service CPU/memory caps on systemd hosts.
+1.create slice unit /etc/systemd/system/<name>.slice with CPUQuota=, MemoryMax=
+2.attach service via Slice=<name>.slice in [Service]
+3.systemctl daemon-reload + restart service
+4.verify: systemctl status <svc> shows Tasks/CPU/Memory inside slice
+Output: hard caps enforced by kernel cgroup v2.
+
+## Call extract_compressed for
+- pitfalls: cgroup v1/v2 mode detection, MemorySwapMax behavior on OOM
+- delegation: Delegate=yes for nested controllers in container managers
+- examples: nginx and postgres slice templates with concrete numeric caps
+- diagnostics: systemd-cgls / systemd-cgtop walkthrough
 ───
 Query: 总结这段代码的错误和改进经验
 Source: (一段有 race condition 和未关闭资源的 Go 代码)
-Compressed:
-1. race condition: 并发写 map 未加锁 → 改用 sync.RWMutex 或 sync.Map
-2. 资源泄漏: resp.Body 未 defer Close → 请求后立即 defer resp.Body.Close()
-3. 错误吞没: err 赋值后未检查 → 每次 err != nil 必须处理或上抛
+## Read inline
+Topic: Go HTTP fetch 循环 — 并发写共享 map + 未关闭响应体导致的稳定性缺陷。
+1.race: 并发写 map 未锁 → sync.RWMutex 或 sync.Map
+2.泄漏: resp.Body 未 Close → 请求后立即 defer resp.Body.Close()
+3.吞错: err 未检查 → 每处 err!=nil 必处理或上抛
+
+## Call extract_compressed for
+- (none)
 
 Now begin.\
 """
 
 COMPRESS_USER = "## Query\n{query}\n\n## Source\n{text}"
+
+# Short system prompt embedded in emitted SFT samples — the long COMPRESS_SYSTEM
+# is for data generation only; training samples carry only the binding contract.
+COMPRESS_SYSTEM_TRAIN = """\
+You are a compression assistant. For the (query, source) pair, emit a Markdown \
+answer with TWO sections, designed to pair with the `extract_compressed` tool: \
+the reader absorbs `## Read inline` directly, then calls `extract_compressed` \
+on any topic-key listed under `## Call extract_compressed for` to recover its \
+fuller content.
+
+Output skeleton:
+
+## Read inline
+Topic: <subject — scope, one line>
+<dense body answering the query>
+
+## Call extract_compressed for
+- <topic-key>: <one-line hint of what is revealed when expanded>
+- ...
+
+Rules:
+1. Line 1 of `## Read inline` is ALWAYS `Topic: ...`.
+2. Body is maximally dense; every token carries query-relevant signal.
+3. Never silently drop a fact — anything cut for length MUST appear as a key \
+under `## Call extract_compressed for` (do not duplicate inline material here).
+4. No fabrication, no extrapolation, no misleading partial truths.
+5. Match the source language. No outer code fences, no meta-commentary.\
+"""
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -170,19 +252,22 @@ def generate_queries(api: OpenAI, text: str) -> List[str]:
     return []
 
 
-def compress_for_query(api: OpenAI, text: str, query: str) -> Optional[str]:
-    """Phase 2: compress ``text`` with respect to a specific ``query``."""
+def compress_for_query(api: OpenAI, text: str, query: str,
+                       thinking_budget: int = 1024) -> Optional[str]:
+    """Phase 2: compress ``text`` w.r.t. ``query``. Returns compressed content or None."""
     trajectory = {
         'messages': [
             {'role': 'system', 'content': COMPRESS_SYSTEM},
             {'role': 'user', 'content': COMPRESS_USER.format(query=query, text=text)},
         ]
     }
-    # Allow generous tokens — no fixed ratio; let the model decide length.
-    sp = SamplingParams(temperature=0.3, max_tokens=2048)
+    sp = SamplingParams(temperature=0.3, max_tokens=16384)
     for attempt in range(2):
         try:
-            reply = api(trajectory, sp, extra_body={'enable_thinking': True})
+            reply = api(trajectory, sp, extra_body={
+                'enable_thinking': False,
+                'thinking_budget': thinking_budget,
+            })
         except Exception as exc:
             sys.stderr.write(f'[compress] error: {exc}\n')
             return None
@@ -191,54 +276,88 @@ def compress_for_query(api: OpenAI, text: str, query: str) -> Optional[str]:
             if attempt == 0:
                 sys.stderr.write('[compress] retry: empty response\n')
             continue
-        # Strip markdown fences if model wraps output
-        if content.startswith('```'):
-            first_nl = content.find('\n')
-            last_fence = content.rfind('```')
-            if first_nl != -1 and last_fence > first_nl:
-                content = content[first_nl + 1:last_fence].strip()
+        # Strip whole-answer code fence if present.
+        m = re.match(r'^```[a-zA-Z]*\n(.*?)\n```\s*$', content, re.DOTALL)
+        if m:
+            content = m.group(1).strip()
+        if not (re.search(r'(?im)^##\s*Read\s+inline\b', content)
+                and re.search(r'(?im)^##\s*Call\s+extract_compressed\s+for\b', content)):
+            if attempt == 0:
+                sys.stderr.write('[compress] retry: missing required sections\n')
+            continue
         return content
     return None
 
 
+def _query_hash(query: str) -> str:
+    """Stable short hash of a query string — embedded in sample id for resume."""
+    return hashlib.md5(query.strip().encode('utf-8')).hexdigest()[:8]
+
+
 def process_item(
-    api: OpenAI, item: Dict[str, Any],
+    api: OpenAI,
+    item: Dict[str, Any],
+    done_sample_ids: Optional[Set[str]] = None,
+    thinking_budget: int = 1024,
 ) -> List[Dict[str, Any]]:
-    """Run both phases on one dataset item. Returns list of SFT samples."""
-    # Extract raw text from messages (concatenate all message contents)
+    """Run both phases on one dataset item. Returns list of SFT samples.
+
+    Input rows come from ``dataset.py``: each row carries a SINGLE assistant
+    message holding the passage to compress. ``done_sample_ids`` (full sample
+    ids already on disk for this item) lets resume skip queries that were
+    already emitted, keyed by query content hash so a phase-1 reorder still
+    resolves correctly.
+    """
+    done = done_sample_ids or set()
     messages = item.get('messages') or []
-    text_parts = [m['content'] for m in messages if m.get('content')]
-    text = '\n\n'.join(text_parts).strip()
+    text = ''
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        if m.get('role') != 'assistant':
+            continue
+        content = m.get('content')
+        if isinstance(content, str) and content.strip():
+            text = content.strip()
+            break
     if not text or len(text) < 100:
         return []
 
-    item_id = item['id']
+    item_id = item.get('id')
+    if not item_id:
+        return []
     source = item.get('source', 'unknown')
 
-    # Phase 1: generate queries
     queries = generate_queries(api, text)
     if not queries:
         return []
+    queries = queries[:2]
 
-    # Phase 2: compress for each query
     samples: List[Dict[str, Any]] = []
-    for q_idx, query in enumerate(queries):
-        compressed = compress_for_query(api, text, query)
+    for query in queries:
+        sample_id = f'{item_id}__{_query_hash(query)}'
+        if sample_id in done:
+            continue
+        compressed = compress_for_query(api, text, query, thinking_budget=thinking_budget)
         if not compressed:
             continue
-        # Build SFT sample: system + user + assistant
         sft_messages = [
-            {'role': 'system', 'content': COMPRESS_SYSTEM},
+            {'role': 'system', 'content': COMPRESS_SYSTEM_TRAIN},
             {'role': 'user', 'content': COMPRESS_USER.format(query=query, text=text)},
             {'role': 'assistant', 'content': compressed},
         ]
         samples.append({
-            'id': f'{item_id}__q{q_idx}',
+            'id': sample_id,
             'source': source,
             'query': query,
             'original_len': len(text),
             'compressed_len': len(compressed),
+            'original_tokens': 0,
+            'compressed_tokens': 0,
             'messages': sft_messages,
+            # Stashed for sparse tokenization on main thread; popped before write.
+            '__src': text,
+            '__cmp': compressed,
         })
     return samples
 
@@ -247,37 +366,44 @@ def process_item(
 # I/O helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def load_input(path: str) -> List[Dict[str, Any]]:
-    """Load JSONL dataset (output of dataset.py)."""
-    items: List[Dict[str, Any]] = []
+def iter_input(path: str) -> Iterator[Dict[str, Any]]:
+    """Stream JSONL dataset row-by-row (no full-file load)."""
     with open(path, 'r', encoding='utf-8') as fh:
         for line in fh:
             line = line.strip()
             if not line:
                 continue
             try:
-                items.append(json.loads(line))
+                yield json.loads(line)
             except json.JSONDecodeError:
                 continue
-    return items
 
 
-def load_done_ids(path: str) -> set:
-    """Collect item ids already processed for resume support."""
+def iter_dataset_py(total: Optional[int], load_from_cache_file: bool) -> Iterator[Dict[str, Any]]:
+    """Stream rows directly from ``dataset.py::get_dataset`` without any JSONL hop."""
+    # Lazy import: dataset.py triggers HF / ModelScope downloads at module load.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from dataset import get_dataset
+    hf = get_dataset(total=total, load_from_cache_file=False)
+    sys.stderr.write(f'Loaded dataset.py::get_dataset: {len(hf)} rows\n')
+    for row in hf:
+        yield row
+
+
+def load_done_sample_ids(path: str) -> Set[str]:
+    """Collect already-written full sample ids (``base__hash``) for resume."""
     if not os.path.exists(path):
         return set()
-    done: set = set()
+    done: Set[str] = set()
     with open(path, 'r', encoding='utf-8') as fh:
         for line in fh:
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            # Extract base item id (strip __qN suffix)
-            sample_id = obj.get('id', '')
-            base_id = re.sub(r'__q\d+$', '', sample_id)
-            if base_id:
-                done.add(base_id)
+            sid = obj.get('id', '')
+            if sid:
+                done.add(sid)
     return done
 
 
@@ -288,77 +414,136 @@ def load_done_ids(path: str) -> set:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description='Two-phase query-diverse condenser dataset builder.')
-    parser.add_argument('--input', required=True,
-                        help='Input JSONL file (output of dataset.py)')
+    parser.add_argument('--input', default=None,
+                        help='Optional JSONL override; default uses dataset.py::get_dataset')
     parser.add_argument('--output', required=True,
                         help='Output JSONL file for SFT samples')
+    parser.add_argument('--total', type=int, default=0,
+                        help='Total input rows for proportional scaling in dataset.py (0 = base sizes)')
+    parser.add_argument('--no-cache', action='store_true',
+                        help='Disable load_from_cache_file when calling dataset.py::get_dataset')
     parser.add_argument('--model', required=True,
                         help='API model name')
     parser.add_argument('--api-key', default=os.environ.get('OPENAI_API_KEY'))
     parser.add_argument('--base-url', default=os.environ.get('OPENAI_BASE_URL'))
-    parser.add_argument('--concurrency', type=int, default=16,
+    parser.add_argument('--concurrency', type=int, default=32,
                         help='Number of parallel workers')
     parser.add_argument('--limit', type=int, default=0,
                         help='Max items to process (0 = all)')
+    parser.add_argument('--thinking-budget', type=int, default=1024,
+                        help='Max thinking tokens for phase-2 compress (shorter = faster, cheaper)')
+    parser.add_argument('--tokenizer', default='Qwen/Qwen3.5-4B',
+                        help='HF/ModelScope tokenizer id for sparse token-ratio probe')
+    parser.add_argument('--tokenize-every', type=int, default=1000,
+                        help='Tokenize one sample every N writes; others get tokens=0')
     args = parser.parse_args()
 
-    # Load input
-    sys.stderr.write(f'Loading input from {args.input}...\n')
-    items = load_input(args.input)
-    sys.stderr.write(f'Loaded {len(items)} items.\n')
+    out_dir = os.path.dirname(args.output)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
 
-    # Resume
-    done_ids = load_done_ids(args.output)
-    pending = [it for it in items if it['id'] not in done_ids]
-    sys.stderr.write(f'Resume: {len(done_ids)} already done, {len(pending)} pending.\n')
+    done_sample_ids = load_done_sample_ids(args.output)
+    # Group done sample ids by base item id so each worker only sees its slice.
+    done_per_item: Dict[str, Set[str]] = {}
+    for sid in done_sample_ids:
+        if '__' in sid:
+            base = sid.rsplit('__', 1)[0]
+            done_per_item.setdefault(base, set()).add(sid)
+    sys.stderr.write(
+        f'Resume: {len(done_sample_ids)} samples on disk across '
+        f'{len(done_per_item)} items.\n')
 
-    if args.limit > 0:
-        pending = pending[:args.limit]
-        sys.stderr.write(f'Limited to {len(pending)} items.\n')
-
-    # API client
     api = OpenAI(model=args.model, api_key=args.api_key, base_url=args.base_url)
 
-    # Process with thread pool
+    from modelscope import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=True)
+
+    def iter_pending() -> Iterator[Dict[str, Any]]:
+        if args.input:
+            source_iter = iter_input(args.input)
+        else:
+            source_iter = iter_dataset_py(
+                total=args.total or None,
+                load_from_cache_file=not args.no_cache,
+            )
+        emitted = 0
+        for it in source_iter:
+            iid = it.get('id')
+            if not iid:
+                sys.stderr.write('[skip] row missing "id" field\n')
+                continue
+            if args.limit > 0 and emitted >= args.limit:
+                return
+            yield it
+            emitted += 1
+
     write_lock = threading.Lock()
     out_fh = open(args.output, 'a', encoding='utf-8')
     items_done = 0
-    samples_emitted = 0
     items_failed = 0
+    samples_emitted = 0
+    pbar = tqdm(desc='condense', unit='item', dynamic_ncols=True)
+
+    items_iter = iter_pending()
+    in_flight: Dict[Any, str] = {}
+    # Sliding window: keep ~2x concurrency tasks queued so the pool never starves.
+    window = max(args.concurrency * 2, args.concurrency + 4)
 
     try:
         with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
-            futures = {
-                ex.submit(process_item, api, item): item['id']
-                for item in pending
-            }
-            for fut in as_completed(futures):
-                item_id = futures[fut]
-                try:
-                    samples = fut.result()
-                except Exception as exc:
-                    sys.stderr.write(f'[item {item_id}] crashed: {exc}\n')
-                    items_failed += 1
-                    continue
-                if not samples:
-                    items_failed += 1
-                    continue
-                with write_lock:
-                    for s in samples:
-                        out_fh.write(json.dumps(s, ensure_ascii=False) + '\n')
-                    out_fh.flush()
-                items_done += 1
-                samples_emitted += len(samples)
-                if items_done % 50 == 0:
-                    sys.stderr.write(
-                        f'[progress] items={items_done} '
-                        f'samples={samples_emitted} failed={items_failed}\n')
+            exhausted = False
+            while True:
+                while not exhausted and len(in_flight) < window:
+                    try:
+                        it = next(items_iter)
+                    except StopIteration:
+                        exhausted = True
+                        break
+                    iid = it['id']
+                    fut = ex.submit(
+                        process_item, api, it, done_per_item.get(iid),
+                        args.thinking_budget,
+                    )
+                    in_flight[fut] = iid
+                if not in_flight:
+                    break
+                done, _ = wait(list(in_flight.keys()), return_when=FIRST_COMPLETED)
+                for fut in done:
+                    iid = in_flight.pop(fut)
+                    try:
+                        samples = fut.result()
+                    except Exception as exc:
+                        sys.stderr.write(f'[item {iid}] crashed: {exc}\n')
+                        items_failed += 1
+                        pbar.update(1)
+                        continue
+                    if not samples:
+                        items_failed += 1
+                        pbar.update(1)
+                        continue
+                    with write_lock:
+                        for s in samples:
+                            src = s.pop('__src', '')
+                            cmp = s.pop('__cmp', '')
+                            samples_emitted += 1
+                            if (samples_emitted - 1) % args.tokenize_every == 0:
+                                s['original_tokens'] = len(tokenizer(src).input_ids)
+                                s['compressed_tokens'] = len(tokenizer(cmp).input_ids)
+                            out_fh.write(json.dumps(s, ensure_ascii=False) + '\n')
+                        out_fh.flush()
+                    items_done += 1
+                    pbar.set_postfix(
+                        done=items_done, failed=items_failed,
+                        samples=samples_emitted, refresh=False,
+                    )
+                    pbar.update(1)
     finally:
         out_fh.close()
+        pbar.close()
 
     sys.stderr.write(
-        f'Done. items={items_done}, samples={samples_emitted}, '
-        f'failed={items_failed}, total_pending={len(pending)}\n')
+        f'Done. items_done={items_done}, samples={samples_emitted}, '
+        f'failed={items_failed}\n')
 
 
 if __name__ == '__main__':
