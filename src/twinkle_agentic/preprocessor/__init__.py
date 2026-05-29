@@ -126,11 +126,7 @@ class QualityPreprocessor(Preprocessor):
         llm_difficulty_min_score: float = 0.0,  # 0.0 = skip
         llm_condition: str = '',             # '' = skip
         llm_task_desc: str = '',             # '' = skip
-        # ── Phase 11: intent classification (annotation, not filter) ────────────
-        intent_api_endpoint: str = '',       # '' = skip
-        intent_model: str = 'default',
-        intent_api_key: str = '',
-        intent_max_workers: int = 8,
+        # ── Phase 11: intent classification (annotation, not filter; pure heuristic) ────────────
         # ── Phase 12: IFD hard-example filter (requires Phase 11) ───────────
         ifd_api_endpoint: str = '',          # '' = skip
         ifd_model: str = 'default',
@@ -278,16 +274,9 @@ class QualityPreprocessor(Preprocessor):
                                         task_desc=llm_task_desc,
                                         model=llm_model))
 
-        # Phase 11: intent classification
-        if backend or intent_api_endpoint:
-            ic = IntentClassifier(
-                backend=backend,
-                api_endpoint=intent_api_endpoint,
-                model=intent_model,
-                api_key=intent_api_key,
-                max_workers=intent_max_workers,
-            )
-            pipeline.append(ic.classify_intent)
+        # Phase 11: intent classification (pure heuristic, no LLM)
+        ic = IntentClassifier()
+        pipeline.append(ic.classify_intent)
 
         # Phase 12: IFD hard-example filter
         if (backend or ifd_api_endpoint) and ifd_tokenizer:
