@@ -56,7 +56,9 @@ _ZH_HESITATE = re.compile(
     r'('
     # Direct hesitation tokens
     r'等等[，,。\s]*\.{0,3}|等一下[，,。]?|哦等等|不不不+|'
-    r'嗯+[，,。\s]*\.{0,3}|呃+[，,。\s]*\.{0,3}|哦+[，,。\s]*\.{0,3}|'
+    # Note: 哦 is excluded (95%+ sentence-final particle, e.g. "拍拍我哦"); 嗯 requires
+    # repetition (single 嗯 is often affirmation, e.g. "嗯，好的").
+    r'嗯{2,}[，,。\s]*\.{0,3}|呃+[，,。\s]*\.{0,3}|'
     # Self-correction
     r'不对[，,。]?[，,\s]?(等等|重新|让我)|错了[，,。]?\s*让我|'
     r'让我(重新|再次?)(想|试|来|考虑|计算)|'
@@ -98,7 +100,7 @@ _HESITATE_PATTERNS = (_EN_HESITATE, _ZH_HESITATE, _JA_HESITATE, _KO_HESITATE)
 _CASCADE_RE = re.compile(
     r'\b(wait|actually|hmm|no\s+wait|oh\s+wait|let\s+me|'
     r'i\s+was\s+wrong|i\s+made\s+an?\s+(error|mistake))\b|'
-    r'(等等|不对|重新|错了|嗯+|哦+|让我再)',
+    r'(等等|不对|重新|错了|嗯{2,}|让我再)',
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -200,4 +202,6 @@ class DeadLoopFilter(Preprocessor):
                 continue
             if not any(_is_stuck((m.get('content') or '').strip()) for m in asst_msgs):
                 out.append(row)
+            else:
+                continue
         return out

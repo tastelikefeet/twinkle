@@ -68,7 +68,11 @@ class QualityPreprocessor(Preprocessor):
         token_soup_filter: bool = True,
         word_repeat_max_ratio: float = 0.4,
         char_repeat_max_ratio: float = 0.4,
-        special_chars_max_ratio: float = 0.25,
+        # special_chars_filter is structurally incompatible with markdown-formatted
+        # responses (tables/bold/dividers push ratio above any usable threshold);
+        # opt-in only.
+        special_chars_filter: bool = False,
+        special_chars_max_ratio: float = 0.5,
         alphanumeric_min_ratio: float = 0.25,
         # ── Phase 4: token length bounds ──────────────────────────────────────
         token_num_filter: bool = True,
@@ -174,7 +178,8 @@ class QualityPreprocessor(Preprocessor):
             pipeline.append(TokenSoupFilter().token_soup_filter)
         pipeline.append(partial(dj.word_repeat_filter, max_ratio=word_repeat_max_ratio))
         pipeline.append(partial(dj.char_repeat_filter, max_ratio=char_repeat_max_ratio))
-        pipeline.append(partial(dj.special_chars_filter, max_ratio=special_chars_max_ratio))
+        if special_chars_filter:
+            pipeline.append(partial(dj.special_chars_filter, max_ratio=special_chars_max_ratio))
         pipeline.append(partial(dj.alphanumeric_filter, min_ratio=alphanumeric_min_ratio))
 
         # Phase 4: token length
@@ -333,12 +338,12 @@ class QualityPreprocessor(Preprocessor):
         for step in self._pipelines:
             if not rows:
                 break
+            step_name = getattr(step, '__name__', str(step))
             before = len(rows)
             prev = rows
             rows = step(rows)
             after = len(rows)
-            step_name = getattr(step, '__name__', str(step))
-            logger.debug(f'[QualityPreprocessor] {step_name}: {before} -> {after} (dropped {before - after})')
+            logger.info(f'[QualityPreprocessor] {step_name}: {before} -> {after} (dropped {before - after})')
             self._log_dropped(step_name, prev, rows)
         return self.map_row_to_col(rows)
 

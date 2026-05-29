@@ -40,6 +40,15 @@ class LLMBackend(ABC):
             is compatible with _extract_logprob helpers), or None on failure.
         """
 
+    def prompt_logprobs_ids(self, input_ids: List[int]) -> Optional[List]:
+        """Evaluate raw token-id prompt without chat template wrapping.
+
+        Used for unconditional perplexity (e.g. IFD denominator) where any
+        chat-template prefix would contaminate the score. Default: not supported.
+        """
+        raise NotImplementedError(
+            f'{type(self).__name__} does not support prompt_logprobs_ids')
+
     def embeddings(self, texts: List[str]) -> Any:
         """Compute text embeddings. Override in backends that support it."""
         raise NotImplementedError(f'{type(self).__name__} does not support embeddings')
@@ -110,6 +119,27 @@ class OpenAIBackend(LLMBackend):
             resp.raise_for_status()
             return resp.json().get('prompt_logprobs')
         except Exception:
+            return None
+
+    def prompt_logprobs_ids(self, input_ids: List[int]) -> Optional[List]:
+        # vLLM /v1/completions accepts int-list prompt and returns per-token prompt_logprobs.
+        endpoint = self._chat_endpoint.rsplit('/', 2)[0] + '/v1/completions'
+        try:
+            resp = self._client.post(endpoint, json={
+                'model': self._model,
+                'prompt': list(input_ids),
+                'max_tokens': 0,
+                'echo': True,
+                'prompt_logprobs': 1,
+            })
+            resp.raise_for_status()
+            data = resp.json()
+            choices = data.get('choices') or []
+            if choices and 'prompt_logprobs' in choices[0]:
+                return choices[0]['prompt_logprobs']
+            return data.get('prompt_logprobs')
+        except Exception as e:
+            logger.warning(f'[OpenAIBackend] prompt_logprobs_ids failed: {e}')
             return None
 
     def embeddings(self, texts: List[str]):
@@ -186,6 +216,20 @@ class SamplerBackend(LLMBackend):
             return None
         except Exception as e:
             logger.warning(f'[SamplerBackend] prompt_logprobs failed: {e}')
+            return None
+
+    def prompt_logprobs_ids(self, input_ids: List[int]) -> Optional[List]:
+        from twinkle.data_format import SamplingParams
+        # InputFeature path bypasses template.encode -> no chat-template contamination.
+        feat = {'input_ids': list(input_ids)}
+        params = SamplingParams(max_tokens=0, prompt_logprobs=1)
+        try:
+            responses = self._sampler.sample(feat, params)
+            if responses and responses[0].prompt_logprobs is not None:
+                return responses[0].prompt_logprobs
+            return None
+        except Exception as e:
+            logger.warning(f'[SamplerBackend] prompt_logprobs_ids failed: {e}')
             return None
 
     def embeddings(self, texts: List[str]):

@@ -73,19 +73,17 @@ def _compute_ifd(
     if l_a_given_q is None:
         return None
 
-    # L(A): unconditional loss — just the assistant text as a standalone message
-    uncond_messages = [{'role': 'user', 'content': ''}, {'role': 'assistant', 'content': assistant_text}]
-    try:
-        uncond_prompt = tokenizer.apply_chat_template(
-            [{'role': 'user', 'content': ''}], tokenize=False, add_generation_prompt=True)
-    except Exception:
+    # L(A): unconditional loss on raw assistant tokens (no chat-template wrapping).
+    asst_ids = tokenizer(assistant_text, add_special_tokens=False)['input_ids']
+    if len(asst_ids) < _MIN_RESPONSE_TOKENS + 1:
         return None
-
-    n_uncond_prompt = len(tokenizer(uncond_prompt, add_special_tokens=False)['input_ids'])
-    uncond_logprobs = _get_prompt_logprobs(backend, uncond_messages)
+    try:
+        uncond_logprobs = backend.prompt_logprobs_ids(asst_ids)
+    except NotImplementedError:
+        return None
     if uncond_logprobs is None:
         return None
-    l_a = _avg_nll(uncond_logprobs, n_uncond_prompt)
+    l_a = _avg_nll(uncond_logprobs, 0)
     if l_a is None or l_a < 1e-8:
         return None
 

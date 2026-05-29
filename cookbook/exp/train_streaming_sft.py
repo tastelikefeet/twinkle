@@ -14,20 +14,23 @@ Two output files are produced:
 Launch:
     python cookbook/exp/train_streaming_sft.py
 """
+import hashlib
 import os
+import re
 from pathlib import Path
+from typing import Any, Dict, List
 
+from datasets import Features, Value
 from peft import LoraConfig
 
 import twinkle
 from twinkle import DeviceMesh, DeviceGroup, get_device_placement, get_logger
 from twinkle.dataloader import DataLoader
-from twinkle.dataset import DatasetMeta
-from twinkle.dataset.odps_dataset import OdpsIterableDataset
+from twinkle.dataset import Dataset, DatasetMeta
 from twinkle.model import TransformersModel
+from twinkle.preprocessor import Preprocessor
 from twinkle.sampler import vLLMSampler
 from twinkle_agentic.preprocessor import QualityPreprocessor, SamplerBackend
-from ncs_odps_init import get_odps
 
 logger = get_logger()
 
@@ -56,9 +59,45 @@ TRAINED_DATA_PATH = os.path.join(OUTPUT_DIR, 'trained_data.jsonl')
 DROPPED_DATA_PATH = os.path.join(OUTPUT_DIR, 'dropped_data.jsonl')
 ADAPTER_NAME = 'default'
 
-# ── ODPS data source ─────────────────────────────────────────────────────────
-ODPS_TABLE = os.environ.get('ODPS_TABLE', 'your_project.your_table')
-ODPS_PARTITION = os.environ.get('ODPS_PARTITION', '')
+# ── Data source (test mode: Chinese-DeepSeek-R1-Distill-data-110k) ───────────
+CN_R1_DISTILL_REPO = 'ms://AI-ModelScope/Chinese-DeepSeek-R1-Distill-data-110k'
+DATASET_LIMIT = int(os.environ.get('DATASET_LIMIT', 1000))
+DATASET_USE_CACHE = os.environ.get('DATASET_USE_CACHE', '1') == '1'
+
+_TARGET_FEATURES = Features({
+    'id': Value('string'),
+    'source': Value('string'),
+    'messages': [{'role': Value('string'), 'content': Value('string')}],
+})
+_THINK_RE = re.compile(r'<think>(.*?)</think>', re.DOTALL)
+
+
+class CNR1DistillSFTProcessor(Preprocessor):
+    """CN-R1-Distill raw row → full SFT messages: ``[user: input, assistant: <think>cot</think>response]``."""
+
+    _SOURCE = 'Chinese-DeepSeek-R1-Distill-data-110k'
+
+    def __call__(self, rows: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
+        rows_list = self.map_col_to_row(rows)
+        out: List[Dict[str, Any]] = []
+        for row in rows_list:
+            query = (row.get('input') or '').strip()
+            cot = (row.get('reasoning_content') or '').strip()
+            response = (row.get('content') or '').strip()
+            if not query or not response:
+                continue
+            response = _THINK_RE.sub('', response).strip() if cot else response
+            assistant = f'<think>{cot}</think>{response}' if cot else response
+            row_id = hashlib.md5((query + assistant).encode('utf-8')).hexdigest()[:16]
+            out.append({
+                'id': f'{self._SOURCE}__{row_id}',
+                'source': self._SOURCE,
+                'messages': [
+                    {'role': 'user', 'content': query},
+                    {'role': 'assistant', 'content': assistant},
+                ],
+            })
+        return self.map_row_to_col(out, keys=['id', 'source', 'messages'])
 
 # ── QualityPreprocessor config ───────────────────────────────────────────────
 SENSITIVE_WORDS_FILE = str(
@@ -68,14 +107,23 @@ REFINE_TEMPERATURE = float(os.environ.get('REFINE_TEMPERATURE', 0.6))
 REFINE_MAX_TOKENS = int(os.environ.get('REFINE_MAX_TOKENS', 4096))
 
 
-def build_dataset(backend: SamplerBackend) -> OdpsIterableDataset:
-    """Build streaming dataset from ODPS with full QualityPreprocessor pipeline."""
+def build_dataset(backend: SamplerBackend) -> Dataset:
+    """Build dataset from CN_R1_DISTILL_REPO with full QualityPreprocessor pipeline."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    dataset = OdpsIterableDataset(
-        table_name=ODPS_TABLE,
-        partition=ODPS_PARTITION or None,
-        odps=get_odps(),
+    dataset = Dataset()
+    meta = DatasetMeta(
+        dataset_id=CN_R1_DISTILL_REPO, split='train',
+        data_slice=range(DATASET_LIMIT),
+    )
+    dataset.add_dataset(meta)
+    cols = list(dataset.datasets[meta.get_id()].column_names)
+    dataset.map(
+        CNR1DistillSFTProcessor,
+        dataset_meta=meta,
+        remove_columns=cols,
+        load_from_cache_file=DATASET_USE_CACHE,
+        features=_TARGET_FEATURES,
     )
 
     qp = QualityPreprocessor(
@@ -90,6 +138,7 @@ def build_dataset(backend: SamplerBackend) -> OdpsIterableDataset:
         dead_loop_filter=True,
         # Phase 3: character quality
         token_soup_filter=True,
+        special_chars_max_ratio=0.5,
         minhash_dedup=False,
         # Phase 11: intent classification
         intent_max_workers=8,

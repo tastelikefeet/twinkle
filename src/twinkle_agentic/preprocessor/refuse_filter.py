@@ -52,7 +52,9 @@ _EN_STANDALONE = re.compile(
     r'\b(i|we)\s+(must|have\s+to|am\s+going\s+to|need\s+to)\s+(decline|refuse)\b|'
     r'\b(i|we)\s+(decline|refuse)\s+(this|your|to)\b|'
     r'\bthis\s+(falls\s+outside|is\s+outside|is\s+beyond)\s+(what\s+i|my)\b|'
-    r'\bas\s+an\s+ai[,.]?\s+i\s+(can\'?t|cannot|am\s+not\s+able|won\'?t)\b',
+    r'\bas\s+an\s+ai[,.]?\s+i\s+(can\'?t|cannot|am\s+not\s+able|won\'?t)\b'
+    r'.{0,40}\b(help|assist|answer|respond|provide|generate|create|fulfill|comply|'
+    r'address|process|complete|handle|discuss|support)\b',
     re.IGNORECASE,
 )
 
@@ -80,9 +82,11 @@ _ZH_VIOLATION = re.compile(
     re.UNICODE,
 )
 
-# AI identity + refusal
+# AI identity + refusal + task verb (avoid false positives on self-deprecating preambles
+# like "作为AI，我虽无法体验情感，但……")
 _ZH_AI_ID = re.compile(
-    r'作为(AI|人工智能|语言模型|大模型)[，,].{0,30}(无法|不能|不便|不应该|不适合)',
+    r'作为(AI|人工智能|语言模型|大模型)[，,].{0,30}(无法|不能|不便|不应该|不适合)'
+    r'.{0,20}(帮|回答|提供|生成|处理|协助|完成|执行|回复|解答|讨论|参与|评论|创作|输出)',
     re.UNICODE,
 )
 
@@ -144,4 +148,6 @@ class RefuseFilter(Preprocessor):
             # Think-only data has no response to judge — keep it.
             if not response or not _is_refusal(response):
                 out.append(row)
+            else:
+                continue
         return out

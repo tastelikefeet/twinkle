@@ -34,7 +34,43 @@ _MATH_LATEX_RE = re.compile(
     r'(\$\$.+?\$\$|\$[^$\n]+?\$|'
     r'\\frac|\\sum|\\int|\\lim|\\begin\{(equation|align|matrix)|'
     r'\\mathbb|\\partial|\\nabla|\\sqrt|\\overline|'
-    r'\\\[.+?\\\])',
+    r'\\boxed|\\text\{|\\mathrm|\\langle|\\rangle|\\cdot|'
+    r'\\times|\\div|\\pm|\\leq|\\geq|\\neq|\\approx|\\equiv|'
+    r'\\infty|\\pi|\\alpha|\\beta|\\gamma|\\theta|\\lambda|\\mu|\\sigma|\\prod|\\to|\\rightarrow|'
+    r'\\\[.+?\\\]|'
+    # R1-distill writes math in plain Unicode without $...$; catch operators, Greek, sub/super digits, fractions.
+    r'[×÷±°∑∏∫√∂∇∞∈∋⊂⊃⊆⊇≤≥≠≈≡≅∝⇒⇔]|'
+    r'[α-ωΔΘΛΞΠΣΦΨΩ]|'
+    r'[⁰¹²³⁴-⁹₀-₉]|'
+    r'[½⅓⅔¼¾⅛⅜⅝⅞]|'
+    # Arithmetic equation pattern catches '30 ÷ 6 = 5' even when other markers are absent.
+    r'\d+\s*[×÷\*/\+\-]\s*\d+\s*=\s*\d+|'
+    # Chinese math vocabulary (strong indicators; ≥2 hits required so single occurrences in non-math text are safe).
+    r'积分|微分|导数|求导|偏导|梯度|极限|矩阵|向量|行列式|特征值|特征向量|'
+    r'多项式|因式分解|不等式|方程组?|二次方程|线性方程|'
+    r'平方|立方|开方|根号|对数|指数函数|三角函数|正弦|余弦|正切|余切|'
+    r'概率|期望值?|方差|标准差|分布|'
+    r'子集|并集|交集|空集|集合|'
+    r'乘以|除以|平方根|立方根|'
+    r'系数|常数项|首项|项数|公差|公比|'
+    r'切线|法线|渐近线|对称轴|双曲线|抛物线|椭圆|'
+    # Sequences / number theory / elementary math.
+    r'数列|数字序列|等差数列|等比数列|等差|等比|通项|递推公式|'
+    r'奇数(?:位|项)?|偶数(?:位|项)?|质数|素数|合数|整数|小数|分数|有理数|无理数|实数|'
+    r'因数|倍数|公因数|公倍数|最大公约数|最小公倍数|阶乘|排列组合|'
+    r'余数|商(?=是|为|等)|被除数|除数|被乘数|乘数|'
+    # Numeric arithmetic verbs followed by a number, e.g. '加1' '减2' '乘以3'.
+    r'(?:加|减|乘|除)\d+|'
+    # 'X位' / 'X项' positional reference common in sequence problems.
+    r'第\d+(?:位|项)|'
+    # English math vocabulary.
+    r'\b(integral|differential|derivative|gradient|polynomial|equation|inequality|'
+    r'matrix|vector|determinant|eigenvalue|eigenvector|coefficient|'
+    r'logarithm|exponential|sqrt|theorem|lemma|proof|qed|'
+    r'sine|cosine|tangent|cosecant|secant|cotangent|'
+    r'probability|variance|expectation|distribution|'
+    r'subset|superset|union|intersection|multiply|divide|squared|cubed)\b|'
+    r'\w_\{[^}]+\}|\w\^\{[^}]+\})',
     re.DOTALL,
 )
 
@@ -138,13 +174,15 @@ def _has_dissatisfaction_signal(messages: List[Dict[str, Any]]) -> bool:
     return False
 
 
-def _detect_msg_signal(text: str) -> Optional[str]:
+def _detect_msg_signal(text: str, role: str = 'user') -> Optional[str]:
     """Detect heuristic signal from a single message's text. Returns intent or None."""
     if _is_code_heavy(text):
         return INTENT_CODE
     if _is_math_heavy(text):
         return INTENT_MATH
-    if _is_dissatisfied(text):
+    # Dissatisfaction is semantically user-only; assistant self-correction text
+    # ('错了'/'重新'/'try again') would otherwise produce false positives.
+    if role == 'user' and _is_dissatisfied(text):
         return INTENT_USER_DISSATISFACTION
     return None
 
@@ -298,7 +336,7 @@ class IntentClassifier(Preprocessor):
                 text = _msg_text(m)
                 if not text:
                     continue
-                signal = _detect_msg_signal(text)
+                signal = _detect_msg_signal(text, role=role or 'user')
                 if not signal:
                     continue
 

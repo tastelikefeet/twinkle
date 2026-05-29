@@ -162,7 +162,7 @@ class DataJuicerPreprocessor(Preprocessor):
         """Filter rows whose special-character ratio exceeds max_ratio."""
         from data_juicer.ops.filter import SpecialCharactersFilter
         op = self._get_op(SpecialCharactersFilter, min_ratio=0.0, max_ratio=max_ratio)
-        texts = [_get_response_text(r, role) for r in rows]
+        texts = [_get_text(r, role) for r in rows]
         mask = _keep_mask(op, texts)
         return [r for r, keep in zip(rows, mask) if keep]
 
