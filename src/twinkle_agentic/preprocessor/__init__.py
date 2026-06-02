@@ -132,12 +132,25 @@ class QualityPreprocessor(Preprocessor):
         ifd_api_endpoint: str = '',          # '' = skip
         ifd_model: str = 'default',
         ifd_template: Optional[Template] = None,
-        ifd_threshold: float = 0.8,
+        # chr_min cutoff (low chr_min = hard example = keep). Replaces legacy ifd_threshold.
+        ifd_chr_min_threshold: float = 0.5,
+        # DEPRECATED: ifd_threshold is ignored (semantics inverted vs chr_min).
+        ifd_threshold: Optional[float] = None,
         # Diagnostic re-sampling: which intents to re-answer; [] disables (no extra inference cost).
         ifd_diagnostic_sample_intents: Optional[List[str]] = None,
         ifd_diagnostic_sample_n: int = 4,
         ifd_diagnostic_sample_temperature: float = 0.7,
         ifd_diagnostic_sample_max_tokens: int = 4096,
+        # Pass@4 LLM-as-judge config (grades each diagnostic rollout vs GT for
+        # correctness AND reasoning/style similarity).
+        ifd_judge_api=None,
+        ifd_judge_model: Optional[str] = None,
+        ifd_judge_base_url: Optional[str] = None,
+        ifd_judge_api_key: Optional[str] = None,
+        ifd_judge_temperature: float = 0.0,
+        ifd_judge_max_tokens: int = 512,
+        ifd_judge_max_workers: int = 8,
+        ifd_enable_pass4_judge: bool = True,
         # Paraphrase mode: 'both' dumps GT+paraphrase, True=paraphrase only, False=GT only.
         ifd_paraphrase_mode='both',
         ifd_paraphrase_intents: Optional[List[str]] = None,
@@ -296,11 +309,20 @@ class QualityPreprocessor(Preprocessor):
                 api_endpoint=ifd_api_endpoint,
                 model=ifd_model,
                 template=ifd_template,
+                chr_min_threshold=ifd_chr_min_threshold,
                 ifd_threshold=ifd_threshold,
                 diagnostic_sample_intents=ifd_diagnostic_sample_intents,
                 diagnostic_sample_n=ifd_diagnostic_sample_n,
                 diagnostic_sample_temperature=ifd_diagnostic_sample_temperature,
                 diagnostic_sample_max_tokens=ifd_diagnostic_sample_max_tokens,
+                judge_api=ifd_judge_api,
+                judge_model=ifd_judge_model,
+                judge_base_url=ifd_judge_base_url,
+                judge_api_key=ifd_judge_api_key,
+                judge_temperature=ifd_judge_temperature,
+                judge_max_tokens=ifd_judge_max_tokens,
+                judge_max_workers=ifd_judge_max_workers,
+                enable_pass4_judge=ifd_enable_pass4_judge,
                 paraphrase_mode=ifd_paraphrase_mode,
                 paraphrase_intents=ifd_paraphrase_intents,
                 paraphrase_temperature=ifd_paraphrase_temperature,

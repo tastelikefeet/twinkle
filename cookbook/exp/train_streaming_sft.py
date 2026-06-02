@@ -103,9 +103,19 @@ class CNR1DistillSFTProcessor(Preprocessor):
 # ── QualityPreprocessor config ───────────────────────────────────────────────
 SENSITIVE_WORDS_FILE = str(
     Path(__file__).resolve().parent.parent.parent / 'sensitive_words.txt')
-IFD_THRESHOLD = float(os.environ.get('IFD_THRESHOLD', 0.8))
+# chr_min cutoff: keep round if chr_min < threshold (low chr_min = hard).
+CHR_MIN_THRESHOLD = float(os.environ.get('CHR_MIN_THRESHOLD', 0.5))
 REFINE_TEMPERATURE = float(os.environ.get('REFINE_TEMPERATURE', 0.6))
 REFINE_MAX_TOKENS = int(os.environ.get('REFINE_MAX_TOKENS', 4096))
+
+# ── Pass@4 LLM-as-judge (grades each diagnostic rollout vs GT) ───────────────
+# Set JUDGE_MODEL='' to disable; otherwise judge runs over every diagnostic round.
+JUDGE_MODEL = os.environ.get('JUDGE_MODEL', 'qwen3.7-max')
+JUDGE_BASE_URL = os.environ.get('JUDGE_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1')
+JUDGE_API_KEY = os.environ.get('JUDGE_API_KEY', 'EMPTY')
+JUDGE_TEMPERATURE = float(os.environ.get('JUDGE_TEMPERATURE', 0.3))
+JUDGE_MAX_TOKENS = int(os.environ.get('JUDGE_MAX_TOKENS', 32000))
+JUDGE_MAX_WORKERS = int(os.environ.get('JUDGE_MAX_WORKERS', 16))
 
 
 def build_dataset(backend: SamplerBackend) -> Dataset:
@@ -144,13 +154,21 @@ def build_dataset(backend: SamplerBackend) -> Dataset:
         token_soup_filter=True,
         special_chars_max_ratio=0.5,
         minhash_dedup=False,
-        # Phase 12: IFD hard-example filter
+        # Phase 12: chr_min hard-example filter + pass@4 judge
         ifd_template=template,
-        ifd_threshold=IFD_THRESHOLD,
+        ifd_chr_min_threshold=CHR_MIN_THRESHOLD,
         ifd_diagnostic_sample_intents=['math', 'code'],
         ifd_diagnostic_sample_n=4,
         ifd_diagnostic_sample_temperature=0.7,
         ifd_diagnostic_sample_max_tokens=4096,
+        # Pass@4 LLM-as-judge: graded only when JUDGE_MODEL is set.
+        ifd_enable_pass4_judge=bool(JUDGE_MODEL),
+        ifd_judge_model=JUDGE_MODEL or None,
+        ifd_judge_base_url=JUDGE_BASE_URL or None,
+        ifd_judge_api_key=JUDGE_API_KEY or None,
+        ifd_judge_temperature=JUDGE_TEMPERATURE,
+        ifd_judge_max_tokens=JUDGE_MAX_TOKENS,
+        ifd_judge_max_workers=JUDGE_MAX_WORKERS,
         # Phase 13: response refinement
         refine_temperature=REFINE_TEMPERATURE,
         refine_max_tokens=REFINE_MAX_TOKENS,

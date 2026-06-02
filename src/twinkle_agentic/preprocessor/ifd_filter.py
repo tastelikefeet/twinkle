@@ -1,4 +1,20 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
+"""Hard-example filter using distinct-token CHR (chr_min) + LLM-judged pass@4.
+
+Replaces the legacy IFD = L(A|Q)/L(A) scorer with the ``chr_dist_min_pos`` metric
+described in ``results/double_check/distinct_token_chr.py``: for each distinct
+asst token id, take the minimum of (cond_lp - asst_lp) across its occurrences,
+then report the fraction of distinct tokens whose min-diff is > 0.
+
+Interpretation:
+    chr_min HIGH → most distinct tokens benefit from the prompt → easy → drop.
+    chr_min LOW  → many distinct tokens degrade under prompt    → hard → keep.
+
+Each kept round is also re-answered ``diagnostic_sample_n`` times (default 4)
+and each rollout is graded by an OpenAI-compatible judge against the GT for
+both factual correctness AND reasoning/style similarity. The aggregate count
+(0..n) is dumped as ``pass4`` alongside the chr_min score.
+"""
 import math
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -11,17 +27,7 @@ from .llm_backend import LLMBackend, OpenAIBackend
 logger = get_logger(only_local_master=False)
 
 _MIN_RESPONSE_TOKENS = 5
-_DEFAULT_IFD_THRESHOLD = 0.8
-# Drop positions where asst NLL falls below this floor: token is mechanically forced,
-# averaging it pulls both numerator/denominator to noise.
-_NLL_NOISE_FLOOR = 0.01
-# Skip the first 2 A-token positions: idx 0 has no prior context (lp=None),
-# idx 1 is a degenerate constant (~12.32 across all samples) since `<think>`
-# always tokenizes the same way; including it injects fixed bias.
-_HEAD_SKIP = 2
-# Qwen3.5 `<think>` token id; used to detect GT-style thinking prefix so paraphrase
-# (which does NOT start with `<think>`) can skip 0 head positions instead of 2.
-_THINK_OPEN_ID = 248068
+_DEFAULT_CHR_MIN_THRESHOLD = 0.5
 
 
 def _extract_logprob(lp, token_id: Optional[int] = None) -> Optional[float]:
@@ -59,75 +65,164 @@ def _to_int_list(x) -> List[int]:
     return list(x)
 
 
-def _aligned_head_nlls(
-    asst_lp: List, asst_ids: List[int],
-    cond_lp: List, cond_ids: List[int],
-    n_prompt: int, start: int, end: int,
-    floor: float = _NLL_NOISE_FLOOR,
-) -> Tuple[Optional[float], Optional[float], int]:
-    """Compute (cond_avg_nll, asst_avg_nll, n_kept) over the SAME A-token positions in both paths.
+def _chr_min_distinct(
+    cond_lp: List, asst_lp: List,
+    cond_ids: List[int], asst_ids: List[int],
+    n_prompt: int,
+) -> Optional[float]:
+    """Compute chr_dist_min_pos: fraction of distinct A-token ids whose
+    per-occurrence min(cond_lp - asst_lp) is strictly positive.
 
-    A position is dropped if either path lacks a logprob, or asst NLL is below `floor`
-    (mechanically forced token, no information). Both paths must average over the same
-    position set so that the IFD ratio remains meaningful.
+    Mirrors ``aligned_pairs_with_token`` + ``distinct_chr`` from
+    ``distinct_token_chr.py`` but operates on raw logprob lists (no JSON I/O).
     """
-    a_n = min(len(asst_lp), len(asst_ids), end)
-    c_n = min(len(cond_lp), len(cond_ids))
-    cond_vals: List[float] = []
-    asst_vals: List[float] = []
-    for i in range(start, a_n):
-        c_idx = n_prompt + i
-        if c_idx >= c_n:
+    if not asst_lp or not cond_lp or not asst_ids:
+        return None
+    n_a = min(len(asst_lp), len(asst_ids))
+    n_c = len(cond_lp)
+    by_tok: Dict[int, List[float]] = {}
+    for i in range(n_a):
+        ci = n_prompt + i
+        if ci >= n_c:
             break
-        a_lp = _extract_logprob(asst_lp[i], asst_ids[i])
-        c_lp = _extract_logprob(cond_lp[c_idx], cond_ids[c_idx])
-        if a_lp is None or c_lp is None:
+        tid = asst_ids[i]
+        if tid is None:
             continue
-        a_nll = -a_lp
-        if a_nll < floor:
+        a = _extract_logprob(asst_lp[i], tid)
+        c_tok = cond_ids[ci] if ci < len(cond_ids) else None
+        c = _extract_logprob(cond_lp[ci], c_tok)
+        if a is None or c is None:
             continue
-        asst_vals.append(a_nll)
-        cond_vals.append(-c_lp)
-    if len(asst_vals) < _MIN_RESPONSE_TOKENS:
-        return None, None, len(asst_vals)
-    return sum(cond_vals) / len(cond_vals), sum(asst_vals) / len(asst_vals), len(asst_vals)
+        by_tok.setdefault(int(tid), []).append(c - a)
+    if not by_tok:
+        return None
+    pos = sum(1 for diffs in by_tok.values() if min(diffs) > 0)
+    return pos / len(by_tok)
+
+
+def _ifd_family_metrics(
+    cond_lp: List, asst_lp: List,
+    cond_ids: List[int], asst_ids: List[int],
+    n_prompt: int,
+) -> Dict[str, Any]:
+    """Compute IFD (Cherry-LLM, NAACL'24) and S-IFD (T-SHIRT, NeurIPS'25) for one round.
+
+    Δt   = log P(yt | Q, y<t) - log P(yt | y<t)            (per-token PMI w.r.t. Q)
+    IFD  = exp(-mean(Δt))                                  ← all positions, equal weight
+    S-IFDk = exp(-mean(Δt over top-k% positions by |Δt|))  ← per-sample top-k% only
+
+    Direction (HIGH = hard, opposite to chr_min):
+        IFD/S-IFD ≫ 1 → Q does not reduce response perplexity → hard / informative.
+        IFD/S-IFD ≪ 1 → Q strongly reduces perplexity         → easy.
+
+    Returns dict with: n_tokens, mean_delta, ifd, s_ifd_50, s_ifd_75. Empty if invalid.
+    """
+    if not asst_lp or not cond_lp or not asst_ids:
+        return {}
+    n_a = min(len(asst_lp), len(asst_ids))
+    n_c = len(cond_lp)
+    deltas: List[float] = []
+    for i in range(n_a):
+        ci = n_prompt + i
+        if ci >= n_c:
+            break
+        tid = asst_ids[i]
+        if tid is None:
+            continue
+        a = _extract_logprob(asst_lp[i], tid)
+        c_tok = cond_ids[ci] if ci < len(cond_ids) else None
+        c = _extract_logprob(cond_lp[ci], c_tok)
+        if a is None or c is None:
+            continue
+        deltas.append(c - a)
+    if not deltas:
+        return {}
+    n = len(deltas)
+    mean_delta = sum(deltas) / n
+    out: Dict[str, Any] = {
+        'n_tokens': n,
+        'mean_delta': mean_delta,
+        'ifd': math.exp(-mean_delta),
+    }
+    abs_sorted = sorted(range(n), key=lambda i: abs(deltas[i]), reverse=True)
+    for k_pct in (50, 75):
+        keep = max(1, int(round(n * k_pct / 100)))
+        sub = [deltas[i] for i in abs_sorted[:keep]]
+        out[f's_ifd_{k_pct}'] = math.exp(-sum(sub) / len(sub))
+    return out
+
+
+_JUDGE_SYSTEM_PROMPT = (
+    '你是一个严格但公平的回答评分员。请基于参考答案 (Ground Truth) 来判断【模型回答】是否合格。\n'
+    '综合考量以下三方面，任一项有重大问题即判 FAIL：\n\n'
+    '1. 计算/事实正确性：最终结论、数值、关键事实陈述与参考答案是否一致；\n'
+    '2. 推理/思路相似度：解题路径、关键步骤、考量维度是否接近参考答案；\n'
+    '   对于开放域问题（无明确正确答案），评估回答的风格、立场、考量维度是否与参考答案对齐；\n'
+    '3. 完整性：回答没有截断、自然收尾，覆盖问题的所有要点。\n\n'
+    '请先用 1-3 句简要说明判断依据，然后在最后一行严格输出：\n'
+    '<verdict>PASS</verdict> 或 <verdict>FAIL</verdict>'
+)
 
 
 class IFDFilter(Preprocessor):
-    """Filter key rounds by Instruction-Following Difficulty (IFD).
+    """Filter key rounds by per-distinct-token CHR (chr_min).
 
     Requires rows pre-annotated by IntentClassifier (user_data.key_rounds).
-    For each key round, computes IFD = L(A|Q) / L(A):
-      - IFD > threshold → hard example → keep
-      - IFD <= threshold → easy example → remove from key_rounds
+    For each key round, computes chr_min = chr_dist_min_pos:
+      - chr_min >= threshold → easy example → drop from key_rounds
+      - chr_min < threshold  → hard example → keep
+      - unscored (failed prepare) → kept conservatively
 
     Rows with all key_rounds removed are discarded entirely.
-    Rows without key_rounds are passed through unchanged.
+    Rows without key_rounds are passed through unchanged (or kept if
+    ``keep_if_no_key_rounds=True``).
+
+    In addition, each round is re-answered ``diagnostic_sample_n`` times
+    (default 4) and each rollout is graded against the GT by an
+    OpenAI-compatible judge. The aggregate pass count (``pass4``) and the
+    per-rollout judgments are written into the dump alongside ``chr_min``.
 
     Tokenization MUST go through ``template.encode`` so the prompt/response
-    boundary matches the exact byte stream the sampler would emit.
-    Backend calls are batched in one shot so distributed samplers can keep
-    every DP worker busy (slice_dp dispatch).
+    boundary matches the exact byte stream the sampler would emit. Backend
+    calls are batched in one shot so distributed samplers can keep every
+    DP worker busy (slice_dp dispatch).
     """
 
     def __init__(
         self,
         backend: LLMBackend = None,
         template: Optional[Template] = None,
-        ifd_threshold: float = _DEFAULT_IFD_THRESHOLD,
+        # NEW: chr_min cutoff (replaces ifd_threshold).
+        chr_min_threshold: float = _DEFAULT_CHR_MIN_THRESHOLD,
+        # DEPRECATED: kept only to surface a warning when old configs pass it.
+        # Semantics are INVERTED relative to chr_min so silent translation is
+        # unsafe; callers must explicitly switch to chr_min_threshold.
+        ifd_threshold: Optional[float] = None,
         keep_if_no_key_rounds: bool = False,
-        head_k: int = 64,
         max_prompt_tokens: int = 1024,
-        # Diagnostic sampling: re-answer rounds whose intent is in this set, attach to dump.
+        # Diagnostic sampling: re-answer rounds and grade via judge.
         diagnostic_sample_intents: Optional[List[str]] = None,
         diagnostic_sample_n: int = 4,
         diagnostic_sample_temperature: float = 0.7,
         diagnostic_sample_max_tokens: int = 4096,
+        # Pass@4 judge (LLM-as-judge, separate from training backend).
+        # Pass either an `API` instance via `judge_api`, or
+        # judge_model + judge_base_url + judge_api_key to auto-build OpenAI().
+        judge_api=None,
+        judge_model: Optional[str] = None,
+        judge_base_url: Optional[str] = None,
+        judge_api_key: Optional[str] = None,
+        judge_client_kwargs: Optional[Dict[str, Any]] = None,
+        judge_temperature: float = 0.0,
+        judge_max_tokens: int = 512,
+        judge_max_rollout_chars: int = 8000,
+        judge_max_workers: int = 8,
+        enable_pass4_judge: bool = True,
         # Paraphrase mode: replace GT with a model paraphrase produced under GT-injected
         # prompt, then score the paraphrase against the original (no-GT) context.
         # Bypasses filtering; rows pass through unchanged.
         # Accepts False (GT only), True (paraphrase only), or 'both' (dump two files).
-        paraphrase_mode="both",
+        paraphrase_mode='both',
         paraphrase_temperature: float = 0.7,
         paraphrase_max_tokens: int = 4096,
         # Restrict paraphrase to rounds whose intent is in this set (e.g. {'math'}).
@@ -136,9 +231,11 @@ class IFDFilter(Preprocessor):
         # Token budget for the augmented (GT-injected) prompt sent to chat_batch.
         # Must be <= max_model_len - paraphrase_max_tokens to avoid vLLM rejection.
         paraphrase_prompt_budget: int = 4096,
-        # Legacy params (used to create OpenAIBackend if backend is None)
+        # Legacy params (used to create OpenAIBackend if backend is None).
         api_endpoint: str = '',
         model: str = 'default',
+        # Silently absorbed; kept so existing configs don't break.
+        head_k: Optional[int] = None,
     ):
         super().__init__()
         if backend is not None:
@@ -149,19 +246,64 @@ class IFDFilter(Preprocessor):
             raise TypeError(
                 f'IFDFilter requires a `Template` instance, got {type(template).__name__}.')
         self._template = template
-        self._ifd_threshold = ifd_threshold
+
+        if ifd_threshold is not None:
+            logger.warning(
+                '[IFDFilter] `ifd_threshold` is deprecated; the scorer now produces '
+                'chr_min where LOW = hard = keep (semantics inverted vs IFD). '
+                f'Ignoring ifd_threshold={ifd_threshold} and using '
+                f'chr_min_threshold={chr_min_threshold}. Update your config.')
+        self._chr_min_threshold = float(chr_min_threshold)
+
         self._keep_if_no_key_rounds = keep_if_no_key_rounds
-        self._head_k = head_k
         self._max_prompt_tokens = max_prompt_tokens
+        if head_k is not None:
+            logger.info(
+                f'[IFDFilter] `head_k={head_k}` is ignored: chr_min iterates ALL '
+                'A-token positions (no head window).')
+
         self._diag_sample_intents = set(diagnostic_sample_intents or [])
         self._diag_sample_n = max(1, int(diagnostic_sample_n))
         self._diag_sample_temperature = float(diagnostic_sample_temperature)
         self._diag_sample_max_tokens = int(diagnostic_sample_max_tokens)
+
+        self._judge_api = self._build_judge_api(
+            judge_api, judge_model, judge_base_url, judge_api_key, judge_client_kwargs)
+        self._judge_temperature = float(judge_temperature)
+        self._judge_max_tokens = int(judge_max_tokens)
+        self._judge_max_rollout_chars = int(judge_max_rollout_chars)
+        self._judge_max_workers = max(1, int(judge_max_workers))
+        self._enable_pass4_judge = bool(enable_pass4_judge) and self._judge_api is not None
+        if enable_pass4_judge and self._judge_api is None:
+            logger.warning(
+                '[IFDFilter] enable_pass4_judge=True but no judge_api/judge_model '
+                'configured; pass@4 grading is DISABLED. Diagnostic rollouts will '
+                'still be sampled and dumped without verdicts.')
+
         self._paraphrase_mode = 'both' if paraphrase_mode == 'both' else bool(paraphrase_mode)
         self._paraphrase_temperature = float(paraphrase_temperature)
         self._paraphrase_max_tokens = int(paraphrase_max_tokens)
         self._paraphrase_intents = set(paraphrase_intents or [])
         self._paraphrase_prompt_budget = int(paraphrase_prompt_budget)
+
+    @staticmethod
+    def _build_judge_api(api, model, base_url, api_key, client_kwargs):
+        """Resolve the pass@4 judge API: explicit instance > auto-built OpenAI > None."""
+        if api is not None:
+            return api
+        if not model:
+            return None
+        try:
+            from twinkle_agentic.protocol.openai import OpenAI as OpenAIAPI
+            return OpenAIAPI(
+                model=model,
+                api_key=api_key,
+                base_url=base_url,
+                client_kwargs=client_kwargs,
+            )
+        except Exception as e:
+            logger.warning(f'[IFDFilter] failed to build pass@4 judge API: {e}')
+            return None
 
     def __call__(self, rows: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
         rows = self.map_col_to_row(rows)
@@ -209,8 +351,8 @@ class IFDFilter(Preprocessor):
             return None
 
         prompt_ids = self._encode_prompt_within_budget(context_messages)
-        # Use raw asst_ids (no chat-template wrapping) so numerator/denominator
-        # average over byte-equal A token sequences; otherwise IFD ratio collapses to ~1.
+        # Use raw asst_ids (no chat-template wrapping) so cond/asst paths share
+        # byte-equal A-token sequences; otherwise chr_min positions desync.
         asst_ids = _to_int_list(self._template.tokenizer(assistant_text, add_special_tokens=False)['input_ids'])
         if len(asst_ids) < _MIN_RESPONSE_TOKENS + 1:
             return None
@@ -332,6 +474,196 @@ class IFDFilter(Preprocessor):
             f'(intents={intents_label}, n={self._diag_sample_n}) '
             f'in {len(intent_groups)} batched call(s)')
         return samples_by_key
+
+    @staticmethod
+    def _extract_text_from_choice(choice: Any) -> str:
+        """Pull the visible answer text out of one rollout dict (Message-shaped)."""
+        if not isinstance(choice, dict):
+            return ''
+        parts: List[str] = []
+        rc = choice.get('reasoning_content')
+        if isinstance(rc, str) and rc.strip():
+            parts.append(f'<thinking>\n{rc.strip()}\n</thinking>')
+        content = choice.get('content')
+        if isinstance(content, str) and content.strip():
+            parts.append(content.strip())
+        if parts:
+            return '\n\n'.join(parts)
+        return content if isinstance(content, str) else ''
+
+    @staticmethod
+    def _gt_text(row: Dict[str, Any], asst_idx: Optional[int]) -> str:
+        """Pull the GT assistant text from the original row."""
+        if not isinstance(row, dict) or asst_idx is None:
+            return ''
+        msgs = row.get('messages') or []
+        if not (isinstance(msgs, list) and 0 <= asst_idx < len(msgs)):
+            return ''
+        msg = msgs[asst_idx]
+        if not isinstance(msg, dict):
+            return ''
+        text = msg.get('content', '')
+        if isinstance(text, list):
+            text = ' '.join(p.get('text', '') for p in text
+                            if isinstance(p, dict) and p.get('type') == 'text')
+        return text if isinstance(text, str) else ''
+
+    @staticmethod
+    def _user_prompt_text(row: Dict[str, Any], asst_idx: Optional[int]) -> str:
+        """Concatenate prior turns into a single string for the judge prompt."""
+        if not isinstance(row, dict) or asst_idx is None:
+            return ''
+        msgs = row.get('messages') or []
+        if not isinstance(msgs, list):
+            return ''
+        parts: List[str] = []
+        for m in msgs[:asst_idx]:
+            if not isinstance(m, dict):
+                continue
+            role = m.get('role') or 'user'
+            content = m.get('content', '')
+            if isinstance(content, list):
+                content = ' '.join(p.get('text', '') for p in content
+                                   if isinstance(p, dict) and p.get('type') == 'text')
+            if isinstance(content, str) and content.strip():
+                parts.append(f'[{role}] {content.strip()}')
+        return '\n\n'.join(parts)
+
+    @staticmethod
+    def _truncate(text: str, max_chars: int) -> str:
+        """Defensive truncation so the judge prompt fits inside its context window."""
+        if not isinstance(text, str) or max_chars <= 0 or len(text) <= max_chars:
+            return text
+        head = max_chars * 2 // 3
+        tail = max_chars - head - 32
+        if tail <= 0:
+            return text[:max_chars]
+        return text[:head] + '\n\n...[truncated]...\n\n' + text[-tail:]
+
+    @staticmethod
+    def _parse_verdict(judge_text: str) -> Optional[bool]:
+        """Return True if PASS, False if FAIL, None if neither marker found."""
+        if not isinstance(judge_text, str):
+            return None
+        compact = ''.join(judge_text.upper().split())
+        has_pass = '<VERDICT>PASS</VERDICT>' in compact
+        has_fail = '<VERDICT>FAIL</VERDICT>' in compact
+        if has_pass and not has_fail:
+            return True
+        if has_fail and not has_pass:
+            return False
+        # Fallback: keyword scan in the tail (last 200 chars, post-compact).
+        tail = compact[-200:]
+        if 'PASS' in tail and 'FAIL' not in tail:
+            return True
+        if 'FAIL' in tail and 'PASS' not in tail:
+            return False
+        return None
+
+    def _judge_one_rollout(
+        self,
+        user_prompt: str,
+        gt_text: str,
+        rollout_text: str,
+    ) -> Tuple[bool, str]:
+        """Single judge call. Returns (passed, raw_judge_text)."""
+        from twinkle.data_format.sampling import SamplingParams
+
+        if not rollout_text or not rollout_text.strip():
+            return False, '(empty rollout)'
+        max_chars = self._judge_max_rollout_chars
+        body = (
+            f'[问题]\n{self._truncate(user_prompt, max_chars)}\n\n'
+            f'[参考答案]\n{self._truncate(gt_text, max_chars)}\n\n'
+            f'[模型回答]\n{self._truncate(rollout_text, max_chars)}\n\n'
+            '请评分。'
+        )
+        trajectory = {
+            'messages': [
+                {'role': 'system', 'content': _JUDGE_SYSTEM_PROMPT},
+                {'role': 'user', 'content': body},
+            ],
+        }
+        sp = SamplingParams(
+            temperature=self._judge_temperature,
+            max_tokens=self._judge_max_tokens,
+            num_samples=1,
+        )
+        try:
+            # extra_body forwards `enable_thinking=False` to vLLM/SGLang OpenAI-compatible
+            # endpoints so the judge skips chain-of-thought (saves latency + tokens).
+            msg = self._judge_api(trajectory, sp, extra_body={'enable_thinking': False})
+        except Exception as e:
+            return False, f'(judge error: {e})'
+        if isinstance(msg, list):
+            msg = msg[0] if msg else {}
+        text = msg.get('content', '') if isinstance(msg, dict) else str(msg)
+        text = text or ''
+        verdict = self._parse_verdict(text)
+        # Conservative default: ambiguous verdict → FAIL (so we don't inflate pass@4).
+        return bool(verdict) if verdict is not None else False, text
+
+    def _judge_pass4(
+        self,
+        rows: List[Dict[str, Any]],
+        prepared: Dict[Tuple[int, int], Tuple[List[int], int, List[int]]],
+        samples_by_key: Dict[Tuple[int, int], List[Dict[str, str]]],
+    ) -> Dict[Tuple[int, int], Tuple[int, List[Dict[str, Any]]]]:
+        """Grade each rollout per round; return {key -> (pass_count, judgments)}."""
+        if not self._enable_pass4_judge or not samples_by_key:
+            return {}
+        from concurrent.futures import ThreadPoolExecutor
+
+        # Build flat work list: (key, rollout_idx, user_prompt, gt_text, rollout_text).
+        work: List[Tuple[Tuple[int, int], int, str, str, str]] = []
+        for key, choices in samples_by_key.items():
+            if not isinstance(choices, list) or not choices:
+                continue
+            ri, rnd_idx = key
+            row = rows[ri] if 0 <= ri < len(rows) else {}
+            user_data = row.get('user_data') if isinstance(row, dict) else None
+            asst_idx = None
+            if isinstance(user_data, dict):
+                kr = user_data.get('key_rounds')
+                if isinstance(kr, list) and 0 <= rnd_idx < len(kr):
+                    asst_idx = kr[rnd_idx]
+            gt_text = self._gt_text(row, asst_idx)
+            user_prompt = self._user_prompt_text(row, asst_idx)
+            for r_i, choice in enumerate(choices):
+                rt = self._extract_text_from_choice(choice)
+                work.append((key, r_i, user_prompt, gt_text, rt))
+
+        if not work:
+            return {}
+
+        def _do(item):
+            key, r_i, up, gt, rt = item
+            passed, raw = self._judge_one_rollout(up, gt, rt)
+            return key, r_i, passed, raw
+
+        with ThreadPoolExecutor(max_workers=self._judge_max_workers) as ex:
+            results = list(ex.map(_do, work))
+
+        bucket: Dict[Tuple[int, int], List[Tuple[int, bool, str]]] = {}
+        for key, r_i, passed, raw in results:
+            bucket.setdefault(key, []).append((r_i, passed, raw))
+
+        out: Dict[Tuple[int, int], Tuple[int, List[Dict[str, Any]]]] = {}
+        for key, lst in bucket.items():
+            lst.sort(key=lambda x: x[0])
+            pass_count = sum(1 for _, p, _ in lst if p)
+            per_rollout = [
+                {'rollout_idx': r_i, 'passed': bool(p), 'judge_raw': raw}
+                for r_i, p, raw in lst
+            ]
+            out[key] = (pass_count, per_rollout)
+
+        if out:
+            avg = sum(p for p, _ in out.values()) / len(out)
+            logger.info(
+                f'[IFDFilter] pass@4 judging: graded {len(out)} rounds × {self._diag_sample_n} '
+                f'rollouts, avg pass@n = {avg:.3f} (judge_temp={self._judge_temperature})')
+        return out
 
     @staticmethod
     def _inject_gt(context_messages: List[Dict[str, Any]], gt_text: str) -> List[Dict[str, Any]]:
@@ -458,9 +790,11 @@ class IFDFilter(Preprocessor):
         paraphrases_by_key: Dict[Tuple[int, int], str],
         dump_prefix: str,
         samples_by_key: Optional[Dict[Tuple[int, int], List[Dict[str, str]]]] = None,
+        pass4_by_key: Optional[Dict[Tuple[int, int], Tuple[int, List[Dict[str, Any]]]]] = None,
     ) -> Dict[Tuple[int, int], float]:
-        """Run Phase 2 (cond/asst logprobs + IFD scoring) and dump records under given prefix."""
+        """Compute chr_min per round and dump records under given prefix."""
         scores: Dict[Tuple[int, int], float] = {}
+        ifd_metrics: Dict[Tuple[int, int], Dict[str, Any]] = {}
         if not prepared:
             return scores
         keys = list(prepared.keys())
@@ -471,36 +805,31 @@ class IFDFilter(Preprocessor):
         asst_padded, asst_n = self._pad_batch(asst_batch, floor)
         cond_logprobs = self._backend.prompt_logprobs_ids(cond_padded)[:cond_n]
         asst_logprobs = self._backend.prompt_logprobs_ids(asst_padded)[:asst_n]
-        head_k = self._head_k
-        head_nlls: Dict[Tuple[int, int], Tuple[float, float, int]] = {}
         for key, cond_lp, asst_lp in zip(keys, cond_logprobs, asst_logprobs):
             cond_ids, n_prompt, asst_ids = prepared[key]
-            # GT starts with `<think>` (skip 2 degenerate head positions); paraphrase usually
-            # does not, so skip 0 to avoid throwing away the first 2 informative tokens.
-            a_start = _HEAD_SKIP if (asst_ids and asst_ids[0] == _THINK_OPEN_ID) else 0
-            a_end = (a_start + head_k) if head_k > 0 else len(asst_ids)
-            l_a_given_q, l_a, n_kept = _aligned_head_nlls(
-                asst_lp, asst_ids, cond_lp, cond_ids, n_prompt, a_start, a_end)
-            if l_a_given_q is None or l_a is None or l_a < 1e-8:
-                continue
-            ifd = l_a_given_q / l_a
-            if math.isfinite(ifd):
-                scores[key] = ifd
-                head_nlls[key] = (l_a_given_q, l_a, n_kept)
+            chr_min = _chr_min_distinct(cond_lp, asst_lp, cond_ids, asst_ids, n_prompt)
+            if chr_min is not None:
+                scores[key] = chr_min
+            fam = _ifd_family_metrics(cond_lp, asst_lp, cond_ids, asst_ids, n_prompt)
+            if fam:
+                ifd_metrics[key] = fam
         self._dump_records(rows, prepared, keys, cond_logprobs, asst_logprobs, scores,
-                           head_nlls, samples_by_key or {}, paraphrases_by_key, dump_prefix)
+                           samples_by_key or {}, paraphrases_by_key,
+                           pass4_by_key or {}, dump_prefix,
+                           ifd_metrics_by_key=ifd_metrics)
         return scores
 
     def _dump_records(self, rows, prepared, keys, cond_logprobs, asst_logprobs, scores,
-                      head_nlls=None, samples_by_key=None, paraphrases_by_key=None,
-                      dump_prefix='ifd_dump'):
-        """TEMP: dump per-round messages + raw logprobs for offline IFD diagnosis."""
+                      samples_by_key=None, paraphrases_by_key=None, pass4_by_key=None,
+                      dump_prefix='chr_min_dump', ifd_metrics_by_key=None):
+        """Dump per-round messages + raw logprobs + chr_min + pass@4 for offline diagnosis."""
         try:
             import json, os, time
             dump_path = f'{dump_prefix}_{os.getpid()}_{int(time.time())}.jsonl'
-            head_nlls = head_nlls or {}
             samples_by_key = samples_by_key or {}
             paraphrases_by_key = paraphrases_by_key or {}
+            pass4_by_key = pass4_by_key or {}
+            ifd_metrics_by_key = ifd_metrics_by_key or {}
             with open(dump_path, 'w') as fh:
                 for key, cond_lp, asst_lp in zip(keys, cond_logprobs, asst_logprobs):
                     ri, rnd_idx = key
@@ -512,9 +841,8 @@ class IFDFilter(Preprocessor):
                         kr = user_data.get('key_rounds')
                         if isinstance(kr, list) and 0 <= rnd_idx < len(kr):
                             asst_idx = kr[rnd_idx]
-                    cond_nll_head, asst_nll_head, n_kept_head = (None, None, None)
-                    if key in head_nlls:
-                        cond_nll_head, asst_nll_head, n_kept_head = head_nlls[key]
+                    p4 = pass4_by_key.get(key)
+                    fam = ifd_metrics_by_key.get(key) or {}
                     fh.write(json.dumps({
                         'key': list(key),
                         'asst_idx': asst_idx,
@@ -525,10 +853,14 @@ class IFDFilter(Preprocessor):
                         'asst_ids': asst_ids_k,
                         'cond_lp': self._lp_to_jsonable(cond_lp),
                         'asst_lp': self._lp_to_jsonable(asst_lp),
-                        'ifd': scores.get(key),
-                        'cond_nll_head': cond_nll_head,
-                        'asst_nll_head': asst_nll_head,
-                        'n_kept_head': n_kept_head,
+                        'chr_min': scores.get(key),
+                        'ifd': fam.get('ifd'),
+                        's_ifd_50': fam.get('s_ifd_50'),
+                        's_ifd_75': fam.get('s_ifd_75'),
+                        'mean_delta': fam.get('mean_delta'),
+                        'n_asst_tokens': fam.get('n_tokens'),
+                        'pass4': (p4[0] if p4 is not None else None),
+                        'pass4_judgments': (p4[1] if p4 is not None else None),
                         'diagnostic_samples': samples_by_key.get(key) or [],
                         'paraphrase': paraphrases_by_key.get(key),
                     }, ensure_ascii=False) + '\n')
@@ -537,7 +869,8 @@ class IFDFilter(Preprocessor):
             logger.warning(f'[IFDFilter] dump failed: {e}')
 
     def ifd_filter(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Score key rounds by IFD, remove easy rounds, discard rows with none left."""
+        """Score key rounds by chr_min, drop easy rounds (chr_min ≥ threshold),
+        discard rows with none left."""
         if not rows:
             return rows
 
@@ -567,6 +900,8 @@ class IFDFilter(Preprocessor):
         # Run ONCE here so both GT and paraphrase dumps share the same samples (avoids
         # double cost and divergent stochastic outputs across the two dump files).
         samples_by_key = self._collect_diagnostic_samples(rows, prepared)
+        # Pass@4 judging is also shared across dumps; run once on the rollouts above.
+        pass4_by_key = self._judge_pass4(rows, prepared, samples_by_key)
 
         paraphrases_by_key: Dict[Tuple[int, int], str] = {}
         prepared_para: Optional[Dict[Tuple[int, int], Tuple[List[int], int, List[int]]]] = None
@@ -575,18 +910,21 @@ class IFDFilter(Preprocessor):
 
         scores: Dict[Tuple[int, int], float] = {}
         if run_gt:
-            scores = self._score_and_dump(rows, prepared, {}, dump_prefix='ifd_dump',
-                                          samples_by_key=samples_by_key)
+            scores = self._score_and_dump(rows, prepared, {},
+                                          dump_prefix='chr_min_dump',
+                                          samples_by_key=samples_by_key,
+                                          pass4_by_key=pass4_by_key)
         if run_para and prepared_para:
             self._score_and_dump(rows, prepared_para, paraphrases_by_key,
-                                 dump_prefix='ifd_paraphrase_dump',
-                                 samples_by_key=samples_by_key)
+                                 dump_prefix='chr_min_paraphrase_dump',
+                                 samples_by_key=samples_by_key,
+                                 pass4_by_key=pass4_by_key)
 
         # Any paraphrase variant is diagnostic-only: skip filter, return rows unchanged.
         if run_para:
             return rows
 
-        # Phase 3: apply scores.
+        # Phase 3: apply scores. chr_min LOW = hard = keep.
         out = []
         n_removed_rounds = 0
         n_removed_rows = 0
@@ -604,9 +942,9 @@ class IFDFilter(Preprocessor):
                 continue
             kept_rounds = []
             for rnd_idx, asst_idx in enumerate(key_rounds):
-                ifd = scores.get((ri, rnd_idx))
+                chr_min = scores.get((ri, rnd_idx))
                 # Unscored rounds (failed prepare) are kept conservatively.
-                if ifd is None or ifd > self._ifd_threshold:
+                if chr_min is None or chr_min < self._chr_min_threshold:
                     kept_rounds.append(asst_idx)
                 else:
                     n_removed_rounds += 1
@@ -618,6 +956,7 @@ class IFDFilter(Preprocessor):
             out.append(row)
 
         logger.info(
-            f'[IFDFilter] removed {n_removed_rounds} easy rounds, '
+            f'[IFDFilter] removed {n_removed_rounds} easy rounds '
+            f'(chr_min ≥ {self._chr_min_threshold}), '
             f'dropped {n_removed_rows} rows, kept {len(out)}/{len(rows)}')
         return out
