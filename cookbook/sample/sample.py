@@ -25,7 +25,7 @@ from twinkle.sampler import vLLMSampler
 
 logger = get_logger()
 
-MODEL_ID = os.environ.get('MODEL_ID', 'Qwen/Qwen3.5-4B')
+MODEL_ID = os.environ.get('MODEL_ID', 'output/condenser_ddp/step_36000')
 LORA_PATH = os.environ.get('LORA_PATH', 'ms://twinkle-kit/Qwen3.5-4B-Condenser')
 SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS', 1))
 
@@ -229,14 +229,164 @@ HTML_PASSAGE = """<!DOCTYPE html>
 
 
 # ──────────────────────────────────────────────────────────────────────
+# 场景 4：复杂异常处理 Python 代码（支付下单处理器）
+# ──────────────────────────────────────────────────────────────────────
+# 故意混入多种异常处理风格：自定义异常树、链式抛出、bare except 反模式、
+# 资源未关闭、重试与回退、上下文管理器、suppress、finally 重写返回值等。
+EXCEPTIONS_QUERY = (
+    '这段支付下单代码的异常处理设计了哪些模式、踩了哪些反模式坑、'
+    '可以总结出哪些最佳实践和教训？')
+EXCEPTIONS_PASSAGE = '''import json
+import logging
+import time
+from contextlib import suppress
+from typing import Optional
+
+import requests
+
+logger = logging.getLogger(__name__)
+
+
+# ---- Domain exception hierarchy ----
+class PaymentError(Exception):
+    """Base for all payment-domain errors."""
+
+
+class TransientPaymentError(PaymentError):
+    """Retryable: timeout, 5xx, network flap."""
+
+
+class PermanentPaymentError(PaymentError):
+    """Non-retryable: 4xx, invalid card, fraud block."""
+
+
+class IdempotencyConflict(PermanentPaymentError):
+    """Idempotency-Key reused with a different request body."""
+
+
+class OrderRepository:
+    def __init__(self, conn):
+        self.conn = conn  # NOTE: caller owns the connection lifetime.
+
+    def begin(self):
+        self.conn.execute('BEGIN')
+
+    def commit(self):
+        self.conn.execute('COMMIT')
+
+    def rollback(self):
+        # Anti-pattern guard: swallow rollback errors to not mask the original.
+        with suppress(Exception):
+            self.conn.execute('ROLLBACK')
+
+    def mark_paid(self, order_id: str, txn_id: str):
+        self.conn.execute(
+            'UPDATE orders SET status=?, txn_id=? WHERE id=?',
+            ('PAID', txn_id, order_id))
+
+
+def _call_gateway(url: str, body: dict, idem_key: str, timeout: float = 3.0):
+    """Single HTTP call. Translates transport errors into the domain hierarchy."""
+    try:
+        resp = requests.post(
+            url, json=body, timeout=timeout,
+            headers={'Idempotency-Key': idem_key})
+    except requests.Timeout as e:
+        raise TransientPaymentError(f'gateway timeout: {url}') from e
+    except requests.ConnectionError as e:
+        raise TransientPaymentError(f'gateway unreachable: {url}') from e
+
+    if 500 <= resp.status_code < 600:
+        raise TransientPaymentError(f'gateway 5xx: {resp.status_code}')
+    if resp.status_code == 409:
+        # Same key, different body — caller bug, never retry.
+        raise IdempotencyConflict(f'idem-key reused: {idem_key}')
+    if 400 <= resp.status_code < 500:
+        raise PermanentPaymentError(
+            f'gateway 4xx: {resp.status_code} body={resp.text[:200]}')
+
+    try:
+        return resp.json()
+    except json.JSONDecodeError as e:
+        # Server claimed 2xx but body is junk; treat as transient — gateway bug.
+        raise TransientPaymentError('gateway returned non-JSON 2xx') from e
+
+
+def charge_with_retry(url: str, body: dict, idem_key: str,
+                      max_attempts: int = 4) -> dict:
+    """Exponential backoff. ONLY retries TransientPaymentError."""
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return _call_gateway(url, body, idem_key)
+        except TransientPaymentError as e:
+            last_exc = e
+            sleep_s = min(2 ** (attempt - 1), 8)
+            logger.warning('charge attempt %d/%d failed: %s; sleep %ss',
+                           attempt, max_attempts, e, sleep_s)
+            time.sleep(sleep_s)
+        # PermanentPaymentError intentionally propagates immediately.
+    assert last_exc is not None  # for type-checker; loop guarantees this.
+    raise TransientPaymentError(
+        f'exhausted {max_attempts} attempts') from last_exc
+
+
+def place_order(repo: OrderRepository, order_id: str, body: dict,
+                gateway_url: str) -> bool:
+    """End-to-end order placement. Returns True on success.
+
+    Lessons embedded in this body:
+    - Idempotency-Key is derived from order_id (NOT a random uuid per attempt)
+      so retries hit the gateway as the same logical request.
+    - Catch broad exceptions ONLY at the outermost trust boundary, never
+      inside the loop.
+    - The bare-except below (legacy debugger pattern) IS A BUG — it suppresses
+      KeyboardInterrupt and SystemExit; left here intentionally to be flagged.
+    """
+    idem_key = f'order:{order_id}'
+    repo.begin()
+    try:
+        receipt = charge_with_retry(gateway_url, body, idem_key)
+        repo.mark_paid(order_id, receipt['txn_id'])
+        repo.commit()
+        return True
+    except IdempotencyConflict:
+        # Loud: indicates a programming error upstream.
+        repo.rollback()
+        logger.exception('idempotency conflict on %s', order_id)
+        raise
+    except PermanentPaymentError as e:
+        # Expected business failure: rollback and surface a typed error.
+        repo.rollback()
+        logger.warning('order %s rejected by gateway: %s', order_id, e)
+        return False
+    except TransientPaymentError as e:
+        # Retries already exhausted; do not swallow.
+        repo.rollback()
+        logger.error('order %s transient failure: %s', order_id, e)
+        raise
+    except:  # noqa: E722  -- ANTI-PATTERN, intentionally left for review.
+        # Catches KeyboardInterrupt / SystemExit / MemoryError too. Bad.
+        repo.rollback()
+        logger.exception('unexpected failure on %s', order_id)
+        return False
+    finally:
+        # Anti-pattern: returning from finally would swallow exceptions; we DO NOT
+        # return here. Only release locks / log timing.
+        logger.debug('place_order(%s) finished', order_id)
+'''
+
+
+# ──────────────────────────────────────────────────────────────────────
 # 组装 prompts
 # ──────────────────────────────────────────────────────────────────────
 def build_prompts() -> List[Dict[str, Any]]:
-    """构造三个场景的 Trajectory dict 列表。"""
+    """构造四个场景的 Trajectory dict 列表。"""
     cases = [
         ('Python 代码', PY_QUERY, PY_PASSAGE),
         ('中文长篇新闻', NEWS_QUERY, NEWS_PASSAGE),
         ('网页 HTML', HTML_QUERY, HTML_PASSAGE),
+        ('Python 异常处理', EXCEPTIONS_QUERY, EXCEPTIONS_PASSAGE),
     ]
     prompts: List[Dict[str, Any]] = []
     for tag, query, passage in cases:
@@ -272,10 +422,10 @@ def main():
         engine_args={
             'gpu_memory_utilization': 0.7,
             'max_model_len': 16384,
-            'enable_lora': True,
+            'enable_lora': False,
             'max_loras': 1,
             'max_lora_rank': 32,
-            'enable_tower_connector_lora': True,
+            # 'enable_tower_connector_lora': True,
         },
         device_mesh=sampler_mesh,
         remote_group='sampler',
@@ -298,7 +448,7 @@ def main():
     responses = sampler.sample(
         [{'messages': p['messages']} for p in prompts],
         sampling_params,
-        adapter_path=LORA_PATH,
+        # adapter_path=LORA_PATH,
     )
 
     # 5. 输出结果

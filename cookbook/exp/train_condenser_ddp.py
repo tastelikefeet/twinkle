@@ -51,7 +51,7 @@ def train():
     twinkle.initialize(mode='ray', nproc_per_node=DP_SIZE, groups=device_groups, global_device_mesh=model_mesh)
 
     dataset = build_dataset()
-    dataloader = DataLoader(dataset=dataset, batch_size=BATCH_SIZE, device_mesh=model_mesh, remote_group='model')
+    dataloader = DataLoader(dataset=dataset, batch_size=BATCH_SIZE, device_mesh=model_mesh, remote_group='model', shuffle=True)
 
     model = TransformersModel(model_id=MODEL_ID, device_mesh=model_mesh, remote_group='model')
 
