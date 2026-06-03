@@ -121,10 +121,15 @@ def _is_simple_query(text: str, min_user_chars: int = 10, min_user_chars_cjk: in
     return bool(_EN_GREETING_RE.match(t) or _EN_SIMPLE_RE.match(t))
 
 
-def _has_thinking(msg: Dict[str, Any]) -> bool:
-    """Return True if an assistant message carries a non-empty thinking chain."""
+_MIN_THINKING_CHARS = 200
+
+
+def _has_thinking(msg: Dict[str, Any], min_chars: int = _MIN_THINKING_CHARS) -> bool:
+    """Return True if an assistant message carries a sufficiently long thinking chain."""
     thinking = msg.get('thinking') or msg.get('reasoning_content') or ''
-    return bool(thinking.strip()) if isinstance(thinking, str) else bool(thinking)
+    if isinstance(thinking, str):
+        return len(thinking.strip()) >= min_chars
+    return bool(thinking)
 
 
 # ── Preprocessor ─────────────────────────────────────────────────────────────
@@ -168,11 +173,12 @@ class HardFilter(Preprocessor):
                     out.append(row)
                 continue
 
-            # Rule 1: single-turn trivial query
+            # Rule 1: single-turn trivial query (skip if assistant has thinking)
             if len(user_msgs) == 1:
                 user_text = (user_msgs[0].get('content') or '').strip()
                 if _is_simple_query(user_text, self._min_user_chars, self._min_user_chars_cjk):
-                    continue
+                    if not asst_msgs or not _has_thinking(asst_msgs[0], _MIN_THINKING_CHARS):
+                        continue
 
             # Rule 2: two-turn shallow reply without thinking
             if len(user_msgs) == 1 and len(asst_msgs) == 1:

@@ -414,16 +414,44 @@ def get_dataset(total: Optional[int] = None, dropped_log: Optional[str] = None,
     If ``total`` is given, every per-source row count in ``_BASE_SIZES`` is
     scaled proportionally so the input-row sum approximates ``total``.
     """
-    from twinkle_agentic.preprocessor import QualityPreprocessor
+    from twinkle_agentic.preprocessor import (
+        AlphanumericFilter,
+        CharRepeatFilter,
+        DeadLoopFilter,
+        FixUnicodeFilter,
+        FlaggedWordsFilter,
+        HardFilter,
+        IntentClassifier,
+        MessageSanityFilter,
+        QualityPreprocessor,
+        RefuseFilter,
+        RemoveRepeatSentencesFilter,
+        TokenNumFilter,
+        TokenSoupFilter,
+        WordRepeatFilter,
+    )
 
     dataset = _build_dataset(total=total, load_from_cache_file=load_from_cache_file)
     dataset.map(ToMessagesProcessor(), remove_columns=['query', 'cot', 'response'],
                 load_from_cache_file=load_from_cache_file)
-    qp_kwargs: Dict[str, Any] = {'special_chars_max_ratio': 0.4, 'token_num_max': 32768}
-    if dropped_log:
-        qp_kwargs['dropped_log_path'] = dropped_log
-    dataset.map(QualityPreprocessor(**qp_kwargs), num_proc=16,
-                load_from_cache_file=load_from_cache_file)
+    qp = QualityPreprocessor(
+        pipeline=[
+            HardFilter(),
+            RefuseFilter(),
+            DeadLoopFilter(),
+            TokenSoupFilter(),
+            MessageSanityFilter(min_turns=1, max_msg_chars=200000),
+            FixUnicodeFilter(),
+            RemoveRepeatSentencesFilter(),
+            WordRepeatFilter(),
+            CharRepeatFilter(),
+            AlphanumericFilter(),
+            FlaggedWordsFilter(),
+            TokenNumFilter(max_num=32768),
+        ],
+        dropped_log_path=dropped_log or '',
+    )
+    dataset.map(qp, num_proc=16, load_from_cache_file=load_from_cache_file)
     return dataset
 
 

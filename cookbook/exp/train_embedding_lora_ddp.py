@@ -248,7 +248,7 @@ class EmbeddingProcessor(InputProcessor):
 
 # ------------------------------------------------------------------- Builders
 def build_dataset():
-    dataset = get_dataset(total=TOTAL_SAMPLES, load_from_cache_file=True)
+    dataset = get_dataset(total=TOTAL_SAMPLES, load_from_cache_file=True, dropped_log='output/emb')
     dataset.map(FlattenForEmbeddingProcessor(), remove_columns=['messages'],
                 num_proc=16, load_from_cache_file=True)
     return dataset

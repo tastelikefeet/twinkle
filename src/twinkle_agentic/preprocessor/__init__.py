@@ -53,6 +53,8 @@ class QualityPreprocessor(Preprocessor):
         super().__init__()
         self._pipelines = list(pipeline)
         self._dropped_log_path = dropped_log_path
+        if dropped_log_path:
+            os.makedirs(os.path.dirname(os.path.abspath(dropped_log_path)), exist_ok=True)
         self._lock: Optional[PosixFileLock] = (
             PosixFileLock(dropped_log_path + '.lock') if dropped_log_path else None)
         if dropped_log_path and os.path.exists(dropped_log_path):
@@ -68,7 +70,7 @@ class QualityPreprocessor(Preprocessor):
             prev = rows_list
             rows_list = self.map_col_to_row(step(rows_list))
             after = len(rows_list)
-            logger.info(f'[QualityPreprocessor] {step_name}: {before} -> {after} (dropped {before - after})')
+            logger.debug(f'[QualityPreprocessor] {step_name}: {before} -> {after} (dropped {before - after})')
             self._log_dropped(step_name, prev, rows_list)
         return self.map_row_to_col(rows_list)
 
@@ -76,8 +78,17 @@ class QualityPreprocessor(Preprocessor):
                      kept: List[Dict[str, Any]]) -> None:
         if not self._lock or len(kept) == len(prev):
             return
-        kept_ids = {id(r) for r in kept}
-        dropped = [r for r in prev if id(r) not in kept_ids]
+        # Use row 'id' field for matching; fall back to object id
+        kept_keys = set()
+        for r in kept:
+            rid = r.get('id')
+            kept_keys.add(rid if rid is not None else id(r))
+        dropped = []
+        for r in prev:
+            rid = r.get('id')
+            key = rid if rid is not None else id(r)
+            if key not in kept_keys:
+                dropped.append(r)
         if not dropped:
             return
         with self._lock:
