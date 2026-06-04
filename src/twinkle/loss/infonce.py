@@ -66,7 +66,6 @@ def _parse_multi_negative_sentences(sentences: torch.Tensor,
     if isinstance(split_indices, int):
         split_indices = [split_indices]
     split_indices.append(len(labels))
-    split_indices = np.array(split_indices) + np.array(list(range(len(split_indices))))
     split_tensors = []
     for i in range(len(split_indices) - 1):
         start, end = split_indices[i], split_indices[i + 1]

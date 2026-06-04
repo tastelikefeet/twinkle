@@ -31,6 +31,7 @@ from twinkle.dataloader import DataLoader
 from twinkle.loss import InfonceLoss
 from twinkle.processor import InputProcessor
 from twinkle.sampler import vLLMSampler
+from twinkle.template import Template
 
 # allow importing the sibling dataset_think module without packaging
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -59,7 +60,7 @@ ADAPTER_NAME = 'default'
 BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 8))
 LEARNING_RATE = 1e-4
 GRADIENT_ACCUMULATION_STEPS = 1
-LOG_INTERVAL = 20
+LOG_INTERVAL = 2
 SAVE_INTERVAL = 4000
 NUM_EPOCHS = 1
 
@@ -216,15 +217,21 @@ def _build_compress_prompts(rows: List[Dict[str, Any]]) -> tuple:
     return prompts, valid_indices
 
 
-def _get_first_feature(response) -> Optional[Dict[str, Any]]:
-    """Extract new_input_feature from first sampled sequence (only embedding-relevant keys)."""
+def _get_first_feature(response, template: Template, role: str) -> Optional[Dict[str, Any]]:
+    """Encode decoded text from first sampled sequence via template."""
     seqs = getattr(response, 'sequences', None) or []
     if not seqs:
         return None
-    feat = getattr(seqs[0], 'new_input_feature', None)
-    if feat is None:
+    text = getattr(seqs[0], 'decoded', None)
+    if not text:
         return None
-    return {k: feat[k] for k in ('input_ids', 'attention_mask') if k in feat}
+    if role == 'anchor':
+        feat = template.encode({'messages': [{'role': 'user', 'content': text}, {'role': 'assistant', 'content': 'Match the correct response here.'}]})
+        feat['labels'] = [1]
+    else:
+        feat = template.encode({'messages': [{'role': 'user', 'content': 'Match the correct query here.'}, {'role': 'assistant', 'content': text}]})
+        feat['labels'] = [0]
+    return feat
 
 
 def train():
@@ -263,6 +270,7 @@ def train():
     setup_optimizer(model, total_steps)
 
     # -------- Frozen CM-v2 sampler (online compressor) -----------------------
+    emb_template = Template(model_id=MODEL_ID, max_length=EMB_MAX_LENGTH, enable_thinking=False)
     sampler = vLLMSampler(
         model_id=MODEL_ID,
         engine_args={
@@ -298,12 +306,8 @@ def train():
             # De-interleave: [q0, c0, q1, c1, ...] → pairs
             emb_features: List[Dict[str, Any]] = []
             for i in range(0, len(responses), 2):
-                feat_q = _get_first_feature(responses[i])
-                feat_c = _get_first_feature(responses[i + 1]) if i + 1 < len(responses) else None
-                if not feat_q or not feat_c:
-                    continue
-                feat_q['labels'] = [1]
-                feat_c['labels'] = [0]
+                feat_q = _get_first_feature(responses[i], emb_template, role='anchor')
+                feat_c = _get_first_feature(responses[i + 1], emb_template, role='positive')
                 emb_features.append(feat_q)
                 emb_features.append(feat_c)
 
@@ -320,8 +324,7 @@ def train():
             if cur_step % LOG_INTERVAL == 0:
                 metric = model.calculate_metric(is_training=True)
                 logger.info(
-                    f'Epoch {epoch} Step {cur_step}/{total_steps}, '
-                    f'kept={len(emb_rows)}/{len(raw_batch)}, metric: {metric}')
+                    f'Epoch {epoch} Step {cur_step}/{total_steps}, metric: {metric}')
             if cur_step % SAVE_INTERVAL == 0:
                 save_checkpoint(model, f'step_{cur_step}')
 

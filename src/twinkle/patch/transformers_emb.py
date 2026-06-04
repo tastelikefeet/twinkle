@@ -15,8 +15,8 @@ stays SP/CP/packed-agnostic and the dispatch sits in one place.
 
 Both mutations are reverted by ``unpatch``.
 """
-from types import MethodType, TYPE_CHECKING
-from typing import Optional
+from types import MethodType
+from typing import TYPE_CHECKING, Optional
 from twinkle.patch import Patch
 if TYPE_CHECKING:
     import torch
@@ -52,7 +52,8 @@ def _identity_forward(self, hidden_states):
 class TransformersEmbeddingPatch(Patch):
     """Convert a causal LM into a sentence-embedding feature extractor. Reversible via ``unpatch``."""
 
-    def __call__(self, module: torch.nn.Module, *args, **kwargs):
+    def __call__(self, module, *args, **kwargs):
+        import torch
         lm_head_model = get_lm_head_model(module, lm_heads=_LM_HEADS)
 
         head: Optional[torch.nn.Module] = None
@@ -69,7 +70,7 @@ class TransformersEmbeddingPatch(Patch):
         self._hook_handle = lm_head_model.register_forward_hook(_output_features_hook, with_kwargs=True)
         return module
 
-    def unpatch(self, module: torch.nn.Module, *args, **kwargs):
+    def unpatch(self, module, *args, **kwargs):
         handle = getattr(self, '_hook_handle', None)
         if handle is not None:
             handle.remove()
