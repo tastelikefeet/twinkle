@@ -99,18 +99,18 @@ FAILURE_LOG = os.environ.get('FAILURE_LOG', f'./output/embedding_lora_{BACKEND}/
 
 
 # =============================================================================
-# Prompts (from make_condenser_dataset.py — "## Read inline" format)
+# Prompts (from make_condenser_dataset.py — "## Summary" format)
 # =============================================================================
 
 COMPRESS_SYSTEM = """\
 You are a compression assistant. For the (query, source) pair, emit a Markdown \
 answer with TWO sections, designed to pair with the `extract_compressed` tool: \
-the reader absorbs `## Read inline` directly, then calls `extract_compressed` \
-on any topic-key listed under `## Call extract_compressed for` to recover its \
+the reader absorbs `## Summary` directly, then calls `extract_compressed` \
+on any topic-key listed under `## More` to recover its \
 fuller content.
 
-  `## Read inline`               — extreme-density text the reader reads directly.
-  `## Call extract_compressed for` — a topic index whose keys are valid arguments \
+  `## Summary`               — extreme-density text the reader reads directly.
+  `## More` — a topic index whose keys are valid arguments \
 to `extract_compressed` for recovering material not captured inline.
 
 Together the two sections must form a COMPLETE, NON-DISTORTING inventory of the \
@@ -120,11 +120,11 @@ whole output.
 
 Output skeleton:
 
-## Read inline
+## Summary
 Topic: <what the source is about + scope, one line>
 <dense body answering the query>
 
-## Call extract_compressed for
+## More
 - <topic-key>: <one-line hint of what is revealed when expanded>
 - ...
 
@@ -138,13 +138,13 @@ steps `1.do X 2.then Y`; close with `Output: <result>` when relevant
 - Procedural → numbered short steps
 - Analytical / design → hierarchical bullets with abbreviations
 
-`## Read inline` rules:
+`## Summary` rules:
 1. TOPIC LINE — line 1 is ALWAYS `Topic: <subject — scope>`, even when the \
 query is narrow. Anchors both the reader and the tool.
 2. DENSITY — every token in the body carries query-relevant signal; cut filler.
 3. PRIMARY-COMPLETE — never silently drop a fact essential to answering the \
 query. Anything cut for length MUST appear as a key under \
-`## Call extract_compressed for`.
+`## More`.
 4. NON-MISLEADING — phrasing must not let the reader infer anything the source \
 does not support; partial truths that mislead are worse than honest omissions \
 flagged in the index.
@@ -153,7 +153,7 @@ flagged in the index.
 7. LANGUAGE — match the source language.
 8. NO outer code fences around the whole answer; no meta-commentary.
 
-`## Call extract_compressed for` rules (MANDATORY — this section is never omitted):
+`## More` rules (MANDATORY — this section is never omitted):
 1. FORMAT — each bullet is `- <topic-key>: <one-line hint>`:
    • topic-key — short, unambiguous, grounded in source vocabulary so the \
 `extract_compressed` tool can locate the aspect (e.g. `decorators`, \
@@ -177,25 +177,25 @@ COMPRESS_USER = "## Query\n{query}\n\n## Source\n{text}"
 COMPRESS_SYSTEM_TRAIN = """\
 You are a compression assistant. For the (query, source) pair, emit a Markdown \
 answer with TWO sections, designed to pair with the `extract_compressed` tool: \
-the reader absorbs `## Read inline` directly, then calls `extract_compressed` \
-on any topic-key listed under `## Call extract_compressed for` to recover its \
+the reader absorbs `## Summary` directly, then calls `extract_compressed` \
+on any topic-key listed under `## More` to recover its \
 fuller content.
 
 Output skeleton:
 
-## Read inline
+## Summary
 Topic: <subject — scope, one line>
 <dense body answering the query>
 
-## Call extract_compressed for
+## More
 - <topic-key>: <one-line hint of what is revealed when expanded>
 - ...
 
 Rules:
-1. Line 1 of `## Read inline` is ALWAYS `Topic: ...`.
+1. Line 1 of `## Summary` is ALWAYS `Topic: ...`.
 2. Body is maximally dense; every token carries query-relevant signal.
 3. Never silently drop a fact — anything cut for length MUST appear as a key \
-under `## Call extract_compressed for` (do not duplicate inline material here).
+under `## More` (do not duplicate inline material here).
 4. No fabrication, no extrapolation, no misleading partial truths.
 5. Match the source language. No outer code fences, no meta-commentary.\
 """
@@ -310,11 +310,13 @@ def save_checkpoint(model, name: str):
 # =============================================================================
 
 EMBED_QUERY_Q = (
-    'What problem does this passage need to solve, and what kind of skill or '
-    'method is required? Compress into a retrieval-friendly need description.')
+    'What problem does this passage address, and what skill or method is needed? '
+    'Topic must name the specific pattern, never generic labels. '
+    'Compress into a retrieval-friendly need description.')
 EMBED_QUERY_COT = (
-    'Extract the reusable skill: trigger conditions, key steps, and expected '
-    'output. Compress into a standardized procedure for retrieval.')
+    'Extract the reusable skill: trigger conditions, key steps, and expected output. '
+    'Topic names the method/pattern; format as "Use when: ...", numbered steps, '
+    '"Output: ...". Compress into a standardized procedure for retrieval.')
 
 
 def _extract_query_cot(row: Dict[str, Any]):
@@ -562,6 +564,7 @@ def train():
 
     # -------- Condenser sampler (2 GPU, vLLM) --------------------------------
     emb_template = Template(model_id=MODEL_ID, max_length=EMB_MAX_LENGTH, enable_thinking=False)
+    _special_tokens = set(emb_template.processor.all_special_tokens)
     condenser_sampler = vLLMSampler(
         model_id=MODEL_ID,
         engine_args={
@@ -636,7 +639,11 @@ def train():
         for ri, resp in enumerate(responses):
             seq = resp.sequences[0] if resp.sequences else None
             if seq and seq.stop_reason != 'length' and seq.decoded:
-                decoded_texts.append(seq.decoded)
+                text = seq.decoded
+                for tok in _special_tokens:
+                    if text.endswith(tok):
+                        text = text[:-len(tok)]
+                decoded_texts.append(text.rstrip())
             else:
                 # Truncated or empty — fall back to API
                 api_result = _api_compress(api_client, compress_prompts[ri])

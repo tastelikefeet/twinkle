@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 import os
+import random
 import re
 import sys
 import threading
@@ -59,12 +60,12 @@ QUERY_GEN_USER = "Analyze the following text and return a JSON array of queries.
 COMPRESS_SYSTEM = """\
 You are a compression assistant. For the (query, source) pair, emit a Markdown \
 answer with TWO sections, designed to pair with the `extract_compressed` tool: \
-the reader absorbs `## Read inline` directly, then calls `extract_compressed` \
-on any topic-key listed under `## Call extract_compressed for` to recover its \
+the reader absorbs `## Summary` directly, then calls `extract_compressed` \
+on any topic-key listed under `## More` to recover its \
 fuller content.
 
-  `## Read inline`               — extreme-density text the reader reads directly.
-  `## Call extract_compressed for` — a topic index whose keys are valid arguments \
+  `## Summary`               — extreme-density text the reader reads directly.
+  `## More` — a topic index whose keys are valid arguments \
 to `extract_compressed` for recovering material not captured inline.
 
 Together the two sections must form a COMPLETE, NON-DISTORTING inventory of the \
@@ -74,11 +75,11 @@ whole output.
 
 Output skeleton:
 
-## Read inline
+## Summary
 Topic: <what the source is about + scope, one line>
 <dense body answering the query>
 
-## Call extract_compressed for
+## More
 - <topic-key>: <one-line hint of what is revealed when expanded>
 - ...
 
@@ -92,13 +93,13 @@ steps `1.do X 2.then Y`; close with `Output: <result>` when relevant
 - Procedural → numbered short steps
 - Analytical / design → hierarchical bullets with abbreviations
 
-`## Read inline` rules:
+`## Summary` rules:
 1. TOPIC LINE — line 1 is ALWAYS `Topic: <subject — scope>`, even when the \
 query is narrow. Anchors both the reader and the tool.
 2. DENSITY — every token in the body carries query-relevant signal; cut filler.
 3. PRIMARY-COMPLETE — never silently drop a fact essential to answering the \
 query. Anything cut for length MUST appear as a key under \
-`## Call extract_compressed for`.
+`## More`.
 4. NON-MISLEADING — phrasing must not let the reader infer anything the source \
 does not support; partial truths that mislead are worse than honest omissions \
 flagged in the index.
@@ -107,7 +108,7 @@ flagged in the index.
 7. LANGUAGE — match the source language.
 8. NO outer code fences around the whole answer; no meta-commentary.
 
-`## Call extract_compressed for` rules (MANDATORY — this section is never omitted):
+`## More` rules (MANDATORY — this section is never omitted):
 1. FORMAT — each bullet is `- <topic-key>: <one-line hint>`:
    • topic-key — short, unambiguous, grounded in source vocabulary so the \
 `extract_compressed` tool can locate the aspect (e.g. `decorators`, \
@@ -128,20 +129,20 @@ Examples:
 Query: List all public method signatures with parameter and return types
 Source: (a Python HTTP client class with retry decorator, structured logging, \
 and request helpers)
-## Read inline
+## Summary
 Topic: Python HTTP client class — public surface of retried request helpers.
 retry_request(url:str, max_retries:int=3, timeout:float=10.0) -> Response
 fetch_json(endpoint:str, params:dict|None=None) -> dict
 post_data(endpoint:str, payload:dict, headers:dict|None=None) -> Response
 
-## Call extract_compressed for
+## More
 - decorators: @retry config — exponential backoff (base=2.0, max=60s)
 - logging: structured per-request logs with request_id and latency_ms
 - private helpers: _build_headers, _parse_error — not in public surface
 ───
 Query: What can this passage help you accomplish, and how to use it?
 Source: (a tutorial on configuring Linux cgroups v2 caps for a systemd service)
-## Read inline
+## Summary
 Topic: Linux cgroups v2 — per-service CPU / memory caps via systemd slice units.
 Use when: needing per-service CPU/memory caps on systemd hosts.
 1.create slice unit /etc/systemd/system/<name>.slice with CPUQuota=, MemoryMax=
@@ -150,7 +151,7 @@ Use when: needing per-service CPU/memory caps on systemd hosts.
 4.verify: systemctl status <svc> shows Tasks/CPU/Memory inside slice
 Output: hard caps enforced by kernel cgroup v2.
 
-## Call extract_compressed for
+## More
 - pitfalls: cgroup v1/v2 mode detection, MemorySwapMax behavior on OOM
 - delegation: Delegate=yes for nested controllers in container managers
 - examples: nginx and postgres slice templates with concrete numeric caps
@@ -158,13 +159,13 @@ Output: hard caps enforced by kernel cgroup v2.
 ───
 Query: 总结这段代码的错误和改进经验
 Source: (一段有 race condition 和未关闭资源的 Go 代码)
-## Read inline
+## Summary
 Topic: Go HTTP fetch 循环 — 并发写共享 map + 未关闭响应体导致的稳定性缺陷。
 1.race: 并发写 map 未锁 → sync.RWMutex 或 sync.Map
 2.泄漏: resp.Body 未 Close → 请求后立即 defer resp.Body.Close()
 3.吞错: err 未检查 → 每处 err!=nil 必处理或上抛
 
-## Call extract_compressed for
+## More
 - (none)
 
 Now begin.\
@@ -177,28 +178,40 @@ COMPRESS_USER = "## Query\n{query}\n\n## Source\n{text}"
 COMPRESS_SYSTEM_TRAIN = """\
 You are a compression assistant. For the (query, source) pair, emit a Markdown \
 answer with TWO sections, designed to pair with the `extract_compressed` tool: \
-the reader absorbs `## Read inline` directly, then calls `extract_compressed` \
-on any topic-key listed under `## Call extract_compressed for` to recover its \
+the reader absorbs `## Summary` directly, then calls `extract_compressed` \
+on any topic-key listed under `## More` to recover its \
 fuller content.
 
 Output skeleton:
 
-## Read inline
+## Summary
 Topic: <subject — scope, one line>
 <dense body answering the query>
 
-## Call extract_compressed for
+## More
 - <topic-key>: <one-line hint of what is revealed when expanded>
 - ...
 
 Rules:
-1. Line 1 of `## Read inline` is ALWAYS `Topic: ...`.
+1. Line 1 of `## Summary` is ALWAYS `Topic: ...`.
 2. Body is maximally dense; every token carries query-relevant signal.
 3. Never silently drop a fact — anything cut for length MUST appear as a key \
-under `## Call extract_compressed for` (do not duplicate inline material here).
+under `## More` (do not duplicate inline material here).
 4. No fabrication, no extrapolation, no misleading partial truths.
 5. Match the source language. No outer code fences, no meta-commentary.\
 """
+
+# Fixed queries — used directly (no Phase-1 LLM generation) for a proportion of items.
+FIXED_QUERY_NEED = (
+    'What problem does this passage address, and what skill or method is needed? '
+    'Topic must name the specific pattern, never generic labels. '
+    'Compress into a retrieval-friendly need description.')
+FIXED_QUERY_SKILL = (
+    'Extract the reusable skill: trigger conditions, key steps, and expected output. '
+    'Topic names the method/pattern; format as "Use when: ...", numbered steps, '
+    '"Output: ...". Compress into a standardized procedure for retrieval.')
+FIXED_QUERIES = [FIXED_QUERY_NEED, FIXED_QUERY_SKILL]
+FIXED_QUERY_RATIO = 0.3
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -280,8 +293,8 @@ def compress_for_query(api: OpenAI, text: str, query: str,
         m = re.match(r'^```[a-zA-Z]*\n(.*?)\n```\s*$', content, re.DOTALL)
         if m:
             content = m.group(1).strip()
-        if not (re.search(r'(?im)^##\s*Read\s+inline\b', content)
-                and re.search(r'(?im)^##\s*Call\s+extract_compressed\s+for\b', content)):
+        if not (re.search(r'(?im)^##\s*Summary\b', content)
+                and re.search(r'(?im)^##\s*More\b', content)):
             if attempt == 0:
                 sys.stderr.write('[compress] retry: missing required sections\n')
             continue
@@ -299,39 +312,87 @@ def process_item(
     item: Dict[str, Any],
     done_sample_ids: Optional[Set[str]] = None,
     thinking_budget: int = 1024,
+    fixed_query_ratio: float = FIXED_QUERY_RATIO,
 ) -> List[Dict[str, Any]]:
     """Run both phases on one dataset item. Returns list of SFT samples.
 
-    Input rows come from ``dataset.py``: each row carries a SINGLE assistant
-    message holding the passage to compress. ``done_sample_ids`` (full sample
-    ids already on disk for this item) lets resume skip queries that were
-    already emitted, keyed by query content hash so a phase-1 reorder still
-    resolves correctly.
+    Input rows come from ``dataset.py`` (single assistant message) or
+    ``dataset_think.py`` (user query + assistant with reasoning_content).
+    For thinking-data rows, ``FIXED_QUERY_NEED`` is applied to the query
+    and ``FIXED_QUERY_SKILL`` to the CoT, skipping Phase-1 generation.
+
+    ``done_sample_ids`` (full sample ids already on disk for this item)
+    lets resume skip queries that were already emitted, keyed by query
+    content hash so a phase-1 reorder still resolves correctly.
     """
     done = done_sample_ids or set()
     messages = item.get('messages') or []
-    text = ''
+
+    # Detect thinking-data: user message + assistant with reasoning_content
+    user_query = ''
+    cot_text = ''
+    assistant_text = ''
     for m in messages:
         if not isinstance(m, dict):
             continue
-        if m.get('role') != 'assistant':
-            continue
-        content = m.get('content')
-        if isinstance(content, str) and content.strip():
-            text = content.strip()
+        role = m.get('role', '')
+        if role == 'user' and not user_query:
+            user_query = (m.get('content') or '').strip()
+        elif role == 'assistant':
+            cot_text = (m.get('reasoning_content') or '').strip()
+            assistant_text = (m.get('content') or '').strip()
             break
-    if not text or len(text) < 100:
-        return []
 
     item_id = item.get('id')
     if not item_id:
         return []
     source = item.get('source', 'unknown')
 
+    # Thinking-data path: compress query and CoT separately with fixed queries
+    if user_query and cot_text:
+        pairs = [(user_query, FIXED_QUERY_NEED), (cot_text, FIXED_QUERY_SKILL)]
+        samples: List[Dict[str, Any]] = []
+        for text, query in pairs:
+            if len(text) < 100:
+                continue
+            sample_id = f'{item_id}__{_query_hash(query)}'
+            if sample_id in done:
+                continue
+            compressed = compress_for_query(api, text, query, thinking_budget=thinking_budget)
+            if not compressed:
+                continue
+            sft_messages = [
+                {'role': 'system', 'content': COMPRESS_SYSTEM_TRAIN},
+                {'role': 'user', 'content': COMPRESS_USER.format(query=query, text=text)},
+                {'role': 'assistant', 'content': compressed},
+            ]
+            samples.append({
+                'id': sample_id,
+                'source': source,
+                'query': query,
+                'original_len': len(text),
+                'compressed_len': len(compressed),
+                'original_tokens': 0,
+                'compressed_tokens': 0,
+                'messages': sft_messages,
+                '__src': text,
+                '__cmp': compressed,
+            })
+        return samples
+
+    # Plain-data path: single assistant message
+    text = assistant_text
+    if not text or len(text) < 100:
+        return []
+
     queries = generate_queries(api, text)
     if not queries:
         return []
     queries = queries[:2]
+
+    # Mix in fixed queries for a proportion of items
+    if random.random() < fixed_query_ratio:
+        queries = list(FIXED_QUERIES)
 
     samples: List[Dict[str, Any]] = []
     for query in queries:
@@ -390,6 +451,16 @@ def iter_dataset_py(total: Optional[int], load_from_cache_file: bool) -> Iterato
         yield row
 
 
+def iter_dataset_think_py(total: Optional[int], load_from_cache_file: bool) -> Iterator[Dict[str, Any]]:
+    """Stream rows from ``dataset_think.py::get_dataset`` (query + CoT data)."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from dataset_think import get_dataset
+    hf = get_dataset(total=total, load_from_cache_file=load_from_cache_file)
+    sys.stderr.write(f'Loaded dataset_think.py::get_dataset: {len(hf)} rows\n')
+    for row in hf:
+        yield row
+
+
 def load_done_sample_ids(path: str) -> Set[str]:
     """Collect already-written full sample ids (``base__hash``) for resume."""
     if not os.path.exists(path):
@@ -436,6 +507,10 @@ def main() -> None:
                         help='HF/ModelScope tokenizer id for sparse token-ratio probe')
     parser.add_argument('--tokenize-every', type=int, default=1000,
                         help='Tokenize one sample every N writes; others get tokens=0')
+    parser.add_argument('--fixed-query-ratio', type=float, default=FIXED_QUERY_RATIO,
+                        help='Proportion of plain-data items using fixed queries instead of LLM-generated ones')
+    parser.add_argument('--source', choices=['think', 'plain', 'both'], default='think',
+                        help='Data source: think=dataset_think.py (query+CoT), plain=dataset.py, both=chain both')
     args = parser.parse_args()
 
     out_dir = os.path.dirname(args.output)
@@ -462,10 +537,19 @@ def main() -> None:
         if args.input:
             source_iter = iter_input(args.input)
         else:
-            source_iter = iter_dataset_py(
-                total=args.total or None,
-                load_from_cache_file=not args.no_cache,
-            )
+            import itertools
+            sources = []
+            if args.source in ('plain', 'both'):
+                sources.append(iter_dataset_py(
+                    total=args.total or None,
+                    load_from_cache_file=not args.no_cache,
+                ))
+            if args.source in ('think', 'both'):
+                sources.append(iter_dataset_think_py(
+                    total=args.total or None,
+                    load_from_cache_file=not args.no_cache,
+                ))
+            source_iter = itertools.chain(*sources)
         emitted = 0
         for it in source_iter:
             iid = it.get('id')
@@ -502,7 +586,7 @@ def main() -> None:
                     iid = it['id']
                     fut = ex.submit(
                         process_item, api, it, done_per_item.get(iid),
-                        args.thinking_budget,
+                        args.thinking_budget, args.fixed_query_ratio,
                     )
                     in_flight[fut] = iid
                 if not in_flight:
