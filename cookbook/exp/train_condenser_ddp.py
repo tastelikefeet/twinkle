@@ -75,8 +75,7 @@ def train():
 
     model = TransformersModel(model_id=MODEL_ID, device_mesh=model_mesh, remote_group='model')
 
-    model.set_optimizer(
-        optimizer_cls='AdamW', lr=LEARNING_RATE, gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS)
+    model.set_optimizer(optimizer_cls='AdamW', lr=LEARNING_RATE)
     total_optim_steps = (len(dataloader) * NUM_EPOCHS) // GRADIENT_ACCUMULATION_STEPS
     model.set_lr_scheduler(
         scheduler_cls='CosineWarmupScheduler', num_warmup_steps=50, num_training_steps=total_optim_steps)
@@ -87,7 +86,7 @@ def train():
 
     for i in range(NUM_EPOCHS):
         for cur_step, batch in enumerate(dataloader):
-            model.forward_backward(inputs=batch, gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS)
+            model.forward_backward(inputs=batch)
             model.clip_grad_and_step(gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS)
             if cur_step % LOG_INTERVAL == 0:
                 metric = model.calculate_metric(is_training=True)

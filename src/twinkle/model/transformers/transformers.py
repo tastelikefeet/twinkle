@@ -123,6 +123,8 @@ class OptimizerGroup(BaseOptimizerGroup):
         self._ensure_dp_group()
         status = self.train_status if is_training else self.eval_status
         if len(status.metrics) > 0 and status.inputs is not None and status.outputs is not None:
+            forward_kwargs = copy(status.forward_kwargs)
+            forward_kwargs.pop('gradient_accumulation_steps', None)
             for metric in status.metrics:
                 metric.accumulate(
                     status.inputs,
@@ -132,7 +134,7 @@ class OptimizerGroup(BaseOptimizerGroup):
                     gradient_accumulation_steps=self.gradient_accumulation_steps,
                     grad_norm=self._last_grad_norm,
                     loss_reduction=getattr(self.loss_instance, 'reduction', 'mean'),
-                    **status.forward_kwargs)
+                    **forward_kwargs)
 
 
 _default_adapter_name = ''
@@ -605,7 +607,7 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
             scaler = optimizer_config.scaler
 
         optimizer_config.cur_step += 1
-        should_sync = optimizer_config.do_grad_sync()
+        should_sync = optimizer_config.do_grad_sync(kwargs.get('gradient_accumulation_steps'))
 
         import contextlib
         no_sync_ctx = contextlib.nullcontext()
