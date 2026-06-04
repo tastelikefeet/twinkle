@@ -178,9 +178,8 @@ class InputProcessor:
         from copy import copy
         import torch.distributed as dist
 
-        features = outputs.get('features') if outputs is not None else None
-        if features is None:
-            return inputs, outputs
+        features = outputs.get('features')
+        assert features is not None
 
         sp_enabled = (self.framework == 'transformers' and sp_strategy is not None
                       and getattr(sp_strategy, 'enabled', False)

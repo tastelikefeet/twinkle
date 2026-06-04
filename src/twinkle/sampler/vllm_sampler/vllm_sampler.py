@@ -251,6 +251,7 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
             else:
                 feat['input_ids'] = response.prompt_token_ids
                 feat['labels'] = [-100] * len(response.prompt_token_ids)
+
         if not logprobs_only:
             # response.sequences contains num_samples sequences for this prompt
             sequences = []

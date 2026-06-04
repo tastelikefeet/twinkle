@@ -18,9 +18,11 @@ Launch:
 """
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
+import swanlab
 import torch
 from peft import LoraConfig
 
@@ -29,6 +31,7 @@ from twinkle import DeviceGroup, DeviceMesh, get_device_placement, get_logger
 from twinkle.data_format import InputFeature, SamplingParams
 from twinkle.dataloader import DataLoader
 from twinkle.loss import InfonceLoss
+from twinkle.metric import EmbeddingMetric
 from twinkle.processor import InputProcessor
 from twinkle.sampler import vLLMSampler
 from twinkle.template import Template
@@ -58,7 +61,7 @@ LORA_RANK = 16
 ADAPTER_NAME = 'default'
 
 BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 8))
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 1e-5
 GRADIENT_ACCUMULATION_STEPS = 1
 LOG_INTERVAL = 2
 SAVE_INTERVAL = 4000
@@ -70,9 +73,9 @@ TOTAL_SAMPLES: Optional[int] = None
 # -- Online-compression knobs (CM-v2 inference) -------------------------------
 MIN_COT_CHARS = 256                           # skip too-short cot rows entirely
 COMPRESS_RATIO = 2.0                          # used to derive the prompt char budget
-COMPRESS_MAX_TOKENS = 32768
-COMPRESS_TEMPERATURE = 0.4
-COMPRESS_TOP_P = 0.9
+COMPRESS_MAX_TOKENS = 2048
+COMPRESS_TEMPERATURE = 0.2
+COMPRESS_TOP_P = 0.5
 COMPRESS_MAX_MODEL_LEN = 32768
 
 OUTPUT_DIR = f'./output/embedding_lora_{BACKEND}'
@@ -243,7 +246,7 @@ def train():
                     device_type='GPU'),
     ]
     model_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, dp_size=MODEL_GPUS)
-    sampler_mesh = DeviceMesh.from_sizes(world_size=SAMPLER_GPUS, tp_size=SAMPLER_GPUS)
+    sampler_mesh = DeviceMesh.from_sizes(world_size=SAMPLER_GPUS, dp_size=SAMPLER_GPUS)
     twinkle.initialize(mode='ray', nproc_per_node=NUM_GPUS, groups=device_groups)
 
     # -------- Data -----------------------------------------------------------
@@ -268,13 +271,14 @@ def train():
         hard_negatives=HARD_NEGATIVES,
     )
     setup_optimizer(model, total_steps)
+    model.add_metric(EmbeddingMetric, is_training=True)
 
     # -------- Frozen CM-v2 sampler (online compressor) -----------------------
     emb_template = Template(model_id=MODEL_ID, max_length=EMB_MAX_LENGTH, enable_thinking=False)
     sampler = vLLMSampler(
         model_id=MODEL_ID,
         engine_args={
-            'gpu_memory_utilization': 0.7,
+            'gpu_memory_utilization': 0.8,
             'max_model_len': COMPRESS_MAX_MODEL_LEN,
             'enable_lora': False,
         },
@@ -293,28 +297,88 @@ def train():
     logger.info(model.get_train_configs())
     logger.info(f'Total steps: {total_steps}')
 
+    swanlab.init(project='twinkle', config={
+        'backend': BACKEND,
+        'model_id': MODEL_ID,
+        'batch_size': BATCH_SIZE,
+        'lr': LEARNING_RATE,
+        'lora_rank': LORA_RANK,
+        'temperature': TEMPERATURE,
+        'emb_max_length': EMB_MAX_LENGTH,
+        'compress_ratio': COMPRESS_RATIO,
+        'compress_max_tokens': COMPRESS_MAX_TOKENS,
+    })
+
     # -------- Train loop -----------------------------------------------------
+    def _sample_batch(raw_batch):
+        """Sample compress prompts and build embedding features. Runs in prefetch thread."""
+        compress_prompts, valid_indices = _build_compress_prompts(raw_batch)
+        if not compress_prompts:
+            return None
+        responses = sampler.sample(compress_prompts, compress_params)
+
+        # Retry truncated responses up to 3 times
+        retry_indices = []
+        for ri, resp in enumerate(responses):
+            seq = resp.sequences[0] if resp.sequences else None
+            if seq and seq.stop_reason == 'length':
+                retry_indices.append(ri)
+
+        for attempt in range(3):
+            if not retry_indices:
+                break
+            print(f'retry: {attempt}')
+            retry_prompts = [compress_prompts[ri] for ri in retry_indices]
+            pad_count = (SAMPLER_GPUS - len(retry_prompts) % SAMPLER_GPUS) % SAMPLER_GPUS
+            padded_prompts = retry_prompts + [retry_prompts[i % len(retry_prompts)] for i in range(pad_count)] if pad_count else retry_prompts
+            retry_responses = sampler.sample(padded_prompts, compress_params)
+            still_truncated = []
+            for j, ri in enumerate(retry_indices):
+                new_resp = retry_responses[j]
+                new_seq = new_resp.sequences[0] if new_resp.sequences else None
+                if new_seq and new_seq.stop_reason != 'length':
+                    responses[ri] = new_resp
+                else:
+                    still_truncated.append(ri)
+            retry_indices = still_truncated
+
+        if retry_indices:
+            for ri in retry_indices:
+                side = 'query' if ri % 2 == 0 else 'cot'
+                idx = valid_indices[ri // 2]
+                seq = responses[ri].sequences[0] if responses[ri].sequences else None
+                print(f'[max_length hit after 3 retries] side={side}, batch_idx={idx}, '
+                      f'decoded_len={len(seq.decoded) if seq and seq.decoded else 0}')
+                raise
+
+        emb_features: List[Dict[str, Any]] = []
+        for i in range(0, len(responses), 2):
+            feat_q = _get_first_feature(responses[i], emb_template, role='anchor')
+            feat_c = _get_first_feature(responses[i + 1], emb_template, role='positive')
+            emb_features.append(feat_q)
+            emb_features.append(feat_c)
+
+        if len(emb_features) < 4:
+            raise ValueError(f'Not enough valid pairs in batch: {len(emb_features) // 2} < 2')
+        return emb_features
+
     cur_step = 0
+    prefetch_executor = ThreadPoolExecutor(max_workers=1)
     for epoch in range(NUM_EPOCHS):
-        for raw_batch in dataloader:
-            # raw_batch: List[{id, source, messages}]
-            compress_prompts, valid_indices = _build_compress_prompts(raw_batch)
-            if not compress_prompts:
-                continue
-            responses = sampler.sample(compress_prompts, compress_params)
+        batch_iter = iter(dataloader)
+        # Prefetch first batch
+        prefetch_future = None
+        first_batch = next(batch_iter, None)
+        if first_batch is not None:
+            prefetch_future = prefetch_executor.submit(_sample_batch, first_batch)
 
-            # De-interleave: [q0, c0, q1, c1, ...] → pairs
-            emb_features: List[Dict[str, Any]] = []
-            for i in range(0, len(responses), 2):
-                feat_q = _get_first_feature(responses[i], emb_template, role='anchor')
-                feat_c = _get_first_feature(responses[i + 1], emb_template, role='positive')
-                emb_features.append(feat_q)
-                emb_features.append(feat_c)
+        for raw_batch in batch_iter:
+            # Get current features from prefetch
+            emb_features = prefetch_future.result() if prefetch_future else None
+            # Submit next batch to sampler (overlaps with model training below)
+            prefetch_future = prefetch_executor.submit(_sample_batch, raw_batch)
 
-            if len(emb_features) < 4:
-                # InfoNCE needs ≥2 anchors (≥4 features) for meaningful in-batch loss.
-                logger.warning('Skipping step: only %d valid pairs in batch of %d',
-                               len(emb_features) // 2, len(raw_batch))
+            if emb_features is None:
                 continue
 
             model.forward_backward(inputs=emb_features, task='embedding')
@@ -325,10 +389,22 @@ def train():
                 metric = model.calculate_metric(is_training=True)
                 logger.info(
                     f'Epoch {epoch} Step {cur_step}/{total_steps}, metric: {metric}')
+                log_dict = {k: float(v) for k, v in metric.items() if v}
+                log_dict['epoch'] = epoch
+                swanlab.log(log_dict, step=cur_step)
             if cur_step % SAVE_INTERVAL == 0:
                 save_checkpoint(model, f'step_{cur_step}')
 
+        # Drain the last prefetched batch
+        if prefetch_future is not None:
+            emb_features = prefetch_future.result()
+            if emb_features is not None:
+                model.forward_backward(inputs=emb_features, task='embedding')
+                model.clip_grad_and_step()
+                cur_step += 1
+
         save_checkpoint(model, f'epoch-{epoch}')
+    prefetch_executor.shutdown(wait=False)
     save_checkpoint(model, 'last-checkpoint')
 
 
