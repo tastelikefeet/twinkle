@@ -361,6 +361,27 @@ def _get_first_feature(decoded_text: str, template: Template, role: str) -> Opti
 # OpenAI API fallback
 # =============================================================================
 
+def _is_truncated_compression(text: str) -> bool:
+    """Detect structurally incomplete output that vLLM may report as stop_reason='stop'.
+
+    The condenser sometimes emits a chat-template token mid-skeleton (which we then
+    strip), so the visible text ends mid-sentence even though stop_reason!='length'.
+    The COMPRESS_SYSTEM skeleton mandates a `## More` section ending in a bullet list;
+    its absence is an unambiguous truncation signal.
+    """
+    if not text or not text.strip():
+        return True
+    if '## More' not in text or '## Summary' not in text:
+        return True
+    after_more = text.split('## More', 1)[1].strip()
+    if not after_more:
+        return True
+    last_line = after_more.splitlines()[-1].strip()
+    if not (last_line.startswith('-') or last_line.endswith(')')):
+        return True
+    return False
+
+
 def _api_compress(api_client: OpenAIClient, prompt: Dict[str, Any]) -> Optional[str]:
     """Call external API to compress when vLLM truncates."""
     trajectory = {'messages': prompt['messages']}
@@ -630,26 +651,34 @@ def train():
         decoded_texts: List[str] = []
         for ri, resp in enumerate(responses):
             seq = resp.sequences[0] if resp.sequences else None
+            text = ''
             if seq and seq.stop_reason != 'length' and seq.decoded:
                 text = seq.decoded
-                # Strip any leaked chat-template tokens anywhere in the output, not just trailing.
                 for tok in _special_tokens:
                     text = text.replace(tok, '')
-                decoded_texts.append(text.rstrip())
+                text = text.rstrip()
+
+            # Premature-EOS: model emits chat-template token mid-skeleton, vLLM reports
+            # stop_reason='stop' but the stripped text is structurally incomplete.
+            needs_fallback = (not seq or seq.stop_reason == 'length'
+                              or _is_truncated_compression(text))
+            if not needs_fallback:
+                decoded_texts.append(text)
+                continue
+
+            api_result = _api_compress(api_client, compress_prompts[ri])
+            # Skip logging when the API itself produced truncated output: an incomplete
+            # gold answer would teach the condenser to imitate broken outputs.
+            if api_result and not _is_truncated_compression(api_result):
+                decoded_texts.append(api_result)
+                pair_idx = ri // 2
+                q_raw, c_raw = raw_pairs[pair_idx]
+                source_text = q_raw if ri % 2 == 0 else c_raw
+                _log_failure(source_text, prompt_queries[ri], api_result,
+                             valid_indices[pair_idx])
+                retrainer.notify_failure()
             else:
-                # Truncated or empty — fall back to API
-                api_result = _api_compress(api_client, compress_prompts[ri])
-                if api_result:
-                    decoded_texts.append(api_result)
-                    # Determine source text for failure logging
-                    pair_idx = ri // 2
-                    q_raw, c_raw = raw_pairs[pair_idx]
-                    source_text = q_raw if ri % 2 == 0 else c_raw
-                    _log_failure(source_text, prompt_queries[ri], api_result,
-                                 valid_indices[pair_idx])
-                    retrainer.notify_failure()
-                else:
-                    decoded_texts.append('')
+                decoded_texts.append('')
 
         # Build embedding features from decoded texts
         emb_features: List[Dict[str, Any]] = []
