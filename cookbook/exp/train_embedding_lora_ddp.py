@@ -63,24 +63,24 @@ CONDENSER_MODEL_GPUS = int(os.environ.get('CONDENSER_MODEL_GPUS', 2))
 NUM_GPUS = MODEL_GPUS + CONDENSER_SAMPLER_GPUS + CONDENSER_MODEL_GPUS
 
 # -- Embedding training hyper-params ------------------------------------------
-EMB_MAX_LENGTH = 4096
+EMB_MAX_LENGTH = 8192
 HARD_NEGATIVES = None
-TEMPERATURE = 0.05
+TEMPERATURE = 0.03
 
-BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 8))
-LEARNING_RATE = 5e-6
+BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 32))
+LEARNING_RATE = 2e-5
 GRADIENT_ACCUMULATION_STEPS = 16
 LOG_INTERVAL = 2
 SAVE_INTERVAL = 4000
-NUM_EPOCHS = 1
+NUM_EPOCHS = 2
 
 TOTAL_SAMPLES: Optional[int] = None
 
 # -- Online-compression knobs -------------------------------------------------
 MIN_COT_CHARS = 256
 DATASET_MAX_TOKENS = 32768
-COMPRESS_TEMPERATURE = 0.3
-COMPRESS_TOP_P = 0.7
+COMPRESS_TEMPERATURE = 0.2
+COMPRESS_TOP_P = 0.5
 COMPRESS_MAX_MODEL_LEN = 32768
 
 # -- OpenAI API fallback for truncated compressions ---------------------------
