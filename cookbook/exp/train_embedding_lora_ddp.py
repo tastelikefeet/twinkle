@@ -51,6 +51,7 @@ logger = get_logger()
 # -- Backend selection --------------------------------------------------------
 BACKEND: Literal['transformers', 'megatron'] = 'transformers'
 
+CONDENSE_MODEL_ID = os.environ.get('MODEL_ID', 'ms://twinkle-kit/Qwen3.5-4B-CM-v2')
 MODEL_ID = os.environ.get('MODEL_ID', 'ms://twinkle-kit/Qwen3.5-4B-CM-v2')
 TEMPLATE_NAME = 'Qwen3_5Template'
 
