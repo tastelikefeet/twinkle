@@ -160,10 +160,6 @@ def build_dataset(backend: SamplerBackend) -> IterableDataset:
             DeadLoopFilter(),
             TokenSoupFilter(),
             MessageSanityFilter(),
-            # Multi-language, multi-country PII rewrite (Presidio + spaCy NER + Faker).
-            # CN regex rules (CN_ID/CN_PHONE/CN_LANDLINE/CN_BANK with mod-11 / Luhn
-            # validation) are registered as custom Presidio recognizers inside.
-            PIIPresidioFilter(languages=('en', 'zh')),
             # Phase 6-7: text normalization (mappers)
             FixUnicodeFilter(),
             RemoveRepeatSentencesFilter(),
@@ -200,6 +196,7 @@ def build_dataset(backend: SamplerBackend) -> IterableDataset:
                 ],
                 # trace_dir=os.path.join(OUTPUT_DIR, 'score_traces'),
             ),
+            PIIPresidioFilter(languages=('en', 'zh')),
             # Phase 13: response refinement
             # ResponseRefiner(
             #     backend=backend,
@@ -220,7 +217,6 @@ def build_dataset(backend: SamplerBackend) -> IterableDataset:
         enable_thinking=False,
     )
     dataset.encode()
-    dataset.save_as(TRAINED_DATA_PATH, format='jsonl', mode='training')
 
     return dataset
 

@@ -164,9 +164,7 @@ class PIIPresidioFilter(Preprocessor):
     """Multi-language, multi-country PII rewriter (Presidio + spaCy + Faker)."""
 
     DEFAULT_ENTITY_STRATEGY: Dict[str, Strategy] = {
-        'PERSON': Strategy.REPLACE, 'LOCATION': Strategy.REPLACE,
-        'ORGANIZATION': Strategy.REPLACE, 'EMAIL_ADDRESS': Strategy.REPLACE,
-        'DATE_TIME': Strategy.REPLACE,
+        'EMAIL_ADDRESS': Strategy.REPLACE,
         'PHONE_NUMBER': Strategy.MASK, 'IP_ADDRESS': Strategy.MASK,
         'CREDIT_CARD': Strategy.MASK, 'IBAN_CODE': Strategy.MASK,
         'CRYPTO': Strategy.MASK, 'US_BANK_NUMBER': Strategy.MASK,
@@ -179,10 +177,18 @@ class PIIPresidioFilter(Preprocessor):
         'ES_NIE': Strategy.MASK, 'MEDICAL_LICENSE': Strategy.MASK,
         'CN_ID': Strategy.MASK, 'CN_PHONE': Strategy.MASK,
         'CN_LANDLINE': Strategy.MASK, 'CN_BANK': Strategy.MASK,
-        'URL': Strategy.REDACT, 'NRP': Strategy.REDACT,
     }
     DEFAULT_SPACY_MODELS: Dict[str, str] = {'en': 'en_core_web_sm', 'zh': 'zh_core_web_sm'}
     CJK_LANG_THRESHOLD: float = 0.15
+    # Per-entity minimum span length to suppress short-token false positives.
+    DEFAULT_MIN_LENGTH: Dict[str, int] = {
+        'EMAIL_ADDRESS': 5,
+    }
+    MIN_LENGTH_FALLBACK: int = 3
+    # NER-driven entities (spaCy hardcoded score 0.85) are too noisy on technical text; only regex-based
+    # identifiers (phone/email/IDs/bank/cards) reliably indicate real PII. URL is also dropped—redacting
+    # links in technical/instruction text changes semantics without privacy benefit.
+    IGNORED_ENTITIES: Tuple[str, ...] = ('PERSON', 'LOCATION', 'ORGANIZATION', 'NRP', 'DATE_TIME', 'URL')
     INSTALL_HINT = (
         'PIIPresidioFilter requires: pip install presidio-analyzer presidio-anonymizer '
         'faker spacy && python -m spacy download en_core_web_sm && '
@@ -194,7 +200,7 @@ class PIIPresidioFilter(Preprocessor):
         spacy_models: Optional[Dict[str, str]] = None,
         entity_strategy: Optional[Dict[str, str]] = None,
         default_strategy: str = Strategy.MASK.value,
-        score_threshold: float = 0.4,
+        score_threshold: float = 0.5,
         roles: Sequence[str] = ('user', 'assistant', 'system'),
         consistency: bool = True,
         persistent_consistency: bool = False,
@@ -228,6 +234,14 @@ class PIIPresidioFilter(Preprocessor):
         self._faker = FakerProvider()
         self._persistent_map: Dict[Tuple[str, str], str] = {}
         self._analyzer = self._build_analyzer()
+        # Restrict analyze() to entities we act on AND that the registry actually supports per language;
+        # avoids 'Entity X doesn't have the corresponding recognizer in language : Y' warnings.
+        wanted = {e for e in self._strategy if e not in self.IGNORED_ENTITIES}
+        registry = self._analyzer.registry
+        self._allowed_entities: Dict[str, List[str]] = {
+            lang: sorted(wanted & set(registry.get_supported_entities(languages=[lang])))
+            for lang in self._languages
+        }
 
     # ── construction ────────────────────────────────────────────────────────
 
@@ -251,7 +265,12 @@ class PIIPresidioFilter(Preprocessor):
                        for l in self._languages],
         }
         nlp_engine = NlpEngineProvider(nlp_configuration=nlp_conf).create_engine()
-        registry = RecognizerRegistry()
+        # NER pipe is the heaviest spaCy component and we discard all NER entities; disable to save 2-4x latency.
+        for nlp in getattr(nlp_engine, 'nlp', {}).values():
+            for pipe in ('ner', 'parser', 'attribute_ruler', 'lemmatizer'):
+                if pipe in nlp.pipe_names:
+                    nlp.disable_pipe(pipe)
+        registry = RecognizerRegistry(supported_languages=self._languages)
         registry.load_predefined_recognizers(languages=self._languages, nlp_engine=nlp_engine)
         for r in _build_cn_recognizers(self._languages):
             registry.add_recognizer(r)
@@ -287,6 +306,10 @@ class PIIPresidioFilter(Preprocessor):
             cache[key] = self._faker.fake_for(entity, original, lang)
         return cache[key]
 
+    @classmethod
+    def _min_length(cls, entity: str) -> int:
+        return cls.DEFAULT_MIN_LENGTH.get(entity.upper(), cls.MIN_LENGTH_FALLBACK)
+
     # ── span dedup ──────────────────────────────────────────────────────────
 
     @staticmethod
@@ -309,11 +332,16 @@ class PIIPresidioFilter(Preprocessor):
             return text, {}
         lang = self._resolve_language(text)
         results = self._analyzer.analyze(text=text, language=lang,
+                                         entities=self._allowed_entities.get(lang),
                                          score_threshold=self._score_threshold)
         if not results:
             return text, {}
 
         spans = self._dedupe_overlaps(results)
+        spans = [r for r in spans if r.entity_type.upper() not in self.IGNORED_ENTITIES]
+        spans = [r for r in spans if (r.end - r.start) >= self._min_length(r.entity_type)]
+        if not spans:
+            return text, {}
         # Reverse-sort so in-place index slicing stays valid.
         spans.sort(key=lambda r: r.start, reverse=True)
         out = text

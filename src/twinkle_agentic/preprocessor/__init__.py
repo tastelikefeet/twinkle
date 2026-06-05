@@ -71,7 +71,7 @@ class QualityPreprocessor(Preprocessor):
             prev = rows_list
             rows_list = self.map_col_to_row(step(rows_list))
             after = len(rows_list)
-            logger.debug(f'[QualityPreprocessor] {step_name}: {before} -> {after} (dropped {before - after})')
+            logger.info(f'[QualityPreprocessor] {step_name}: {before} -> {after} (dropped {before - after})')
             self._log_dropped(step_name, prev, rows_list)
         return self.map_row_to_col(rows_list)
 

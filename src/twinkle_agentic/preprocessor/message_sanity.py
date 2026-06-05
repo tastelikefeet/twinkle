@@ -71,12 +71,16 @@ def _validate_role_order(messages: List[Dict[str, Any]]) -> bool:
     Rules:
     - Every message must have a valid role.
     - system (if present) must be at index 0.
+    - The first non-system message must be ``user`` (chat templates require a user query before any assistant).
+    - Every ``assistant`` must have at least one ``user`` somewhere before it.
     - tool messages must immediately follow an assistant message (that has tool_calls).
     - user/assistant should roughly alternate (we allow tool in between).
     """
     if not messages:
         return False
 
+    seen_user = False
+    first_non_system_checked = False
     for i, m in enumerate(messages):
         if not isinstance(m, dict):
             return False
@@ -84,6 +88,14 @@ def _validate_role_order(messages: List[Dict[str, Any]]) -> bool:
         if role not in _VALID_ROLES:
             return False
         if role == 'system' and i != 0:
+            return False
+        if role != 'system' and not first_non_system_checked:
+            if role != 'user':
+                return False
+            first_non_system_checked = True
+        if role == 'user':
+            seen_user = True
+        if role == 'assistant' and not seen_user:
             return False
         if role == 'tool':
             if i == 0:

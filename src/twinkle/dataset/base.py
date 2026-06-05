@@ -4,7 +4,7 @@ import os.path
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datasets import DatasetDict, IterableDataset, concatenate_datasets, interleave_datasets, load_dataset
-from torch.utils.data import Dataset as TorchDataset
+from torch.utils.data import Dataset as TorchDataset, IterableDataset as TorchIterableDataset
 from typing import Any, Callable, Dict, List, Optional, Type, Union
 import threading
 from queue import Queue
@@ -97,6 +97,17 @@ class Dataset(TorchDataset):
         """
         self.template = construct_class(template_func, Template, twinkle.template, **kwargs)
 
+    @staticmethod
+    def _normalize_cache_kwargs(target, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """Strip/inject load_from_cache_file based on whether target supports HF cache."""
+        kw = dict(kwargs)
+        # Streaming datasets (HF IterableDataset / torch IterableDataset wrappers) reject load_from_cache_file.
+        if isinstance(target, (IterableDataset, TorchIterableDataset)):
+            kw.pop('load_from_cache_file', None)
+        else:
+            kw.setdefault('load_from_cache_file', False)
+        return kw
+
     @remote_function()
     def encode(self, add_generation_prompt: bool = False, **kwargs):
         """An inplace operation to encode the dataset.
@@ -108,11 +119,7 @@ class Dataset(TorchDataset):
             **kwargs: The mapping and filter kwargs of the `datasets.map`.
         """
         kwargs['batched'] = True  # Only supported batched, because a single row may explode to several rows
-        if 'load_from_cache_file' not in kwargs:
-            # By default, we don't use load_from_cache_file, because read cache will not consider
-            # the changes in the same file,
-            # which will cause unexpected behaviors.
-            kwargs['load_from_cache_file'] = False
+        kwargs = self._normalize_cache_kwargs(self.dataset, kwargs)
         from functools import partial
         encode_fn = partial(self.template.batch_encode, add_generation_prompt=add_generation_prompt)
         with processing_lock('dataset'):
@@ -129,9 +136,7 @@ class Dataset(TorchDataset):
             **kwargs: The mapping and filter kwargs of the `datasets.map`.
         """
         kwargs['batched'] = True  # Only supported batched, because a single row may explode to several rows
-        # check depends on template/tokenizer behavior; cached filter results can keep old empty outputs.
-        # Disable cache here to avoid the "silent stop" caused by stale empty cache.
-        kwargs.setdefault('load_from_cache_file', False)
+        kwargs = self._normalize_cache_kwargs(self.dataset, kwargs)
         with processing_lock('dataset'):
             # use a default lock because check is to all datasets
             def _check_batch(batch):
@@ -248,28 +253,25 @@ class Dataset(TorchDataset):
             **kwargs: The kwargs of the `datasets.map`.
         """
         init_args = init_args or {}
-        if 'load_from_cache_file' not in kwargs:
-            # By default, we don't use load_from_cache_file, because read cache will not consider
-            # the changes in the same file,
-            # which will cause unexpected behaviors.
-            kwargs['load_from_cache_file'] = False
         preprocess_func = construct_class(preprocess_func, Preprocessor, twinkle.preprocessor, **init_args)
+        kwargs['batched'] = True
+
         if self._mixed:
-            kwargs['batched'] = True
-            self.dataset = self.dataset.map(preprocess_func, **kwargs)
+            self.dataset = self.dataset.map(
+                preprocess_func, **self._normalize_cache_kwargs(self.dataset, kwargs))
         else:
             if dataset_meta is None:
                 assert len(self.datasets) == 1
                 key = next(iter(self.datasets.keys()))
             else:
                 key = dataset_meta.get_id()
-            kwargs['batched'] = True
             with processing_lock(key):
-                if 'remove_columns' not in kwargs:
+                kw = self._normalize_cache_kwargs(self.datasets[key], kwargs)
+                if 'remove_columns' not in kw:
                     features = getattr(self.datasets[key], 'features', None)
                     if features is not None:
-                        kwargs['remove_columns'] = list(features.keys())
-                self.datasets[key] = self.datasets[key].map(preprocess_func, **kwargs)
+                        kw['remove_columns'] = list(features.keys())
+                self.datasets[key] = self.datasets[key].map(preprocess_func, **kw)
             if len(self.datasets) == 1:
                 self.dataset = self.datasets[key]
 
