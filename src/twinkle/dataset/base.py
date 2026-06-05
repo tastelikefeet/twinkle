@@ -37,7 +37,13 @@ class DatasetMeta:
     split: str = 'train'
     # Pick a data slice
     data_slice: Iterable = None
-    # In-memory data: List[Dict] (row-oriented) or Dict[str, List] (column-oriented)
+    # In-memory / in-process data source. Supports:
+    #   - List[Dict]      (row-oriented, eager)
+    #   - Dict[str, List] (column-oriented, eager)
+    #   - Callable        (generator function; routed to HF from_generator,
+    #                      streaming vs eager picked from `streaming` kwarg.
+    #                      Bind args via functools.partial.)
+    #   - HFDataset / HFIterableDataset (already-constructed, passed through)
     data: Any = None
 
     def get_id(self):
@@ -138,15 +144,23 @@ class Dataset(TorchDataset):
 
     @staticmethod
     def _load_dataset(dataset_meta: DatasetMeta, **kwargs):
-        # In-memory data path
+        # In-memory / in-process data path
         if dataset_meta.data is not None:
             from datasets import Dataset as HFDataset
+            from datasets import IterableDataset as HFIterableDataset
             d = dataset_meta.data
+            if isinstance(d, (HFDataset, HFIterableDataset)):
+                return d
             if isinstance(d, list):
                 return HFDataset.from_list(d)
-            elif isinstance(d, dict):
+            if isinstance(d, dict):
                 return HFDataset.from_dict(d)
-            raise ValueError(f'DatasetMeta.data must be list or dict, got {type(d).__name__}')
+            if callable(d):
+                cls = HFIterableDataset if kwargs.get('streaming') else HFDataset
+                return cls.from_generator(d)
+            raise ValueError(
+                f'DatasetMeta.data must be list, dict, callable, or HF Dataset/IterableDataset, '
+                f'got {type(d).__name__}')
 
         dataset_id = dataset_meta.dataset_id
         subset_name = dataset_meta.subset_name

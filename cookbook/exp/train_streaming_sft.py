@@ -1,4 +1,4 @@
-"""Streaming SFT with QualityPreprocessor + OdpsIterableDataset (Ray mode).
+"""Streaming SFT with QualityPreprocessor on a streaming IterableDataset (Ray mode).
 
 Architecture (8 GPUs single-node):
     GPU 0-3: LoRA SFT training (4x DP)
@@ -8,27 +8,26 @@ QualityPreprocessor phases (intent, IFD, refine) use SamplerBackend
 which calls vLLMSampler directly via Ray (no HTTP overhead).
 
 Two output files are produced:
-  - trained_data.jsonl: rows that pass QualityPreprocessor and are consumed by training
+  - trained_data.jsonl: write-through of rows actually consumed by training
   - dropped_data.jsonl: rows dropped by QualityPreprocessor (with step annotation)
 
 Launch:
     python cookbook/exp/train_streaming_sft.py
 """
-import hashlib
+import json
 import os
-import re
+from functools import partial
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterator, List
 
-from datasets import Features, Value
 from peft import LoraConfig
 
 import twinkle
 from twinkle import DeviceMesh, DeviceGroup, get_device_placement, get_logger
 from twinkle.dataloader import DataLoader
-from twinkle.dataset import Dataset, DatasetMeta
+from twinkle.dataset import IterableDataset
+from twinkle.dataset.base import DatasetMeta
 from twinkle.model import TransformersModel
-from twinkle.preprocessor import Preprocessor
 from twinkle.sampler import vLLMSampler
 from twinkle.template import Qwen3_5Template
 from twinkle_agentic.preprocessor import (
@@ -37,7 +36,7 @@ from twinkle_agentic.preprocessor import (
     HardFilter, RefuseFilter, DeadLoopFilter, TokenSoupFilter, MessageSanityFilter,
     FixUnicodeFilter, RemoveRepeatSentencesFilter,
     WordRepeatFilter, CharRepeatFilter, SpecialCharsFilter, AlphanumericFilter,
-    FlaggedWordsFilter, MinHashDedupFilter,
+    FlaggedWordsFilter, MinHashDedupFilter, PIIPresidioFilter,
 )
 from twinkle_agentic.preprocessor.score_filter import (
     ChrMinScorer, PassNScorer, ParaphraseScorer,
@@ -71,41 +70,53 @@ DROPPED_DATA_PATH = os.path.join(OUTPUT_DIR, 'dropped_data.jsonl')
 ADAPTER_NAME = 'default'
 
 # ── Data source ──────────────────────────────────────────────────────────────
-CN_R1_DISTILL_REPO = 'ms://AI-ModelScope/Chinese-DeepSeek-R1-Distill-data-110k'
-DATASET_TOTAL = int(os.environ.get('DATASET_TOTAL', 1000))  # 0 = all
-DATASET_USE_CACHE = os.environ.get('DATASET_USE_CACHE', '0') == '1'
-_THINK_RE = re.compile(r'<think>(.*?)</think>', re.DOTALL)
+CSV_PATH = os.environ.get(
+    'CSV_PATH', '/mnt/workspace/yzhao/tastelikefeet/bc/ds_csv/data/20250919.csv')
+DATASET_TOTAL = int(os.environ.get('DATASET_TOTAL', 1000))  # 0 = unbounded stream
 
 
-class CNR1DistillSFTProcessor(Preprocessor):
-    """Chinese-DeepSeek-R1-Distill-data-110k → SFT messages format."""
+def _stream_csv_rows(csv_path: str) -> Iterator[Dict[str, Any]]:
+    """Stream the custom CSV: each line is `ts,model,req_id,messages_json` (no quoting).
 
-    def __call__(self, rows: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
-        rows_list = self.map_col_to_row(rows)
-        out: List[Dict[str, Any]] = []
-        for row in rows_list:
-            query = (row.get('input') or '').strip()
-            cot = (row.get('reasoning_content') or '').strip()
-            response = (row.get('content') or '').strip()
-            if not query or not response:
+    The first 3 fields are scalar; the remainder of the line is a JSON array of
+    chat messages, possibly containing commas — so we split on the first 3 commas only.
+    """
+    with open(csv_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.rstrip('\n').rstrip('\r')
+            if not line:
                 continue
-            if cot:
-                response = _THINK_RE.sub('', response).strip()
-                assistant_content = f'<think>{cot}</think>{response}'
-            else:
-                assistant_content = response
-            messages = [
-                {'role': 'user', 'content': query},
-                {'role': 'assistant', 'content': assistant_content},
-            ]
-            rid = hashlib.md5(query.encode()).hexdigest()[:16]
-            out.append({
-                'id': f'cnr1__{rid}',
-                'source': 'Chinese-DeepSeek-R1-Distill-data-110k',
+            parts = line.split(',', 3)
+            if len(parts) < 4:
+                continue
+            ts, _model, req_id, msgs_raw = parts
+            try:
+                raw_msgs = json.loads(msgs_raw)
+            except json.JSONDecodeError:
+                continue
+            messages: List[Dict[str, str]] = []
+            for m in raw_msgs:
+                role = m.get('role', '')
+                content = m.get('content')
+                # User content arrives as [{'type':'text','text':...}, ...]; flatten to plain string.
+                if isinstance(content, list):
+                    content = ''.join(
+                        p.get('text', '') for p in content
+                        if isinstance(p, dict) and p.get('type') == 'text')
+                if not isinstance(content, str) or not content:
+                    continue
+                if role == 'assistant' and m.get('reasoning_content'):
+                    content = f"<think>{m['reasoning_content']}</think>{content}"
+                messages.append({'role': role, 'content': content})
+            if not messages:
+                continue
+            n_assistant = sum(1 for m in messages if m['role'] == 'assistant')
+            yield {
+                'id': f'csv__{ts}__{req_id}',
+                'source': Path(csv_path).stem,
                 'messages': messages,
-                'user_data': {'key_rounds': [1]},
-            })
-        return self.map_row_to_col(out, keys=['id', 'source', 'messages', 'user_data'])
+                'user_data': {'key_rounds': list(range(1, n_assistant + 1))},
+            }
 
 # ── QualityPreprocessor config ───────────────────────────────────────────────
 SENSITIVE_WORDS_FILE = str(
@@ -125,22 +136,18 @@ JUDGE_MAX_TOKENS = int(os.environ.get('JUDGE_MAX_TOKENS', 32000))
 JUDGE_MAX_WORKERS = int(os.environ.get('JUDGE_MAX_WORKERS', 16))
 
 
-def build_dataset(backend: SamplerBackend) -> Dataset:
-    """Load CN-R1-Distill from ModelScope, convert to SFT format, run QualityPreprocessor."""
+def build_dataset(backend: SamplerBackend) -> IterableDataset:
+    """Stream the local CSV, convert to SFT messages format, run QualityPreprocessor."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    dataset = Dataset()
-    data_slice = range(DATASET_TOTAL) if DATASET_TOTAL > 0 else None
-    meta = DatasetMeta(dataset_id=CN_R1_DISTILL_REPO, split='train',
-                       data_slice=data_slice)
-    dataset.add_dataset(meta)
-    cols = list(dataset.datasets[meta.get_id()].column_names)
-    dataset.map(
-        CNR1DistillSFTProcessor,
-        dataset_meta=meta,
-        remove_columns=cols,
-        load_from_cache_file=DATASET_USE_CACHE,
+    # Custom CSV format (commas inside JSON) — feed framework via callable, not csv loader.
+    meta = DatasetMeta(
+        dataset_id=Path(CSV_PATH).stem,
+        data=partial(_stream_csv_rows, csv_path=CSV_PATH),
     )
+    dataset = IterableDataset(meta)
+    if DATASET_TOTAL > 0:
+        dataset.dataset = dataset.dataset.take(DATASET_TOTAL)
     template = Qwen3_5Template(model_id=MODEL_ID, max_length=MAX_LENGTH,
         truncation_strategy='delete',
         enable_thinking=False)
@@ -153,6 +160,10 @@ def build_dataset(backend: SamplerBackend) -> Dataset:
             DeadLoopFilter(),
             TokenSoupFilter(),
             MessageSanityFilter(),
+            # Multi-language, multi-country PII rewrite (Presidio + spaCy NER + Faker).
+            # CN regex rules (CN_ID/CN_PHONE/CN_LANDLINE/CN_BANK with mod-11 / Luhn
+            # validation) are registered as custom Presidio recognizers inside.
+            PIIPresidioFilter(languages=('en', 'zh')),
             # Phase 6-7: text normalization (mappers)
             FixUnicodeFilter(),
             RemoveRepeatSentencesFilter(),
@@ -199,7 +210,7 @@ def build_dataset(backend: SamplerBackend) -> Dataset:
         ],
         dropped_log_path=DROPPED_DATA_PATH,
     )
-    dataset.map(qp, load_from_cache_file=False)
+    dataset.map(qp)
 
     dataset.set_template(
         TEMPLATE_NAME,

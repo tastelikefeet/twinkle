@@ -33,6 +33,7 @@ from .llm_backend import LLMBackend, OpenAIBackend, SamplerBackend  # noqa: F401
 from .majority_vote import MajorityVoteFilter
 from .message_sanity import MessageSanityFilter
 from .perplexity import PerplexityFilter
+from .pii_presidio_filter import PIIPresidioFilter
 from .refuse_filter import RefuseFilter
 from .response_refiner import ResponseRefiner
 from .score_filter import ScoreFilter
