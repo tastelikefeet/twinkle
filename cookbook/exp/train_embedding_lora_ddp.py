@@ -51,8 +51,9 @@ logger = get_logger()
 # -- Backend selection --------------------------------------------------------
 BACKEND: Literal['transformers', 'megatron'] = 'transformers'
 
-CONDENSE_MODEL_ID = os.environ.get('MODEL_ID', 'ms://twinkle-kit/Qwen3.5-4B-CM-v2')
-MODEL_ID = os.environ.get('MODEL_ID', 'ms://twinkle-kit/Qwen3.5-4B-CM-v2')
+# Condenser (online compression + LoRA self-improvement); embedding model trains LoRA on top of MODEL_ID.
+CONDENSE_MODEL_ID = os.environ.get('CONDENSE_MODEL_ID', 'ms://twinkle-kit/Qwen3.5-4B-CM-v2')
+MODEL_ID = os.environ.get('MODEL_ID', 'ms://Qwen/Qwen3.5-4B')
 TEMPLATE_NAME = 'Qwen3_5Template'
 
 # -- GPU placement (8 total) --------------------------------------------------
@@ -70,14 +71,14 @@ BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 8))
 LEARNING_RATE = 5e-6
 GRADIENT_ACCUMULATION_STEPS = 16
 LOG_INTERVAL = 2
-SAVE_INTERVAL = 1000
+SAVE_INTERVAL = 4000
 NUM_EPOCHS = 1
 
 TOTAL_SAMPLES: Optional[int] = None
 
 # -- Online-compression knobs -------------------------------------------------
 MIN_COT_CHARS = 256
-COMPRESS_MAX_TOKENS = 2048
+DATASET_MAX_TOKENS = 32768
 COMPRESS_TEMPERATURE = 0.3
 COMPRESS_TOP_P = 0.7
 COMPRESS_MAX_MODEL_LEN = 32768
@@ -175,32 +176,6 @@ Now begin.\
 
 COMPRESS_USER = "## Query\n{query}\n\n## Source\n{text}"
 
-COMPRESS_SYSTEM_TRAIN = """\
-You are a compression assistant. For the (query, source) pair, emit a Markdown \
-answer with TWO sections, designed to pair with the `extract_compressed` tool: \
-the reader absorbs `## Summary` directly, then calls `extract_compressed` \
-on any topic-key listed under `## More` to recover its \
-fuller content.
-
-Output skeleton:
-
-## Summary
-Topic: <subject — scope, one line>
-<dense body answering the query>
-
-## More
-- <topic-key>: <one-line hint of what is revealed when expanded>
-- ...
-
-Rules:
-1. Line 1 of `## Summary` is ALWAYS `Topic: ...`.
-2. Body is maximally dense; every token carries query-relevant signal.
-3. Never silently drop a fact — anything cut for length MUST appear as a key \
-under `## More` (do not duplicate inline material here).
-4. No fabrication, no extrapolation, no misleading partial truths.
-5. Match the source language. No outer code fences, no meta-commentary.\
-"""
-
 
 # =============================================================================
 # Logging helpers
@@ -244,7 +219,7 @@ def _log_failure(source_text: str, query: str, compressed: str, batch_idx: int):
         'original_len': len(source_text),
         'compressed_len': len(compressed),
         'messages': [
-            {'role': 'system', 'content': COMPRESS_SYSTEM_TRAIN},
+            {'role': 'system', 'content': COMPRESS_SYSTEM},
             {'role': 'user', 'content': COMPRESS_USER.format(query=query, text=source_text)},
             {'role': 'assistant', 'content': compressed},
         ],
@@ -389,7 +364,8 @@ def _get_first_feature(decoded_text: str, template: Template, role: str) -> Opti
 def _api_compress(api_client: OpenAIClient, prompt: Dict[str, Any]) -> Optional[str]:
     """Call external API to compress when vLLM truncates."""
     trajectory = {'messages': prompt['messages']}
-    sp = SamplingParams(temperature=0.3, max_tokens=32000)
+    # Cap max_tokens to leave ample prompt headroom inside the API model context.
+    sp = SamplingParams(temperature=0.2, max_tokens=8192)
     try:
         reply = api_client(trajectory, sp, extra_body={'enable_thinking': False})
     except Exception as exc:
@@ -452,30 +428,41 @@ class CondenserRetrainer:
     def _load_condense_300k(self):
         if self._condense_300k_cache is None:
             dataset = Dataset(dataset_meta=DatasetMeta(CONDENSER_DATASET_ID, split='train'))
-            dataset.set_template(TEMPLATE_NAME, model_id=MODEL_ID,
-                                 max_length=40000, enable_thinking=False,
+            dataset.set_template(TEMPLATE_NAME, model_id=CONDENSE_MODEL_ID,
+                                 max_length=DATASET_MAX_TOKENS, enable_thinking=False,
                                  truncation_strategy='delete')
-            dataset.encode(load_from_cache_file=True, num_proc=4)
             self._condense_300k_cache = dataset
         return self._condense_300k_cache
 
-    def _load_failures(self) -> List[Dict[str, Any]]:
+    def _load_all_failures(self) -> List[Dict[str, Any]]:
+        """Read the cumulative failure pool (all rounds so far).
+
+        Each retrain round samples from the full history rather than only the
+        new failures, so when few fresh failures have accumulated the random
+        subset still reflects a stable distribution. Held under _failure_lock
+        so we never observe a half-written line from a concurrent _log_failure.
+        """
+        global _failure_lock
         if not os.path.exists(FAILURE_LOG):
             return []
-        rows = []
-        with open(FAILURE_LOG, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rows.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
+        if _failure_lock is None:
+            os.makedirs(os.path.dirname(FAILURE_LOG) or '.', exist_ok=True)
+            _failure_lock = PosixFileLock(FAILURE_LOG + '.lock')
+        rows: List[Dict[str, Any]] = []
+        with _failure_lock:
+            with open(FAILURE_LOG, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rows.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
         return rows
 
     def _retrain_and_sync(self):
-        failures = self._load_failures()
+        failures = self._load_all_failures()
         if not failures:
             logger.info('[condenser_retrain] no failures to train on, skipping')
             return
@@ -496,8 +483,8 @@ class CondenserRetrainer:
         # Build dataset from failure rows (already have 'messages' field)
         dataset = Dataset()
         dataset.add_dataset(DatasetMeta(data=train_rows))
-        dataset.set_template(TEMPLATE_NAME, model_id=MODEL_ID,
-                             max_length=32768, enable_thinking=False,
+        dataset.set_template(TEMPLATE_NAME, model_id=CONDENSE_MODEL_ID,
+                             max_length=DATASET_MAX_TOKENS, enable_thinking=False,
                              truncation_strategy='delete')
         dataset.encode(load_from_cache_file=False)
 
@@ -565,9 +552,12 @@ def train():
 
     # -------- Condenser sampler (2 GPU, vLLM) --------------------------------
     emb_template = Template(model_id=MODEL_ID, max_length=EMB_MAX_LENGTH, enable_thinking=False)
-    _special_tokens = set(emb_template.processor.all_special_tokens)
+    # Special tokens come from the condenser tokenizer because the leak we strip is in its decoded output.
+    condenser_template = Template(model_id=CONDENSE_MODEL_ID, max_length=DATASET_MAX_TOKENS,
+                                  enable_thinking=False)
+    _special_tokens = set(condenser_template.processor.all_special_tokens)
     condenser_sampler = vLLMSampler(
-        model_id=MODEL_ID,
+        model_id=CONDENSE_MODEL_ID,
         engine_args={
             'gpu_memory_utilization': 0.8,
             'max_model_len': COMPRESS_MAX_MODEL_LEN,
@@ -576,10 +566,10 @@ def train():
         remote_group='condenser_sampler',
     )
     condenser_sampler.set_template(
-        TEMPLATE_NAME, model_id=MODEL_ID, enable_thinking=False,
-        truncation_strategy='delete', max_length=COMPRESS_MAX_TOKENS)
+        TEMPLATE_NAME, model_id=CONDENSE_MODEL_ID, enable_thinking=False,
+        truncation_strategy='delete', max_length=DATASET_MAX_TOKENS)
     compress_params = SamplingParams(
-        max_tokens=COMPRESS_MAX_TOKENS,
+        max_tokens=8192,
         temperature=COMPRESS_TEMPERATURE,
         top_p=COMPRESS_TOP_P,
         num_samples=1,
@@ -587,7 +577,7 @@ def train():
 
     # -------- Condenser model (2 GPU, trainable full-param) -------------------
     condenser_model = TransformersModel(
-        model_id=MODEL_ID,
+        model_id=CONDENSE_MODEL_ID,
         device_mesh=condenser_model_mesh,
         remote_group='condenser_model',
     )
@@ -617,11 +607,12 @@ def train():
     swanlab.init(project='twinkle', config={
         'backend': BACKEND,
         'model_id': MODEL_ID,
+        'condense_model_id': CONDENSE_MODEL_ID,
         'batch_size': BATCH_SIZE,
         'lr': LEARNING_RATE,
         'temperature': TEMPERATURE,
         'emb_max_length': EMB_MAX_LENGTH,
-        'compress_max_tokens': COMPRESS_MAX_TOKENS,
+        'DATASET_MAX_TOKENS': DATASET_MAX_TOKENS,
     })
 
     # -------- Train loop -----------------------------------------------------
@@ -641,9 +632,9 @@ def train():
             seq = resp.sequences[0] if resp.sequences else None
             if seq and seq.stop_reason != 'length' and seq.decoded:
                 text = seq.decoded
+                # Strip any leaked chat-template tokens anywhere in the output, not just trailing.
                 for tok in _special_tokens:
-                    if text.endswith(tok):
-                        text = text[:-len(tok)]
+                    text = text.replace(tok, '')
                 decoded_texts.append(text.rstrip())
             else:
                 # Truncated or empty — fall back to API
@@ -715,13 +706,13 @@ def train():
             if cur_step % SAVE_INTERVAL == 0:
                 save_checkpoint(model, f'step_{cur_step}')
 
-        # Drain last prefetched batch
-        if prefetch_future is not None:
-            emb_features = prefetch_future.result()
-            if emb_features is not None:
-                model.forward_backward(inputs=emb_features, task='embedding')
-                model.clip_grad_and_step()
-                cur_step += 1
+        # # Drain last prefetched batch
+        # if prefetch_future is not None:
+        #     emb_features = prefetch_future.result()
+        #     if emb_features is not None:
+        #         model.forward_backward(inputs=emb_features, task='embedding')
+        #         model.clip_grad_and_step()
+        #         cur_step += 1
 
     prefetch_executor.shutdown(wait=False)
     retrainer.stop()
