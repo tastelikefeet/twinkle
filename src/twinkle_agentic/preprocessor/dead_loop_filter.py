@@ -35,8 +35,9 @@ _EN_HESITATE = re.compile(
 
 _ZH_HESITATE = re.compile(
     r'('
-    # Direct hesitation tokens
-    r'等等[，,。\s]*\.{0,3}|等一下[，,。]?|哦等等|不不不+|'
+    # Direct hesitation tokens. Note: '等一下' is excluded — it overwhelmingly
+    # appears as a polite '稍等一下' / '请等一下' rather than self-hesitation.
+    r'等等[，,。\s]*\.{0,3}|哦等等|不不不+|'
     # Note: 哦 is excluded (95%+ sentence-final particle, e.g. "拍拍我哦"); 嗯 requires
     # repetition (single 嗯 is often affirmation, e.g. "嗯，好的").
     r'嗯{2,}[，,。\s]*\.{0,3}|呃+[，,。\s]*\.{0,3}|'
@@ -77,9 +78,11 @@ _KO_HESITATE = re.compile(
 # Combined list for density scan
 _HESITATE_PATTERNS = (_EN_HESITATE, _ZH_HESITATE, _JA_HESITATE, _KO_HESITATE)
 
-# Lightweight per-char cascade pattern (fast scan for dense clusters)
+# Lightweight per-char cascade pattern (fast scan for dense clusters).
+# 'let me' is excluded — it is the canonical agent-prelude phrasing
+# ("Let me read the file...") and over-fires on long agent trajectories.
 _CASCADE_RE = re.compile(
-    r'\b(wait|actually|hmm|no\s+wait|oh\s+wait|let\s+me|'
+    r'\b(wait|actually|hmm|no\s+wait|oh\s+wait|'
     r'i\s+was\s+wrong|i\s+made\s+an?\s+(error|mistake))\b|'
     r'(等等|不对|重新|错了|嗯{2,}|让我再)',
     re.IGNORECASE | re.UNICODE,
@@ -115,7 +118,7 @@ def _high_repetition_with_threshold(text: str, threshold: float, ngram_size: int
 
 def _is_stuck(
     text: str,
-    hesitation_density_threshold: float = 5.0,
+    hesitation_density_threshold: float = 7.0,
     cascade_window: int = 800,
     cascade_threshold: int = 5,
     repetition_threshold: float = 0.45,
@@ -155,7 +158,7 @@ class DeadLoopFilter(Preprocessor):
 
     def __init__(
         self,
-        hesitation_density_threshold: float = 5.0,
+        hesitation_density_threshold: float = 7.0,
         cascade_window: int = 800,
         cascade_threshold: int = 5,
         repetition_threshold: float = 0.45,
@@ -179,6 +182,12 @@ class DeadLoopFilter(Preprocessor):
     def __call__(self, rows) -> List[Dict[str, Any]]:
         out = []
         for row in rows:
+            # Agent rollouts (Cline / OpenClaw / Claude Code) carry long
+            # trajectories whose phrasing legitimately matches our hesitation
+            # heuristics; trust the upstream AgentTraceFilter tag and skip.
+            if row.get('is_agent'):
+                out.append(row)
+                continue
             messages = row.get('messages') or []
             asst_msgs = [
                 m for m in messages

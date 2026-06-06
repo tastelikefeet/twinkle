@@ -7,6 +7,7 @@ from twinkle.utils import get_logger
 from twinkle.utils.parallel import PosixFileLock
 
 from .consistency_filter import ConsistencyFilter
+from .agent_trace_filter import AgentTraceFilter
 from .data_juicer import (
     AlphanumericFilter,
     CharRepeatFilter,

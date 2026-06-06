@@ -33,7 +33,7 @@ from twinkle.template import Qwen3_5Template
 from twinkle_agentic.preprocessor import (
     QualityPreprocessor, SamplerBackend,
     IntentClassifier, ResponseRefiner, ScoreFilter,
-    HardFilter, RefuseFilter, DeadLoopFilter, TokenSoupFilter, MessageSanityFilter,
+    HardFilter, RefuseFilter, AgentTraceFilter, DeadLoopFilter, TokenSoupFilter, MessageSanityFilter,
     FixUnicodeFilter, RemoveRepeatSentencesFilter,
     WordRepeatFilter, CharRepeatFilter, SpecialCharsFilter, AlphanumericFilter,
     FlaggedWordsFilter, MinHashDedupFilter, PIIPresidioFilter,
@@ -71,7 +71,7 @@ ADAPTER_NAME = 'default'
 
 # ── Data source ──────────────────────────────────────────────────────────────
 CSV_PATH = os.environ.get(
-    'CSV_PATH', '/mnt/workspace/yzhao/tastelikefeet/bc/ds_csv/data/20250919.csv')
+    'CSV_PATH', '/mnt/workspace/yzhao/tastelikefeet/bc/ds_csv/data/20260531.csv')
 DATASET_TOTAL = int(os.environ.get('DATASET_TOTAL', 1000))  # 0 = unbounded stream
 
 
@@ -157,9 +157,12 @@ def build_dataset(backend: SamplerBackend) -> IterableDataset:
             # Phase 1-5: deterministic structural filters
             HardFilter(),
             RefuseFilter(),
+            # Tag agent rollouts (Cline / OpenClaw / Claude Code) so DeadLoop
+            # / sanity rules can adapt instead of mass-dropping them.
+            AgentTraceFilter(),
             DeadLoopFilter(),
             TokenSoupFilter(),
-            MessageSanityFilter(),
+            MessageSanityFilter(max_msg_chars=200000),
             # Phase 6-7: text normalization (mappers)
             FixUnicodeFilter(),
             RemoveRepeatSentencesFilter(),

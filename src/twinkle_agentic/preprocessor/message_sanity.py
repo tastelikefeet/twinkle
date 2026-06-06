@@ -65,47 +65,99 @@ def _msg_content_text(msg: Dict[str, Any]) -> str:
 
 # ── Role order validation ────────────────────────────────────────────────────
 
-def _validate_role_order(messages: List[Dict[str, Any]]) -> bool:
+def _consolidate_system_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Fold every ``role='system'`` message into one block at index 0.
+
+    Multi-block agents (Claude Code skills/billing/tooling) emit several
+    system messages, sometimes interleaved with the conversation
+    (``[sys, user, sys, asst, ...]``). Chat templates expect at most one
+    system block at the start; we collect all system contents in original
+    order and concatenate them. Non-system messages keep their relative order.
+
+    Returns the input list unchanged (identity-equal) when it is already
+    canonical (≤1 system, at index 0) so callers can use ``is`` for an O(1)
+    "changed?" check.
+    """
+    sys_count = 0
+    misplaced = False
+    for i, m in enumerate(messages):
+        if isinstance(m, dict) and m.get('role') == 'system':
+            sys_count += 1
+            if i != 0:
+                misplaced = True
+    if sys_count <= 1 and not misplaced:
+        return messages
+
+    sys_chunks: List[str] = []
+    rest: List[Dict[str, Any]] = []
+    template: Optional[Dict[str, Any]] = None
+    for m in messages:
+        if isinstance(m, dict) and m.get('role') == 'system':
+            if template is None:
+                template = m
+            text = _msg_content_text(m).strip()
+            if text:
+                sys_chunks.append(text)
+        else:
+            rest.append(m)
+    return [dict(template, content='\n\n'.join(sys_chunks))] + rest
+
+
+def _validate_role_order(messages: List[Dict[str, Any]], is_agent: bool = False) -> bool:
     """Check that message roles follow a sane conversational order.
 
-    Rules:
-    - Every message must have a valid role.
+    Strict rules (default):
+    - Every message has a valid role.
     - system (if present) must be at index 0.
-    - The first non-system message must be ``user`` (chat templates require a user query before any assistant).
-    - Every ``assistant`` must have at least one ``user`` somewhere before it.
-    - tool messages must immediately follow an assistant message (that has tool_calls).
-    - user/assistant should roughly alternate (we allow tool in between).
+    - The first non-system message must be ``user``.
+    - Every ``assistant`` has at least one ``user`` somewhere before it.
+    - tool messages immediately follow an assistant with ``tool_calls`` (or a
+      preceding tool, for parallel calls).
+
+    Agent rules (``is_agent=True``, e.g. Cline / OpenClaw text-based tool calls):
+    - tool messages may follow any role as long as some assistant exists
+      earlier in the conversation (the structured ``tool_calls`` field is
+      absent because the call is encoded inside assistant text).
     """
     if not messages:
         return False
 
     seen_user = False
-    first_non_system_checked = False
+    seen_assistant = False
+    saw_first_non_system = False
     for i, m in enumerate(messages):
         if not isinstance(m, dict):
             return False
         role = m.get('role')
         if role not in _VALID_ROLES:
             return False
-        if role == 'system' and i != 0:
-            return False
-        if role != 'system' and not first_non_system_checked:
+        if role == 'system':
+            if i != 0:
+                return False
+            continue
+        if not saw_first_non_system:
             if role != 'user':
                 return False
-            first_non_system_checked = True
+            saw_first_non_system = True
         if role == 'user':
             seen_user = True
-        if role == 'assistant' and not seen_user:
-            return False
-        if role == 'tool':
-            if i == 0:
+        elif role == 'assistant':
+            if not seen_user:
                 return False
-            prev = messages[i - 1]
-            prev_role = prev.get('role')
-            if prev_role == 'assistant' and not prev.get('tool_calls'):
-                return False
-            if prev_role not in ('assistant', 'tool'):
-                return False
+            seen_assistant = True
+        elif role == 'tool':
+            if is_agent:
+                if not seen_assistant:
+                    return False
+            else:
+                prev = messages[i - 1]
+                if not isinstance(prev, dict):
+                    return False
+                prev_role = prev.get('role')
+                if prev_role not in ('assistant', 'tool'):
+                    return False
+                if prev_role == 'assistant' and not prev.get('tool_calls'):
+                    return False
     return True
 
 
@@ -278,13 +330,20 @@ class MessageSanityFilter(Preprocessor):
             messages = row.get('messages')
             if not isinstance(messages, list) or not messages:
                 continue
+            is_agent = bool(row.get('is_agent'))
+
+            # Step 0: fold all system blocks into one at index 0
+            normalized = _consolidate_system_messages(messages)
+            if normalized is not messages:
+                messages = normalized
+                row = dict(row, messages=messages)
 
             # Step 1: role order check
-            if self.check_role_order and not _validate_role_order(messages):
+            if self.check_role_order and not _validate_role_order(messages, is_agent=is_agent):
                 continue
 
-            # Step 1.5: tool_call_id matching
-            if self.check_tool_matching and not _validate_tool_call_matching(messages):
+            # Step 1.5: tool_call_id matching (skip for agent rows: text-based tool calls have no IDs)
+            if self.check_tool_matching and not is_agent and not _validate_tool_call_matching(messages):
                 continue
 
             # Step 2: trim to last assistant
