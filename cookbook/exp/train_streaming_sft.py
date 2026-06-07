@@ -70,9 +70,9 @@ ADAPTER_NAME = 'default'
 # ── Data source ──────────────────────────────────────────────────────────────
 CSV_PATH = os.environ.get(
     'CSV_PATH', '/mnt/workspace/yzhao/tastelikefeet/bc/ds_csv/data/20260531.csv')
-DATASET_TOTAL = int(os.environ.get('DATASET_TOTAL', 3000))  # 0 = full materialized dataset
+DATASET_TOTAL = int(os.environ.get('DATASET_TOTAL', 1000))  # 0 = full materialized dataset
 # Worker count for HF Dataset.map(num_proc=N); spawn start method is forced in twinkle.dataset.base.
-MAP_NUM_PROC = int(os.environ.get('MAP_NUM_PROC', 64))
+MAP_NUM_PROC = int(os.environ.get('MAP_NUM_PROC', 1))
 
 
 def _canonicalize_tool_call(tc: Any) -> Dict[str, Any]:
@@ -224,13 +224,13 @@ def build_dataset(backend: SamplerBackend) -> Dataset:
     qp = QualityPreprocessor(
         pipeline=[
             # Phase 1-5: deterministic structural filters
-            HardFilter(),
+            HardFilter(min_user_chars_cjk=14, min_user_chars=24),
             RefuseFilter(),
             # Tag agent rollouts (Cline / OpenClaw / Claude Code) so DeadLoop
             # / sanity rules can adapt instead of mass-dropping them.
             AgentTraceFilter(),
             DeadLoopFilter(),
-            MessageSanityFilter(max_msg_chars=30000),
+            MessageSanityFilter(sensitive_words_file='.temp/sensitive_words.txt'),
             # Phase 8-10: repetition & character quality
             WordRepeatFilter(),
             CharRepeatFilter(),

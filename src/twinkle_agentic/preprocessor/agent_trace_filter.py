@@ -16,22 +16,12 @@ Two consequences this preprocessor exists to handle:
 Detection-only: rows are tagged ``is_agent=True`` and never dropped.
 Downstream filters read the flag and adapt.
 """
-import re
 from typing import Any, Dict, List
 
 from twinkle.preprocessor import Preprocessor
+from twinkle.template.tools import ToolCallRegistry
 
-# Conservative whitelist of well-known agent tool tag names. Generic names like
-# 'bash' / 'shell' / 'python_exec' are deliberately excluded — they appear in
-# regular code blocks (``<bash>echo hi</bash>``) and would falsely suppress
-# DeadLoopFilter on plain technical content.
-_AGENT_TAG_RE = re.compile(
-    r'<(?:read_file|write_to_file|replace_in_file|execute_command|list_files|'
-    r'search_files|browser_action|use_mcp_tool|access_mcp_resource|'
-    r'attempt_completion|new_task|plan_mode_respond|ask_followup_question|'
-    r'list_code_definition_names|feishu_doc|feishu_message|bark_\w+)\b',
-    re.IGNORECASE,
-)
+from .message_sanity import _normalize_tool_calls
 
 
 def _msg_text(m: Dict[str, Any]) -> str:
@@ -53,10 +43,12 @@ def _is_agent_row(messages: Any) -> bool:
         role = m.get('role')
         if role == 'tool':
             return True
-        tcs = m.get('tool_calls')
-        if isinstance(tcs, list) and tcs:
+        tcs = _normalize_tool_calls(m)
+        if tcs:
             return True
-        if role == 'assistant' and _AGENT_TAG_RE.search(_msg_text(m)):
+        # Text-embedded tool calls (Cline / OpenClaw / Claude-Code style):
+        # delegate detection to the parser registry — no hardcoded tag list.
+        if role == 'assistant' and ToolCallRegistry.detect_first(_msg_text(m)) is not None:
             return True
     return False
 

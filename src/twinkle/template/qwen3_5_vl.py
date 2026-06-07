@@ -7,8 +7,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 from twinkle import remote_class, requires
 from twinkle.data_format import InputFeature
-from twinkle.template.base import ImageInput, VideoInput
-from twinkle.template.qwen import QwenTemplate
+from twinkle.template.base import ImageInput, Template, VideoInput
 from twinkle.template.utils import get_inputs_embeds_hf
 
 _ROPE_INDEX_CACHE: Dict[str, Callable] = {}
@@ -31,7 +30,7 @@ def _build_rope_index_func(config) -> Callable:
 
 
 @remote_class()
-class Qwen3_5Template(QwenTemplate):
+class Qwen3_5Template(Template):
     """
     Processor for Qwen VL series.
 

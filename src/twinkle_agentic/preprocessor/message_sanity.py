@@ -63,6 +63,25 @@ def _msg_content_text(msg: Dict[str, Any]) -> str:
     return ''
 
 
+def _normalize_tool_calls(msg: Dict[str, Any]) -> Optional[List[Any]]:
+    """Return ``tool_calls`` as a list, decoding the JSON-string form used for
+    PyArrow schema stability. Returns ``None`` when absent / empty / malformed.
+    """
+    tcs = msg.get('tool_calls')
+    if isinstance(tcs, str):
+        s = tcs.strip()
+        if not s:
+            return None
+        try:
+            decoded = json.loads(s)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        return decoded if isinstance(decoded, list) and decoded else None
+    if isinstance(tcs, list) and tcs:
+        return tcs
+    return None
+
+
 # ── Role order validation ────────────────────────────────────────────────────
 
 def _consolidate_system_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -184,7 +203,7 @@ def _validate_content_integrity(
         elif role == 'assistant':
             assistant_count += 1
             # Assistant must have content or tool_calls
-            if not content.strip() and not m.get('tool_calls'):
+            if not content.strip() and not _normalize_tool_calls(m):
                 return False
         elif role == 'system':
             if not content.strip():
@@ -195,8 +214,9 @@ def _validate_content_integrity(
             return False
 
         # tool_calls structural validity
-        if m.get('tool_calls'):
-            for tc in m['tool_calls']:
+        norm_tcs = _normalize_tool_calls(m)
+        if norm_tcs is not None:
+            for tc in norm_tcs:
                 if not isinstance(tc, dict):
                     return False
                 func = tc.get('function')
@@ -236,30 +256,34 @@ def _validate_tool_call_matching(messages: List[Dict[str, Any]]) -> bool:
         if not isinstance(m, dict):
             i += 1
             continue
-        if m.get('role') == 'assistant' and m.get('tool_calls'):
-            # Collect expected IDs from this assistant's tool_calls
-            expected_ids = set()
-            for tc in m['tool_calls']:
-                if isinstance(tc, dict) and tc.get('id'):
-                    expected_ids.add(tc['id'])
-            if not expected_ids:
+        if m.get('role') == 'assistant':
+            norm_tcs = _normalize_tool_calls(m)
+            if norm_tcs:
+                # Collect expected IDs from this assistant's tool_calls
+                expected_ids = set()
+                for tc in norm_tcs:
+                    if isinstance(tc, dict) and tc.get('id'):
+                        expected_ids.add(tc['id'])
+                if not expected_ids:
+                    i += 1
+                    continue
+                # Collect actual tool response IDs that follow
+                actual_ids = set()
+                j = i + 1
+                while j < len(messages):
+                    nxt = messages[j]
+                    if not isinstance(nxt, dict) or nxt.get('role') != 'tool':
+                        break
+                    tid = nxt.get('tool_call_id')
+                    if tid:
+                        actual_ids.add(tid)
+                    j += 1
+                # Must have at least one matching response; all responses must reference valid calls
+                if not actual_ids or not actual_ids.issubset(expected_ids):
+                    return False
+                i = j
+            else:
                 i += 1
-                continue
-            # Collect actual tool response IDs that follow
-            actual_ids = set()
-            j = i + 1
-            while j < len(messages):
-                nxt = messages[j]
-                if not isinstance(nxt, dict) or nxt.get('role') != 'tool':
-                    break
-                tid = nxt.get('tool_call_id')
-                if tid:
-                    actual_ids.add(tid)
-                j += 1
-            # Must have at least one matching response; all responses must reference valid calls
-            if not actual_ids or not actual_ids.issubset(expected_ids):
-                return False
-            i = j
         else:
             i += 1
     return True
