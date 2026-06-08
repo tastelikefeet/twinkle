@@ -24,7 +24,7 @@ from peft import LoraConfig
 import twinkle
 from twinkle import DeviceMesh, DeviceGroup, get_device_placement, get_logger
 from twinkle.dataloader import DataLoader
-from twinkle.dataset import Dataset
+from twinkle.dataset import Dataset, PackingDataset
 from twinkle.dataset.base import DatasetMeta
 from twinkle.model import TransformersModel
 from twinkle.sampler import vLLMSampler
@@ -34,7 +34,7 @@ from twinkle_agentic.preprocessor import (
     IntentClassifier, ResponseRefiner, ScoreFilter,
     HardFilter, RefuseFilter, DeadLoopFilter, TokenSoupFilter, MessageSanityFilter,
     SpecialCharsFilter, PIIPresidioFilter, ModelFilter, DedupFilter,
-    ToolCallNormalizer,
+    MessageNormalizer,
 )
 from twinkle_agentic.preprocessor.score_filter import (
     ChrMinScorer, PassNScorer, ParaphraseScorer,
@@ -49,14 +49,14 @@ TEMPLATE_NAME = 'Qwen3_5Template'
 MAX_LENGTH = 40000
 
 # ── GPU allocation ───────────────────────────────────────────────────────────
-MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 4))
-SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS', 4))
+MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 8))
+SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS', 0))
 NUM_GPUS = MODEL_GPUS + SAMPLER_GPUS
 
 # ── Training ─────────────────────────────────────────────────────────────────
-BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 4))
-LEARNING_RATE = float(os.environ.get('LR', 1e-4))
-GRADIENT_ACCUMULATION_STEPS = int(os.environ.get('GRAD_ACCUM', 8))
+BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 2))
+LEARNING_RATE = float(os.environ.get('LR', 1e-5))
+GRADIENT_ACCUMULATION_STEPS = int(os.environ.get('GRAD_ACCUM', 4))
 LOG_INTERVAL = 1
 SAVE_INTERVAL = 500
 NUM_STEPS = int(os.environ.get('NUM_STEPS', 5000))
@@ -70,9 +70,9 @@ ADAPTER_NAME = 'default'
 # ── Data source ──────────────────────────────────────────────────────────────
 CSV_PATH = os.environ.get(
     'CSV_PATH', '/mnt/workspace/yzhao/tastelikefeet/bc/ds_csv/data/20260531.csv')
-DATASET_TOTAL = int(os.environ.get('DATASET_TOTAL', 1000))  # 0 = full materialized dataset
+DATASET_TOTAL = int(os.environ.get('DATASET_TOTAL', 10000))  # 0 = full materialized dataset
 # Worker count for HF Dataset.map(num_proc=N); spawn start method is forced in twinkle.dataset.base.
-MAP_NUM_PROC = int(os.environ.get('MAP_NUM_PROC', 1))
+MAP_NUM_PROC = int(os.environ.get('MAP_NUM_PROC', 16))
 
 
 def _canonicalize_tool_call(tc: Any) -> Dict[str, Any]:
@@ -216,7 +216,7 @@ def build_dataset(backend: SamplerBackend) -> Dataset:
         dataset_id=Path(CSV_PATH).stem,
         data=partial(_stream_csv_rows, csv_path=CSV_PATH, max_rows=DATASET_TOTAL),
     )
-    dataset = Dataset(meta)
+    dataset = PackingDataset(meta)
     # template kept for future re-enablement of ScoreFilter; unused in current pipeline.
     _ = Qwen3_5Template(model_id=MODEL_ID, max_length=MAX_LENGTH,
         truncation_strategy='delete',
@@ -225,6 +225,7 @@ def build_dataset(backend: SamplerBackend) -> Dataset:
     qp = QualityPreprocessor(
         pipeline=[
             ModelFilter(),
+            MessageNormalizer(),
             HardFilter(
                 min_user_chars_cjk=14, min_user_chars=24,
                 system_deny_keywords=[
@@ -232,7 +233,6 @@ def build_dataset(backend: SamplerBackend) -> Dataset:
                     '群聊模拟', '虚拟角色', '二次元', 'OC设定',
                 ],
             ),
-            ToolCallNormalizer(),
             RefuseFilter(),
             DeadLoopFilter(),
             MessageSanityFilter(sensitive_words_file='.temp/sensitive_words.txt'),
@@ -279,7 +279,7 @@ def build_dataset(backend: SamplerBackend) -> Dataset:
         ],
         dropped_log_path=DROPPED_DATA_PATH,
     )
-    dataset.map(qp, num_proc=MAP_NUM_PROC, load_from_cache_file=False)
+    dataset.map(qp, num_proc=MAP_NUM_PROC, load_from_cache_file=True)
     dataset.save_as('output/streaming_sft/filtered.jsonl')
 
     dataset.set_template(
@@ -289,8 +289,8 @@ def build_dataset(backend: SamplerBackend) -> Dataset:
         truncation_strategy='delete',
         enable_thinking=False,
     )
-    dataset.encode(num_proc=MAP_NUM_PROC, load_from_cache_file=False)
-
+    dataset.encode(num_proc=MAP_NUM_PROC, load_from_cache_file=True)
+    dataset.pack_dataset()
     return dataset
 
 
@@ -308,28 +308,28 @@ def train():
     # ── Ray mode: GPUs 0-3 for training, GPUs 4-7 for vLLMSampler ────────────
     device_groups = [
         DeviceGroup(name='model', ranks=list(range(MODEL_GPUS)), device_type='GPU'),
-        DeviceGroup(name='sampler', ranks=list(range(MODEL_GPUS, NUM_GPUS)), device_type='GPU', gpus_per_worker=2),
+        # DeviceGroup(name='sampler', ranks=list(range(MODEL_GPUS, NUM_GPUS)), device_type='GPU', gpus_per_worker=2),
     ]
-    model_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, dp_size=MODEL_GPUS // 2, fsdp_size=2)
-    sampler_mesh = DeviceMesh.from_sizes(world_size=SAMPLER_GPUS, dp_size=SAMPLER_GPUS // 2, tp_size=2)
+    model_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, dp_size=2, fsdp_size=4, ulysses_size=4)
+    # sampler_mesh = DeviceMesh.from_sizes(world_size=SAMPLER_GPUS, dp_size=SAMPLER_GPUS // 2, tp_size=2)
     twinkle.initialize(mode='ray', nproc_per_node=NUM_GPUS, groups=device_groups, lazy_collect=False)
 
     # ── vLLMSampler on GPUs 4-7 (Ray actor, no HTTP overhead) ────────────────
-    sampler = vLLMSampler(
-        model_id=MODEL_ID,
-        engine_args={
-            'gpu_memory_utilization': 0.6,
-            'max_model_len': MAX_LENGTH,
-        },
-        device_mesh=sampler_mesh,
-        remote_group='sampler',
-    )
-    sampler.set_template(TEMPLATE_NAME, model_id=MODEL_ID)
-    backend = SamplerBackend(sampler)
-    logger.info(f'vLLMSampler ready on GPUs {MODEL_GPUS}-{NUM_GPUS - 1}')
+    # sampler = vLLMSampler(
+    #     model_id=MODEL_ID,
+    #     engine_args={
+    #         'gpu_memory_utilization': 0.6,
+    #         'max_model_len': MAX_LENGTH,
+    #     },
+    #     device_mesh=sampler_mesh,
+    #     remote_group='sampler',
+    # )
+    # sampler.set_template(TEMPLATE_NAME, model_id=MODEL_ID)
+    # backend = SamplerBackend(sampler)
+    # logger.info(f'vLLMSampler ready on GPUs {MODEL_GPUS}-{NUM_GPUS - 1}')
 
     # ── Dataset with full QualityPreprocessor (uses SamplerBackend) ───────────
-    dataset = build_dataset(backend)
+    dataset = build_dataset(None)
     dataloader = DataLoader(
         dataset=dataset,
         batch_size=BATCH_SIZE,
@@ -342,10 +342,10 @@ def train():
         remote_group='model',
     )
 
-    lora_config = LoraConfig(r=16, lora_alpha=32, target_modules='all-linear')
-    model.add_adapter_to_model(
-        ADAPTER_NAME, lora_config,
-        gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS)
+    # lora_config = LoraConfig(r=16, lora_alpha=32, target_modules='all-linear')
+    # model.add_adapter_to_model(
+    #     ADAPTER_NAME, lora_config,
+    #     gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS)
     model.set_optimizer(optimizer_cls='AdamW', lr=LEARNING_RATE)
     model.set_lr_scheduler(
         scheduler_cls='CosineWarmupScheduler',

@@ -321,7 +321,7 @@ def build_sensitive_regex(words: Set[str]) -> Optional['re.Pattern']:
 def is_agent_row(messages) -> bool:
     """Return True if the conversation contains tool interactions (agent trace).
 
-    After ToolCallNormalizer runs, all non-standard formats are already converted
+    After MessageNormalizer runs, all non-standard formats are already converted
     to standard tool_calls / role=tool — so checking those two signals suffices.
     """
     if not isinstance(messages, list):

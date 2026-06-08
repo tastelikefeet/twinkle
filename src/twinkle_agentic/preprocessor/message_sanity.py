@@ -195,10 +195,10 @@ def check_content_integrity(messages: List[Dict[str, Any]], is_agent: bool, cfg:
                         _json.loads(args)
                     except (ValueError, _json.JSONDecodeError):
                         return False
-        # consecutive duplicate detection (skip tool — parallel calls may repeat)
-        if i > 0 and role != 'tool' and isinstance(messages[i - 1], dict):
+        # consecutive duplicate detection (skip tool and assistant-with-tool_calls)
+        if i > 0 and role != 'tool' and not m.get('tool_calls') and isinstance(messages[i - 1], dict):
             prev = messages[i - 1]
-            if prev.get('role') == role and msg_content_text(prev) == content and content:
+            if prev.get('role') == role and not prev.get('tool_calls') and msg_content_text(prev) == content and content:
                 return False
     if user_count < 1 or assistant_count < 1:
         return False
@@ -293,8 +293,8 @@ class MessageSanityFilter(Preprocessor):
         sensitive_words_file: Optional[str] = None,
         extra_sensitive_words: Optional[List[str]] = None,
         min_turns: int = 2,
-        max_msg_chars: int = 50000,
-        min_agent_visible_chars: int = 200,
+        max_msg_chars: int = 80000,
+        min_agent_visible_chars: int = 50,
     ) -> None:
         super().__init__()
         self._trim = trim_to_assistant
