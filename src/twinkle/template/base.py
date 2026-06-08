@@ -36,7 +36,7 @@ class Template:
                  model_id: str,
                  use_chat_template: bool = True,
                  max_length: Optional[int] = 8192,
-                 truncation_strategy: Literal['raise', 'left', 'right', 'split'] = 'raise',
+                 truncation_strategy: Literal['raise', 'left', 'right', 'split', 'delete'] = 'raise',
                  default_system: Optional[str] = None,
                  enable_thinking: bool = True,
                  **kwargs):
@@ -392,6 +392,8 @@ class Template:
                 result['labels'] = result['labels'][:self.max_length]
             if 'mm_token_type_ids' in result:
                 result['mm_token_type_ids'] = result['mm_token_type_ids'][..., :self.max_length]
+        else:
+            raise ValueError(f'Unsupported truncation_strategy={strategy!r}.')
         return InputFeature(**result)
 
     def set_mm_position_ids(self, input_feature: InputFeature):
@@ -419,6 +421,12 @@ class Template:
                     feat['mm_token_type_ids'] = feat['mm_token_type_ids'][..., start:end]
                 results.append(InputFeature(**feat))
             return results
+
+        # Drop oversized samples entirely; downstream must tolerate empty list (sample skipped).
+        if strategy == 'delete':
+            if len(input_feature['input_ids']) > self.max_length:
+                return []
+            return [input_feature]
 
         # left/right/raise
         return [self._truncate_feature(input_feature, strategy)]

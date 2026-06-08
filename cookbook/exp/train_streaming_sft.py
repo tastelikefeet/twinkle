@@ -46,7 +46,7 @@ logger = get_logger()
 MODEL_ID = 'ms://Qwen/Qwen3.5-4B'
 MODEL_LOCAL_PATH = os.environ.get('MODEL_LOCAL_PATH', 'Qwen/Qwen3.5-4B')
 TEMPLATE_NAME = 'Qwen3_5Template'
-MAX_LENGTH = 40000
+MAX_LENGTH = 150000
 
 # ── GPU allocation ───────────────────────────────────────────────────────────
 MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 8))
@@ -54,7 +54,7 @@ SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS', 0))
 NUM_GPUS = MODEL_GPUS + SAMPLER_GPUS
 
 # ── Training ─────────────────────────────────────────────────────────────────
-BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 2))
+BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 8))
 LEARNING_RATE = float(os.environ.get('LR', 1e-5))
 GRADIENT_ACCUMULATION_STEPS = int(os.environ.get('GRAD_ACCUM', 4))
 LOG_INTERVAL = 1
@@ -217,10 +217,6 @@ def build_dataset(backend: SamplerBackend) -> Dataset:
         data=partial(_stream_csv_rows, csv_path=CSV_PATH, max_rows=DATASET_TOTAL),
     )
     dataset = PackingDataset(meta)
-    # template kept for future re-enablement of ScoreFilter; unused in current pipeline.
-    _ = Qwen3_5Template(model_id=MODEL_ID, max_length=MAX_LENGTH,
-        truncation_strategy='delete',
-        enable_thinking=False)
 
     qp = QualityPreprocessor(
         pipeline=[
@@ -289,7 +285,7 @@ def build_dataset(backend: SamplerBackend) -> Dataset:
         truncation_strategy='delete',
         enable_thinking=False,
     )
-    dataset.encode(num_proc=MAP_NUM_PROC, load_from_cache_file=True)
+    dataset.encode(num_proc=MAP_NUM_PROC, load_from_cache_file=False)
     dataset.pack_dataset()
     return dataset
 
@@ -310,7 +306,7 @@ def train():
         DeviceGroup(name='model', ranks=list(range(MODEL_GPUS)), device_type='GPU'),
         # DeviceGroup(name='sampler', ranks=list(range(MODEL_GPUS, NUM_GPUS)), device_type='GPU', gpus_per_worker=2),
     ]
-    model_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, dp_size=2, fsdp_size=4, ulysses_size=4)
+    model_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, dp_size=2, fsdp_size=4)
     # sampler_mesh = DeviceMesh.from_sizes(world_size=SAMPLER_GPUS, dp_size=SAMPLER_GPUS // 2, tp_size=2)
     twinkle.initialize(mode='ray', nproc_per_node=NUM_GPUS, groups=device_groups, lazy_collect=False)
 

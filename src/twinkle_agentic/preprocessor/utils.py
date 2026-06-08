@@ -305,7 +305,7 @@ def build_sensitive_regex(words: Set[str]) -> Optional['re.Pattern']:
     cjk_words = []
     latin_words = []
     cjk_re = re.compile(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7a3]')
-    for w in words:
+    for w in sorted(words):
         if cjk_re.search(w):
             cjk_words.append(re.escape(w))
         else:
