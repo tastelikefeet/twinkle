@@ -68,13 +68,19 @@ HARD_NEGATIVES = None
 TEMPERATURE = 0.03
 
 BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 32))
-LEARNING_RATE = 1e-5
+LEARNING_RATE = 1.5e-6
 GRADIENT_ACCUMULATION_STEPS = 1
 LOG_INTERVAL = 2
 SAVE_INTERVAL = 4000
 NUM_EPOCHS = 2
 
 TOTAL_SAMPLES: Optional[int] = None
+
+# -- Resume from checkpoint ---------------------------------------------------
+RESUME_CHECKPOINT = os.environ.get(
+    'RESUME_CHECKPOINT',
+    './output/embedding_lora_transformers/step_16000')
+RESUME_STEP = int(os.environ.get('RESUME_STEP', 16000))
 
 # -- Online-compression knobs -------------------------------------------------
 # Below this length, condenser fabricates content for open-ended short prompts;
@@ -261,9 +267,10 @@ def _log_failure(source_text: str, query: str, compressed: str, batch_idx: int):
 # =============================================================================
 
 def build_model(device_mesh: DeviceMesh):
+    model_id = RESUME_CHECKPOINT if RESUME_CHECKPOINT else MODEL_ID
     if BACKEND == 'transformers':
         model = TransformersModel(
-            model_id=MODEL_ID,
+            model_id=model_id,
             device_mesh=device_mesh,
             remote_group='model',
             ddp_config={'find_unused_parameters': True},
@@ -584,6 +591,10 @@ def train():
     logger.info(get_device_placement())
     logger.info(model.get_train_configs())
     logger.info(f'Total forward steps: {total_forward_steps}, optimizer steps: {optimizer_steps}')
+    if RESUME_STEP > 0:
+        logger.info(f'Resuming from step {RESUME_STEP}, checkpoint: {RESUME_CHECKPOINT}')
+        logger.info(f'Starting at epoch {RESUME_STEP // (total_forward_steps // NUM_EPOCHS)}, '
+                    f'skipping {RESUME_STEP - (RESUME_STEP // (total_forward_steps // NUM_EPOCHS)) * (total_forward_steps // NUM_EPOCHS)} batches')
 
     swanlab.init(project='twinkle', config={
         'backend': BACKEND,
@@ -671,10 +682,21 @@ def train():
             return None
         return emb_features
 
-    cur_step = 0
+    cur_step = RESUME_STEP
+    # Compute which epoch and how many batches to skip within that epoch
+    _batches_per_epoch = len(dataloader)
+    _start_epoch = cur_step // _batches_per_epoch if cur_step > 0 else 0
+    _skip_batches_in_epoch = cur_step - _start_epoch * _batches_per_epoch if cur_step > 0 else 0
+
     prefetch_executor = ThreadPoolExecutor(max_workers=1)
-    for epoch in range(NUM_EPOCHS):
+    for epoch in range(_start_epoch, NUM_EPOCHS):
+        # Skip consumed samples for the resume epoch (shuffle order won't match
+        # exactly, but the correct number of samples is skipped).
+        if _skip_batches_in_epoch > 0:
+            dataloader.skip_consumed_samples(_skip_batches_in_epoch * BATCH_SIZE)
         batch_iter = iter(dataloader)
+        # Reset skip after first resumed epoch
+        _skip_batches_in_epoch = 0
         prefetch_future = None
         first_batch = next(batch_iter, None)
         if first_batch is not None:
