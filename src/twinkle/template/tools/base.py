@@ -30,6 +30,14 @@ class ToolCallParser(ABC):
     def clean(self, text: str) -> str:
         """Strip parser-specific markup; return plain content text."""
 
+    def detect_result(self, text: str) -> bool:
+        """Does ``text`` look like a tool-result message for this protocol?"""
+        return False
+
+    def parse_result(self, text: str) -> str:
+        """Strip protocol-specific result prefix; return the raw tool output body."""
+        return text
+
 
 class ToolCallRegistry:
     """Global ordered registry of :class:`ToolCallParser` instances."""

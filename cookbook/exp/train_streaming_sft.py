@@ -34,6 +34,7 @@ from twinkle_agentic.preprocessor import (
     IntentClassifier, ResponseRefiner, ScoreFilter,
     HardFilter, RefuseFilter, DeadLoopFilter, TokenSoupFilter, MessageSanityFilter,
     SpecialCharsFilter, PIIPresidioFilter, ModelFilter, DedupFilter,
+    ToolCallNormalizer,
 )
 from twinkle_agentic.preprocessor.score_filter import (
     ChrMinScorer, PassNScorer, ParaphraseScorer,
@@ -223,9 +224,7 @@ def build_dataset(backend: SamplerBackend) -> Dataset:
 
     qp = QualityPreprocessor(
         pipeline=[
-            # Phase 0: model whitelist
             ModelFilter(),
-            # Phase 1-5: deterministic structural filters
             HardFilter(
                 min_user_chars_cjk=14, min_user_chars=24,
                 system_deny_keywords=[
@@ -233,12 +232,11 @@ def build_dataset(backend: SamplerBackend) -> Dataset:
                     '群聊模拟', '虚拟角色', '二次元', 'OC设定',
                 ],
             ),
+            ToolCallNormalizer(),
             RefuseFilter(),
             DeadLoopFilter(),
             MessageSanityFilter(sensitive_words_file='.temp/sensitive_words.txt'),
-            # Phase 8-10: repetition & character quality
             SpecialCharsFilter(max_ratio=0.6),
-            # TokenSoupFilter samples head only — signals are uniform/statistical, no need to scan multi-MB tool payloads.
             TokenSoupFilter(max_chars=8000),
             IntentClassifier(),
             # Phase 12: conversation-level dedup (max 3 per system+user signature)

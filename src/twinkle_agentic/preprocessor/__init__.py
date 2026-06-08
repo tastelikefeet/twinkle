@@ -26,6 +26,7 @@ from .refuse_filter import RefuseFilter
 from .response_refiner import ResponseRefiner
 from .score_filter import ScoreFilter
 from .token_soup import TokenSoupFilter
+from .tool_call_normalizer import ToolCallNormalizer
 
 logger = get_logger(only_local_master=False)
 

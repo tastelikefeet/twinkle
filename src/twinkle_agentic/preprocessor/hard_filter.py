@@ -188,7 +188,7 @@ class HardFilter(Preprocessor):
 
             # Rule 3: all assistant turns are content-empty
             if asst_msgs and all(
-                not (m.get('content') or '').strip() and not _has_thinking(m)
+                not (m.get('content') or '').strip() and not _has_thinking(m) and not m.get('tool_calls')
                 for m in asst_msgs
             ):
                 dropped.append(dict(row, drop_reason='all_empty_assistant'))

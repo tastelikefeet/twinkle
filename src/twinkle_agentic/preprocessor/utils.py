@@ -319,18 +319,18 @@ def build_sensitive_regex(words: Set[str]) -> Optional['re.Pattern']:
 
 
 def is_agent_row(messages) -> bool:
-    """Return True if the conversation contains tool interactions (agent trace)."""
+    """Return True if the conversation contains tool interactions (agent trace).
+
+    After ToolCallNormalizer runs, all non-standard formats are already converted
+    to standard tool_calls / role=tool — so checking those two signals suffices.
+    """
     if not isinstance(messages, list):
         return False
-    from twinkle.template.tools import ToolCallRegistry
     for m in messages:
         if not isinstance(m, dict):
             continue
-        role = m.get('role')
-        if role == 'tool':
+        if m.get('role') == 'tool':
             return True
         if normalize_tool_calls(m):
-            return True
-        if role == 'assistant' and ToolCallRegistry.detect_first(msg_content_text(m)) is not None:
             return True
     return False

@@ -46,6 +46,12 @@ _BLOCK_RE = re.compile(r'<(?P<tool>[a-z][a-z0-9_]*)>(?P<body>[\s\S]*?)</(?P=tool
 # Inner parameter: matched-pair via backreference.
 _PARAM_RE = re.compile(r'<(?P<key>[a-z][a-z0-9_]*)>(?P<val>[\s\S]*?)</(?P=key)>')
 
+# Cline tool-result: [tool_name for 'path/args'] Result:
+_RESULT_RE = re.compile(
+    r'^\[(?P<tool>[a-z][a-z0-9_]*)\s+for\s+\'[^\']*\'\]\s*Result:\s*',
+    re.DOTALL,
+)
+
 
 class ClineParser(ToolCallParser):
     name = 'cline'
@@ -103,3 +109,10 @@ class ClineParser(ToolCallParser):
             last = e
         out.append(text[last:])
         return ''.join(out).rstrip()
+
+    def detect_result(self, text: str) -> bool:
+        return bool(_RESULT_RE.match(text or ''))
+
+    def parse_result(self, text: str) -> str:
+        m = _RESULT_RE.match(text or '')
+        return text[m.end():] if m else text
