@@ -305,7 +305,7 @@ def build_sensitive_regex(words: Set[str]) -> Optional['re.Pattern']:
     cjk_words = []
     latin_words = []
     cjk_re = re.compile(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7a3]')
-    for w in words:
+    for w in sorted(words):
         if cjk_re.search(w):
             cjk_words.append(re.escape(w))
         else:
@@ -321,7 +321,7 @@ def build_sensitive_regex(words: Set[str]) -> Optional['re.Pattern']:
 def is_agent_row(messages) -> bool:
     """Return True if the conversation contains tool interactions (agent trace).
 
-    After ToolCallNormalizer runs, all non-standard formats are already converted
+    After MessageNormalizer runs, all non-standard formats are already converted
     to standard tool_calls / role=tool — so checking those two signals suffices.
     """
     if not isinstance(messages, list):

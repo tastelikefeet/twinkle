@@ -26,7 +26,7 @@ from .refuse_filter import RefuseFilter
 from .response_refiner import ResponseRefiner
 from .score_filter import ScoreFilter
 from .token_soup import TokenSoupFilter
-from .tool_call_normalizer import ToolCallNormalizer
+from .message_normalizer import MessageNormalizer  # noqa: F401
 
 logger = get_logger(only_local_master=False)
 
@@ -69,6 +69,11 @@ class QualityPreprocessor(Preprocessor):
         summary = '\n'.join(stats)
         logger.info(
             f'[QualityPreprocessor] {total_start} -> {len(rows_list)}\n{summary}')
+        # Serialize variable-schema dicts to JSON strings for Arrow compatibility
+        for row in rows_list:
+            for k in ('user_data',):
+                if k in row and isinstance(row[k], dict):
+                    row[k] = json.dumps(row[k], ensure_ascii=False)
         return self.map_row_to_col(rows_list)
 
     def _log_dropped(self, step_name: str, dropped: List[Dict[str, Any]]) -> None:

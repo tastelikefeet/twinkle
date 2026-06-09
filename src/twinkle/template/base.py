@@ -36,13 +36,14 @@ class Template:
                  model_id: str,
                  use_chat_template: bool = True,
                  max_length: Optional[int] = 8192,
-                 truncation_strategy: Literal['raise', 'left', 'right', 'split'] = 'raise',
+                 truncation_strategy: Literal['raise', 'left', 'right', 'split', 'delete'] = 'raise',
                  default_system: Optional[str] = None,
                  enable_thinking: bool = True,
                  **kwargs):
         self.model_id = model_id
         model_id = HubOperation.download_model(model_id, ignore_model=True)
-        if os.path.exists(os.path.join(model_id, 'preprocessor_config.json')):
+        if os.path.exists(os.path.join(model_id, 'preprocessor_config.json')) or os.path.exists(
+                os.path.join(model_id, 'processor_config.json')):
             from transformers import AutoProcessor
             self.processor = AutoProcessor.from_pretrained(model_id, **kwargs)
         else:
@@ -57,15 +58,17 @@ class Template:
         self.truncation_strategy = truncation_strategy
         self.default_system = default_system
         self._test_support_assistant_tokens_mask()
-        self.pre_pipeline: List[Callable[[Trajectory], List[Trajectory]]] = [
-            self._add_default_system,  # Add a default system field
-            self._to_standard_reasoning_content,  # Convert thinking to standard field
-            self._build_standard_messages,  # turn to standard mm messages
+
+        self.pre_pipeline_names: List[str] = [
+            '_add_default_system',
+            '_to_standard_reasoning_content',
+            '_build_standard_messages',
         ]
-        self.post_pipeline: List[Callable[[InputFeature], List[InputFeature]]] = [
-            self._check_max_length,  # Check and split input_features
-            self._add_attention_fields,  # Add useful fields
-            self._roll_labels,  # roll labels
+
+        self.post_pipeline_names: List[str] = [
+            '_check_max_length',
+            '_add_attention_fields',
+            '_roll_labels',
         ]
 
     def parse_tool_call(self, decoded: str) -> List[Dict[str, Any]]:
@@ -282,7 +285,8 @@ class Template:
 
     def _invoke_pre_pipeline(self, trajectories: List[Trajectory]) -> List[Trajectory]:
         current = trajectories
-        for pipeline in self.pre_pipeline:
+        for pipeline_name in self.pre_pipeline_names:
+            pipeline: Callable[[Trajectory], List[Trajectory]] = getattr(self, pipeline_name)
             next_batch = []
             for trajectory in current:
                 next_batch.extend(pipeline(trajectory))
@@ -291,7 +295,8 @@ class Template:
 
     def _invoke_post_pipeline(self, input_features: List[InputFeature]) -> List[InputFeature]:
         current = input_features
-        for pipeline in self.post_pipeline:
+        for pipeline_name in self.post_pipeline_names:
+            pipeline: Callable[[InputFeature], List[InputFeature]] = getattr(self, pipeline_name)
             next_batch = []
             for input_feature in current:
                 next_batch.extend(pipeline(input_feature))
@@ -387,6 +392,8 @@ class Template:
                 result['labels'] = result['labels'][:self.max_length]
             if 'mm_token_type_ids' in result:
                 result['mm_token_type_ids'] = result['mm_token_type_ids'][..., :self.max_length]
+        else:
+            raise ValueError(f'Unsupported truncation_strategy={strategy!r}.')
         return InputFeature(**result)
 
     def set_mm_position_ids(self, input_feature: InputFeature):
@@ -414,6 +421,12 @@ class Template:
                     feat['mm_token_type_ids'] = feat['mm_token_type_ids'][..., start:end]
                 results.append(InputFeature(**feat))
             return results
+
+        # Drop oversized samples entirely; downstream must tolerate empty list (sample skipped).
+        if strategy == 'delete':
+            if len(input_feature['input_ids']) > self.max_length:
+                return []
+            return [input_feature]
 
         # left/right/raise
         return [self._truncate_feature(input_feature, strategy)]
@@ -587,9 +600,15 @@ class Template:
 
     def _build_standard_messages(self, trajectory: Trajectory) -> List[Trajectory]:
         # Extract trajectory-level media
-        images = self.preprocess_images(trajectory.pop('images', None) or [])
-        videos = self.preprocess_videos(trajectory.pop('videos', None) or [])
-        audios = self.preprocess_audios(trajectory.pop('audios', None) or [])
+        extracted_images = trajectory.pop(
+            'images', None) or [img for msg in trajectory['messages'] for img in msg.get('images', []) or []]
+        extracted_videos = trajectory.pop(
+            'videos', None) or [video for msg in trajectory['messages'] for video in msg.get('videos', []) or []]
+        extracted_audios = trajectory.pop(
+            'audios', None) or [audio for msg in trajectory['messages'] for audio in msg.get('audios', []) or []]
+        images = self.preprocess_images(extracted_images)
+        videos = self.preprocess_videos(extracted_videos)
+        audios = self.preprocess_audios(extracted_audios)
 
         trajectory['messages'] = self._process_mm_messages(trajectory['messages'], images, videos, audios)
         if not self.is_mm:
@@ -858,9 +877,10 @@ class Template:
 
     def format_trajectory(self, trajectory: Trajectory, add_default_system: bool = False) -> Trajectory:
         current = [trajectory]
-        for pipeline in self.pre_pipeline:
-            if not add_default_system and pipeline == self._add_default_system:
+        for pipeline_name in self.pre_pipeline_names:
+            if not add_default_system and pipeline_name == '_add_default_system':
                 continue
+            pipeline: Callable[[Trajectory], List[Trajectory]] = getattr(self, pipeline_name)
             next_batch = []
             for traj in current:
                 next_batch.extend(pipeline(traj))
