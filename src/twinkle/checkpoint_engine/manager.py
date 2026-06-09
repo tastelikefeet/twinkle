@@ -116,15 +116,12 @@ class CheckpointEngineManager:
         peft_config = None
         if self.base_sync_done and not merge_and_sync:
             if self._peft_config is None:
-                self._peft_config = self.model.get_peft_config_dict()
+                self._peft_config = self.model.get_peft_config_dict(lazy_collect=False)
             peft_config = self._peft_config
 
         if self._model_keys is None:
             if hasattr(self.sampler, 'get_state_keys'):
-                self._model_keys = self.sampler.get_state_keys()
-                # remote_function with lazy_collect returns a callable
-                if callable(self._model_keys):
-                    self._model_keys = self._model_keys()
+                self._model_keys = self.sampler.get_state_keys(lazy_collect=False)
 
             if self._model_keys is None:
                 self._model_keys = []

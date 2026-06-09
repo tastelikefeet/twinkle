@@ -55,7 +55,7 @@ class TemplateArgs:
     template_cls: str | None = None
     model_id: str | None = None
     max_length: int = 8192
-    truncation_strategy: Literal['raise', 'left', 'right', 'split'] = 'raise'
+    truncation_strategy: Literal['raise', 'left', 'right', 'split', 'delete'] = 'raise'
     use_chat_template: bool = True
     enable_thinking: bool = True
     default_system: str | None = None
@@ -107,7 +107,7 @@ class SchedulerArgs:
 
 @dataclass
 class LossArgs:
-    loss_cls: str = 'GRPOLoss'
+    loss_cls: str = 'CrossEntropyLoss'
     epsilon: float = 0.2
     epsilon_high: float | None = None
     beta: float = 0.0
