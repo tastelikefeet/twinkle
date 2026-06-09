@@ -94,15 +94,17 @@ class SIFDScorer:
         return out
 
 
-_JUDGE_SYSTEM_PROMPT = (
-    'You are a strict but fair answer grader. Judge whether the [Model Answer] is acceptable based on the reference answer (Ground Truth).\n'
-    'Evaluate the following three aspects; if any has a major issue, return FAIL:\n\n'
-    '1. Computational/factual correctness: whether the final conclusion, numbers, and key factual statements match the reference answer;\n'
-    '2. Reasoning/approach similarity: whether the solution path, key steps, and considered dimensions are close to the reference answer;\n'
-    '   For open-ended questions (no single correct answer), assess whether the style, stance, and considered dimensions align with the reference answer;\n'
-    '3. Completeness: the answer is not truncated, ends naturally, and covers all points of the question.\n\n'
-    'First give a brief 1-3 sentence justification, then on the last line strictly output:\n'
-    '<verdict>PASS</verdict> or <verdict>FAIL</verdict>')  # noqa
+_JUDGE_SYSTEM_PROMPT = """\
+You are a strict but fair answer grader. Judge whether the [Model Answer] is acceptable based on the reference answer (Ground Truth).
+Evaluate the following three aspects; if any has a major issue, return FAIL:
+
+1. Computational/factual correctness: whether the final conclusion, numbers, and key factual statements match the reference answer;
+2. Reasoning/approach similarity: whether the solution path, key steps, and considered dimensions are close to the reference answer;
+   For open-ended questions (no single correct answer), assess whether the style, stance, and considered dimensions align with the reference answer;
+3. Completeness: the answer is not truncated, ends naturally, and covers all points of the question.
+
+First give a brief 1-3 sentence justification, then on the last line strictly output:
+<verdict>PASS</verdict> or <verdict>FAIL</verdict>""" # noqa
 
 
 class PassNScorer:
@@ -326,11 +328,14 @@ class ParaphraseScorer:
     @staticmethod
     def _inject_gt(context_messages, gt_text):
         msgs = [dict(m) if isinstance(m, dict) else m for m in context_messages]
-        instr = (
-            'Below is the reference answer to this question, for your reference only:\n\n'
-            f'<reference_answer>\n{gt_text}\n</reference_answer>\n\n'
-            'Based on the reference answer above, please provide a complete answer to the preceding question in your own words and reasoning. '
-            'Output your answer directly; do not repeat the reference answer verbatim.')
+        instr = f"""\
+Below is the reference answer to this question, for your reference only:
+
+<reference_answer>
+{gt_text}
+</reference_answer>
+
+Based on the reference answer above, please provide a complete answer to the preceding question in your own words and reasoning. Output your answer directly; do not repeat the reference answer verbatim.""" # noqa
         if msgs and isinstance(msgs[-1], dict) and msgs[-1].get('role') == 'user':
             last = dict(msgs[-1])
             last['content'] = (last.get('content') or '') + '\n\n' + instr
@@ -519,7 +524,7 @@ class ScoreFilter(Preprocessor):
                     avg = sum(vals) / len(vals)
                     extra_stats += f', {k}_avg={avg:.4f}'
             logger.info(f'[ScoreFilter/{scorer.name}] n={len(scores)}, '
-                        f'mean={sum(scores)/len(scores):.4f}, '
+                        f'mean={sum(scores) / len(scores):.4f}, '
                         f'min={min(scores):.4f}, max={max(scores):.4f}, '
                         f'pass={n_pass}/{len(score_table)}'
                         f'{extra_stats}')

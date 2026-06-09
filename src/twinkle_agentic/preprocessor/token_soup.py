@@ -40,18 +40,30 @@ _SINGLE_CHAR_REPEAT_RE = re.compile(
 
 def _script_of(cp: int) -> str:
     """Map a codepoint to a coarse script bucket."""
-    if cp <= 0x024F: return 'latin'
-    if 0x0370 <= cp <= 0x03FF: return 'greek'
-    if 0x0400 <= cp <= 0x04FF: return 'cyrillic'
-    if 0x0590 <= cp <= 0x05FF: return 'hebrew'
-    if 0x0600 <= cp <= 0x06FF: return 'arabic'
-    if 0x0900 <= cp <= 0x097F: return 'devanagari'
-    if 0x0E00 <= cp <= 0x0E7F: return 'thai'
-    if 0x3040 <= cp <= 0x309F: return 'hiragana'
-    if 0x30A0 <= cp <= 0x30FF: return 'katakana'
-    if 0x4E00 <= cp <= 0x9FFF: return 'cjk'
-    if 0xAC00 <= cp <= 0xD7A3: return 'hangul'
-    if 0xE000 <= cp <= 0xF8FF: return 'private'
+    if cp <= 0x024F:
+        return 'latin'
+    if 0x0370 <= cp <= 0x03FF:
+        return 'greek'
+    if 0x0400 <= cp <= 0x04FF:
+        return 'cyrillic'
+    if 0x0590 <= cp <= 0x05FF:
+        return 'hebrew'
+    if 0x0600 <= cp <= 0x06FF:
+        return 'arabic'
+    if 0x0900 <= cp <= 0x097F:
+        return 'devanagari'
+    if 0x0E00 <= cp <= 0x0E7F:
+        return 'thai'
+    if 0x3040 <= cp <= 0x309F:
+        return 'hiragana'
+    if 0x30A0 <= cp <= 0x30FF:
+        return 'katakana'
+    if 0x4E00 <= cp <= 0x9FFF:
+        return 'cjk'
+    if 0xAC00 <= cp <= 0xD7A3:
+        return 'hangul'
+    if 0xE000 <= cp <= 0xF8FF:
+        return 'private'
     return 'other'
 
 
