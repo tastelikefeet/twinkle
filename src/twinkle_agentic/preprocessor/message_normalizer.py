@@ -53,6 +53,7 @@ def _strip_heartbeat(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 # ── Tool-call normalization ──────────────────────────────────────────────────
 
+
 def _normalize_tool_calls(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Rewrite: embedded tool calls → tool_calls field; following user tool-results → role=tool."""
     out: List[Dict[str, Any]] = []
@@ -79,8 +80,8 @@ def _normalize_tool_calls(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
                             'type': 'function',
                             'function': {
                                 'name': tc['function']['name'],
-                                'arguments': json.dumps(args, ensure_ascii=False)
-                                             if isinstance(args, dict) else str(args),
+                                'arguments':
+                                json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args),
                             },
                         })
                     out.append({
@@ -120,6 +121,7 @@ def _normalize_tool_calls(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
 
 
 # ── Consecutive-role merging ─────────────────────────────────────────────────
+
 
 def _merge_consecutive(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Merge adjacent messages with the same role into one, joining content with newline."""
@@ -178,6 +180,7 @@ def _merge_consecutive(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 # ── Combined normalizer ──────────────────────────────────────────────────────
 
+
 class MessageNormalizer(Preprocessor):
     """Two-pass message normalizer: tool-call extraction + consecutive-role merge.
 
@@ -205,12 +208,8 @@ class MessageNormalizer(Preprocessor):
 
             # Pass 1: tool-call normalization
             has_embedded = any(
-                isinstance(m, dict)
-                and m.get('role') == 'assistant'
-                and not m.get('tool_calls')
-                and ToolCallRegistry.detect_first(m.get('content') or '')
-                for m in msgs
-            )
+                isinstance(m, dict) and m.get('role') == 'assistant' and not m.get('tool_calls')
+                and ToolCallRegistry.detect_first(m.get('content') or '') for m in msgs)
             if has_embedded:
                 msgs = _normalize_tool_calls(msgs)
 
@@ -221,4 +220,3 @@ class MessageNormalizer(Preprocessor):
             row['messages'] = msgs
             out.append(row)
         return out, []
-

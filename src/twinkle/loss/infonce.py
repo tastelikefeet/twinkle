@@ -10,17 +10,15 @@ Inputs convention:
 All classes return :class:`LossOutput` with ``num_tokens=0`` (no per-token
 normalization, matching the convention used by ``DPOLoss``/``GRPOLoss``).
 """
-from enum import Enum
-from typing import Optional
-
 import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from enum import Enum
 from torch import nn
+from typing import Optional
 
 from twinkle.data_format import LossOutput
-
 from .base import Loss
 
 
@@ -104,11 +102,11 @@ class InfonceLoss(Loss):
         process_group: Distributed process group used for the all-gather.
             When ``None``, the default group (``dist.group.WORLD``) is used.
     """
-    
+
     require_logits = True
     require_entropy = False
     require_logps = False
-    
+
     def __init__(
         self,
         temperature: float = 0.1,
@@ -252,8 +250,8 @@ class InfonceLoss(Loss):
             target = torch.tensor(length, device=tensor.device)
             threshold = qd_vec[target].detach() + self.fake_neg_margin
 
-            qd_masked = torch.where(qd_vec > threshold, qd_vec.new_full((), float('-inf')),
-                                    qd_vec) if self.mask_fake_negative else qd_vec
+            qd_masked = torch.where(qd_vec > threshold, qd_vec.new_full(
+                (), float('-inf')), qd_vec) if self.mask_fake_negative else qd_vec
             logits_parts = [qd_masked]
 
             if self.include_qq:

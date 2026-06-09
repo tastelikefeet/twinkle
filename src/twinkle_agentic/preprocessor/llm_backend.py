@@ -44,10 +44,7 @@ class LLMBackend(ABC):
         Default impl loops over `chat`; backends should override to fan out concurrently
         (HTTP) or pass the full list to the underlying sampler in a single call (vLLM DP).
         """
-        return [
-            self.chat(m, temperature=temperature, max_tokens=max_tokens, n=n)
-            for m in messages_list
-        ]
+        return [self.chat(m, temperature=temperature, max_tokens=max_tokens, n=n) for m in messages_list]
 
     @abstractmethod
     def prompt_logprobs(self, messages: List[Dict[str, Any]]) -> Optional[List]:
@@ -106,13 +103,15 @@ class OpenAIBackend(LLMBackend):
         n: int = 1,
     ) -> List[Dict[str, str]]:
         try:
-            resp = self._client.post(self._chat_endpoint, json={
-                'model': self._model,
-                'messages': messages,
-                'temperature': temperature,
-                'max_tokens': max_tokens,
-                'n': n,
-            })
+            resp = self._client.post(
+                self._chat_endpoint,
+                json={
+                    'model': self._model,
+                    'messages': messages,
+                    'temperature': temperature,
+                    'max_tokens': max_tokens,
+                    'n': n,
+                })
             resp.raise_for_status()
             choices = resp.json().get('choices', [])
             results = []
@@ -153,12 +152,14 @@ class OpenAIBackend(LLMBackend):
 
     def prompt_logprobs(self, messages: List[Dict[str, Any]]) -> Optional[List]:
         try:
-            resp = self._client.post(self._chat_endpoint, json={
-                'model': self._model,
-                'messages': messages,
-                'max_tokens': 0,
-                'prompt_logprobs': 1,
-            })
+            resp = self._client.post(
+                self._chat_endpoint,
+                json={
+                    'model': self._model,
+                    'messages': messages,
+                    'max_tokens': 0,
+                    'prompt_logprobs': 1,
+                })
             resp.raise_for_status()
             return resp.json().get('prompt_logprobs')
         except Exception:
@@ -168,13 +169,15 @@ class OpenAIBackend(LLMBackend):
         endpoint = self._chat_endpoint.rsplit('/', 2)[0] + '/v1/completions'
         results: List[List] = []
         for input_ids in input_ids_list:
-            resp = self._client.post(endpoint, json={
-                'model': self._model,
-                'prompt': list(input_ids),
-                'max_tokens': 0,
-                'echo': True,
-                'prompt_logprobs': 1,
-            })
+            resp = self._client.post(
+                endpoint,
+                json={
+                    'model': self._model,
+                    'prompt': list(input_ids),
+                    'max_tokens': 0,
+                    'echo': True,
+                    'prompt_logprobs': 1,
+                })
             resp.raise_for_status()
             data = resp.json()
             choices = data.get('choices') or []
@@ -186,10 +189,11 @@ class OpenAIBackend(LLMBackend):
 
     def embeddings(self, texts: List[str]):
         import numpy as np
-        resp = self._client.post(self._embed_endpoint, json={
-            'model': self._model,
-            'input': texts,
-        })
+        resp = self._client.post(
+            self._embed_endpoint, json={
+                'model': self._model,
+                'input': texts,
+            })
         resp.raise_for_status()
         data = resp.json().get('data', [])
         data_sorted = sorted(data, key=lambda x: x.get('index', 0))
@@ -316,10 +320,9 @@ class SamplerBackend(LLMBackend):
         device_mesh = getattr(self._sampler, 'device_mesh', None)
         dp_world_size = getattr(device_mesh, 'dp_world_size', 1) or 1
         if len(input_ids_list) < dp_world_size:
-            raise ValueError(
-                f'SamplerBackend.prompt_logprobs_ids requires at least '
-                f'dp_world_size={dp_world_size} inputs to keep all DP workers busy, '
-                f'got {len(input_ids_list)}. Batch upstream before calling.')
+            raise ValueError(f'SamplerBackend.prompt_logprobs_ids requires at least '
+                             f'dp_world_size={dp_world_size} inputs to keep all DP workers busy, '
+                             f'got {len(input_ids_list)}. Batch upstream before calling.')
         feats = [{'input_ids': list(ids)} for ids in input_ids_list]
         params = SamplingParams(max_tokens=0, prompt_logprobs=1)
         responses = self._sampler.sample(feats, params)
@@ -327,14 +330,14 @@ class SamplerBackend(LLMBackend):
 
     def embeddings(self, texts: List[str]):
         if self._embed_client is None:
-            raise NotImplementedError(
-                'SamplerBackend requires embed_endpoint for embeddings. '
-                'Pass embed_endpoint when constructing SamplerBackend.')
+            raise NotImplementedError('SamplerBackend requires embed_endpoint for embeddings. '
+                                      'Pass embed_endpoint when constructing SamplerBackend.')
         import numpy as np
-        resp = self._embed_client.post(self._embed_url, json={
-            'model': self._embed_model,
-            'input': texts,
-        })
+        resp = self._embed_client.post(
+            self._embed_url, json={
+                'model': self._embed_model,
+                'input': texts,
+            })
         resp.raise_for_status()
         data = resp.json().get('data', [])
         data_sorted = sorted(data, key=lambda x: x.get('index', 0))

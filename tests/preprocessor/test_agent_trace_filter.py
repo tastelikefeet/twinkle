@@ -15,11 +15,7 @@ and never drops or mutates messages. Detection delegates to
 """
 import pytest
 
-from twinkle_agentic.preprocessor.agent_trace_filter import (
-    AgentTraceFilter,
-    _is_agent_row,
-    _msg_text,
-)
+from twinkle_agentic.preprocessor.agent_trace_filter import AgentTraceFilter, _is_agent_row, _msg_text
 
 
 def _row(messages):
@@ -28,16 +24,29 @@ def _row(messages):
 
 # ── _msg_text helper ─────────────────────────────────────────────────────────
 
+
 class TestMsgText:
+
     def test_string_content(self):
         assert _msg_text({'role': 'user', 'content': 'hello'}) == 'hello'
 
     def test_list_content_concat(self):
-        msg = {'content': [
-            {'type': 'text', 'text': 'a'},
-            {'type': 'image', 'url': '...'},  # non-text part ignored
-            {'type': 'text', 'text': 'b'},
-        ]}
+        msg = {
+            'content': [
+                {
+                    'type': 'text',
+                    'text': 'a'
+                },
+                {
+                    'type': 'image',
+                    'url': '...'
+                },  # non-text part ignored
+                {
+                    'type': 'text',
+                    'text': 'b'
+                },
+            ]
+        }
         assert _msg_text(msg) == 'a b'
 
     def test_missing_content(self):
@@ -52,70 +61,133 @@ class TestMsgText:
 
 # ── _is_agent_row detection ──────────────────────────────────────────────────
 
+
 class TestIsAgentRowStructural:
+
     def test_role_tool_triggers(self):
         msgs = [
-            {'role': 'user', 'content': 'q'},
-            {'role': 'assistant', 'content': '', 'tool_calls': [
-                {'id': 'a', 'type': 'function', 'function': {'name': 'x', 'arguments': '{}'}}
-            ]},
-            {'role': 'tool', 'content': 'result', 'tool_call_id': 'a'},
+            {
+                'role': 'user',
+                'content': 'q'
+            },
+            {
+                'role': 'assistant',
+                'content': '',
+                'tool_calls': [{
+                    'id': 'a',
+                    'type': 'function',
+                    'function': {
+                        'name': 'x',
+                        'arguments': '{}'
+                    }
+                }]
+            },
+            {
+                'role': 'tool',
+                'content': 'result',
+                'tool_call_id': 'a'
+            },
         ]
         assert _is_agent_row(msgs) is True
 
     def test_tool_calls_field_triggers(self):
         msgs = [
-            {'role': 'user', 'content': 'q'},
-            {'role': 'assistant', 'content': '', 'tool_calls': [
-                {'id': 'c1', 'type': 'function', 'function': {'name': 'f', 'arguments': '{}'}}
-            ]},
+            {
+                'role': 'user',
+                'content': 'q'
+            },
+            {
+                'role': 'assistant',
+                'content': '',
+                'tool_calls': [{
+                    'id': 'c1',
+                    'type': 'function',
+                    'function': {
+                        'name': 'f',
+                        'arguments': '{}'
+                    }
+                }]
+            },
         ]
         assert _is_agent_row(msgs) is True
 
     def test_empty_tool_calls_field_does_not_trigger(self):
         msgs = [
-            {'role': 'user', 'content': 'q'},
-            {'role': 'assistant', 'content': 'plain reply', 'tool_calls': []},
+            {
+                'role': 'user',
+                'content': 'q'
+            },
+            {
+                'role': 'assistant',
+                'content': 'plain reply',
+                'tool_calls': []
+            },
         ]
         assert _is_agent_row(msgs) is False
 
     def test_non_list_tool_calls_field_does_not_trigger(self):
         msgs = [
-            {'role': 'assistant', 'content': 'x', 'tool_calls': None},
+            {
+                'role': 'assistant',
+                'content': 'x',
+                'tool_calls': None
+            },
         ]
         assert _is_agent_row(msgs) is False
 
 
 class TestIsAgentRowTextEmbedded:
+
     def test_cline_style_triggers(self):
         msgs = [
-            {'role': 'user', 'content': 'read the file'},
-            {'role': 'assistant', 'content':
-                '<read_file><path>/etc/hosts</path></read_file>'},
+            {
+                'role': 'user',
+                'content': 'read the file'
+            },
+            {
+                'role': 'assistant',
+                'content': '<read_file><path>/etc/hosts</path></read_file>'
+            },
         ]
         assert _is_agent_row(msgs) is True
 
     def test_hermes_qwen_style_triggers(self):
         msgs = [
-            {'role': 'user', 'content': 'q'},
-            {'role': 'assistant', 'content':
-                '<tool_call>\n{"name": "search", "arguments": {"q": "x"}}\n</tool_call>'},
+            {
+                'role': 'user',
+                'content': 'q'
+            },
+            {
+                'role': 'assistant',
+                'content': '<tool_call>\n{"name": "search", "arguments": {"q": "x"}}\n</tool_call>'
+            },
         ]
         assert _is_agent_row(msgs) is True
 
     def test_react_action_style_triggers(self):
         # ReAct parser uses bracket syntax: ``Action: name[args]``.
         msgs = [
-            {'role': 'user', 'content': 'q'},
-            {'role': 'assistant', 'content':
-                'Thought: I need to search.\nAction: search[query=x]'},
+            {
+                'role': 'user',
+                'content': 'q'
+            },
+            {
+                'role': 'assistant',
+                'content': 'Thought: I need to search.\nAction: search[query=x]'
+            },
         ]
         assert _is_agent_row(msgs) is True
 
     def test_plain_assistant_text_does_not_trigger(self):
         msgs = [
-            {'role': 'user', 'content': 'hi'},
-            {'role': 'assistant', 'content': 'Hello! How can I help?'},
+            {
+                'role': 'user',
+                'content': 'hi'
+            },
+            {
+                'role': 'assistant',
+                'content': 'Hello! How can I help?'
+            },
         ]
         assert _is_agent_row(msgs) is False
 
@@ -123,39 +195,63 @@ class TestIsAgentRowTextEmbedded:
         # ``<bash>echo hi</bash>`` has no ``<key>val</key>`` child — Cline parser
         # rejects it via inner-param requirement. Hermes/ReAct also reject.
         msgs = [
-            {'role': 'user', 'content': 'q'},
-            {'role': 'assistant', 'content': '<bash>echo hi</bash>'},
+            {
+                'role': 'user',
+                'content': 'q'
+            },
+            {
+                'role': 'assistant',
+                'content': '<bash>echo hi</bash>'
+            },
         ]
         assert _is_agent_row(msgs) is False
 
     def test_denied_outer_tag_does_not_trigger(self):
         # ``<think>``/``<code>`` are in the Cline DENY frozenset.
         msgs = [
-            {'role': 'assistant', 'content':
-                '<think><reason>because</reason></think>'},
+            {
+                'role': 'assistant',
+                'content': '<think><reason>because</reason></think>'
+            },
         ]
         assert _is_agent_row(msgs) is False
 
     def test_user_text_with_tool_markers_does_not_trigger(self):
         # Markers must come from the assistant — user-side embedded XML is just data.
         msgs = [
-            {'role': 'user', 'content':
-                '<read_file><path>x</path></read_file>'},
-            {'role': 'assistant', 'content': 'I will do that.'},
+            {
+                'role': 'user',
+                'content': '<read_file><path>x</path></read_file>'
+            },
+            {
+                'role': 'assistant',
+                'content': 'I will do that.'
+            },
         ]
         assert _is_agent_row(msgs) is False
 
     def test_list_content_assistant_with_tool_call(self):
         msgs = [
-            {'role': 'assistant', 'content': [
-                {'type': 'text', 'text': '<tool_call>'},
-                {'type': 'text', 'text': '{"name":"f","arguments":{}}</tool_call>'},
-            ]},
+            {
+                'role':
+                'assistant',
+                'content': [
+                    {
+                        'type': 'text',
+                        'text': '<tool_call>'
+                    },
+                    {
+                        'type': 'text',
+                        'text': '{"name":"f","arguments":{}}</tool_call>'
+                    },
+                ]
+            },
         ]
         assert _is_agent_row(msgs) is True
 
 
 class TestIsAgentRowEdgeCases:
+
     def test_non_list_messages(self):
         assert _is_agent_row(None) is False
         assert _is_agent_row('') is False
@@ -167,29 +263,53 @@ class TestIsAgentRowEdgeCases:
     def test_non_dict_message_skipped(self):
         msgs = [
             'not a dict',
-            {'role': 'user', 'content': 'hi'},
-            {'role': 'assistant', 'content': 'hello'},
+            {
+                'role': 'user',
+                'content': 'hi'
+            },
+            {
+                'role': 'assistant',
+                'content': 'hello'
+            },
         ]
         assert _is_agent_row(msgs) is False
 
     def test_short_circuits_on_first_match(self):
         # Even if later messages are clean, an earlier tool-call hit wins.
         msgs = [
-            {'role': 'tool', 'content': 'r', 'tool_call_id': 'x'},
-            {'role': 'assistant', 'content': 'plain'},
+            {
+                'role': 'tool',
+                'content': 'r',
+                'tool_call_id': 'x'
+            },
+            {
+                'role': 'assistant',
+                'content': 'plain'
+            },
         ]
         assert _is_agent_row(msgs) is True
 
 
 # ── AgentTraceFilter pipeline behavior ───────────────────────────────────────
 
+
 class TestAgentTraceFilterPipeline:
+
     def test_tags_every_row(self):
         rows = [
-            _row([{'role': 'assistant', 'content': 'plain'}]),
-            _row([{'role': 'tool', 'content': 'r', 'tool_call_id': 'x'}]),
-            _row([{'role': 'assistant', 'content':
-                   '<read_file><path>x</path></read_file>'}]),
+            _row([{
+                'role': 'assistant',
+                'content': 'plain'
+            }]),
+            _row([{
+                'role': 'tool',
+                'content': 'r',
+                'tool_call_id': 'x'
+            }]),
+            _row([{
+                'role': 'assistant',
+                'content': '<read_file><path>x</path></read_file>'
+            }]),
         ]
         out = AgentTraceFilter()(rows)
         assert len(out) == 3
@@ -204,8 +324,17 @@ class TestAgentTraceFilterPipeline:
 
     def test_preserves_other_fields(self):
         rows = [
-            {'messages': [{'role': 'tool', 'content': 'r', 'tool_call_id': 'x'}],
-             'id': 'row-1', 'extra': {'k': 'v'}},
+            {
+                'messages': [{
+                    'role': 'tool',
+                    'content': 'r',
+                    'tool_call_id': 'x'
+                }],
+                'id': 'row-1',
+                'extra': {
+                    'k': 'v'
+                }
+            },
         ]
         out = AgentTraceFilter()(rows)
         assert out[0]['id'] == 'row-1'

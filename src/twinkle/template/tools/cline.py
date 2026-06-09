@@ -32,13 +32,56 @@ from .base import ToolCallParser
 # tags falling here are skipped to prevent false positives.
 _DENY = frozenset({
     # twinkle-internal / model-internal markers
-    'think', 'answer', 'tool_call', 'tool_response', 'function', 'parameter',
-    'parameters', 'tools', 'tool', 'system', 'user', 'assistant', 'message',
-    'messages', 'content', 'response', 'output', 'role', 'reasoning_content',
+    'think',
+    'answer',
+    'tool_call',
+    'tool_response',
+    'function',
+    'parameter',
+    'parameters',
+    'tools',
+    'tool',
+    'system',
+    'user',
+    'assistant',
+    'message',
+    'messages',
+    'content',
+    'response',
+    'output',
+    'role',
+    'reasoning_content',
     # html / markdown
-    'p', 'a', 'b', 'i', 'em', 'strong', 'div', 'span', 'pre', 'code', 'br',
-    'hr', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table',
-    'tr', 'td', 'th', 'tbody', 'thead', 'img', 'video', 'audio',
+    'p',
+    'a',
+    'b',
+    'i',
+    'em',
+    'strong',
+    'div',
+    'span',
+    'pre',
+    'code',
+    'br',
+    'hr',
+    'ul',
+    'ol',
+    'li',
+    'h1',
+    'h2',
+    'h3',
+    'h4',
+    'h5',
+    'h6',
+    'table',
+    'tr',
+    'td',
+    'th',
+    'tbody',
+    'thead',
+    'img',
+    'video',
+    'audio',
 })
 
 # Outer tool-call block: matched-pair via backreference. Body is non-greedy.
@@ -73,27 +116,30 @@ class ClineParser(ToolCallParser):
                 return True
         return False
 
-    def parse(self, text: str) -> List[Dict[str, Any]]:
-        calls: List[Dict[str, Any]] = []
+    def parse(self, text: str) -> list[dict[str, Any]]:
+        calls: list[dict[str, Any]] = []
         for m in _BLOCK_RE.finditer(text or ''):
             tool = m.group('tool')
             if tool in _DENY:
                 continue
-            args: Dict[str, Any] = {}
+            args: dict[str, Any] = {}
             for pm in _PARAM_RE.finditer(m.group('body')):
                 args[pm.group('key')] = pm.group('val').strip()
             if not args:
                 continue
             calls.append({
                 'type': 'function',
-                'function': {'name': tool, 'arguments': args},
+                'function': {
+                    'name': tool,
+                    'arguments': args
+                },
             })
         return calls
 
     def clean(self, text: str) -> str:
         if not text:
             return text or ''
-        spans: List[tuple] = []
+        spans: list[tuple] = []
         for m in _BLOCK_RE.finditer(text):
             if m.group('tool') in _DENY:
                 continue
@@ -102,7 +148,7 @@ class ClineParser(ToolCallParser):
             spans.append((m.start(), m.end()))
         if not spans:
             return text.rstrip()
-        out: List[str] = []
+        out: list[str] = []
         last = 0
         for s, e in spans:
             out.append(text[last:s])

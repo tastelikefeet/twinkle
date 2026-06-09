@@ -7,10 +7,10 @@ from twinkle.preprocessor import Preprocessor
 # ── Language detection ────────────────────────────────────────────────────────
 
 _CJK_RE = re.compile(
-    r'[\u4e00-\u9fff'        # CJK Unified Ideographs (Chinese)
-    r'\u3040-\u309f'         # Hiragana
-    r'\u30a0-\u30ff'         # Katakana
-    r'\uac00-\ud7a3]',       # Hangul Syllables
+    r'[\u4e00-\u9fff'  # CJK Unified Ideographs (Chinese)
+    r'\u3040-\u309f'  # Hiragana
+    r'\u30a0-\u30ff'  # Katakana
+    r'\uac00-\ud7a3]',  # Hangul Syllables
     re.UNICODE,
 )
 
@@ -98,8 +98,8 @@ _KO_SIMPLE_RE = re.compile(
     re.UNICODE,
 )
 
-
 # ── Core helpers ──────────────────────────────────────────────────────────────
+
 
 def _is_simple_query(text: str, min_user_chars: int = 10, min_user_chars_cjk: int = 6) -> bool:
     """Return True if ``text`` is a greeting or trivially simple question."""
@@ -111,10 +111,8 @@ def _is_simple_query(text: str, min_user_chars: int = 10, min_user_chars_cjk: in
         if len(t) < min_user_chars_cjk:
             return True
         return bool(
-            _ZH_GREETING_RE.match(t) or _ZH_SIMPLE_RE.match(t) or
-            _JA_GREETING_RE.match(t) or _JA_SIMPLE_RE.match(t) or
-            _KO_GREETING_RE.match(t) or _KO_SIMPLE_RE.match(t)
-        )
+            _ZH_GREETING_RE.match(t) or _ZH_SIMPLE_RE.match(t) or _JA_GREETING_RE.match(t) or _JA_SIMPLE_RE.match(t)
+            or _KO_GREETING_RE.match(t) or _KO_SIMPLE_RE.match(t))
 
     if len(t) < min_user_chars:
         return True
@@ -134,6 +132,7 @@ def _has_thinking(msg: Dict[str, Any], min_chars: int = _MIN_THINKING_CHARS) -> 
 
 # ── Preprocessor ─────────────────────────────────────────────────────────────
 
+
 class HardFilter(Preprocessor):
 
     def __init__(
@@ -151,7 +150,8 @@ class HardFilter(Preprocessor):
         self._min_user_chars_cjk = min_user_chars_cjk
         self._min_assistant_chars_2turn = min_assistant_chars_2turn
         self.allow_incomplete_role = allow_incomplete_role
-        self._system_deny_re = re.compile('|'.join(re.escape(k) for k in system_deny_keywords), re.IGNORECASE) if system_deny_keywords else None
+        self._system_deny_re = re.compile('|'.join(
+            re.escape(k) for k in system_deny_keywords), re.IGNORECASE) if system_deny_keywords else None
         self._max_chars_per_round = max_chars_per_round
         self._max_total_chars = max_total_chars
 
@@ -192,15 +192,15 @@ class HardFilter(Preprocessor):
 
             # Rule 3: all assistant turns are content-empty
             if asst_msgs and all(
-                not (m.get('content') or '').strip() and not _has_thinking(m) and not m.get('tool_calls')
-                for m in asst_msgs
-            ):
+                    not (m.get('content') or '').strip() and not _has_thinking(m) and not m.get('tool_calls')
+                    for m in asst_msgs):
                 dropped.append(dict(row, drop_reason='all_empty_assistant'))
                 continue
 
             # Rule 4: system prompt matches deny keywords
             if self._system_deny_re:
-                sys_text = next((m.get('content') or '' for m in messages if isinstance(m, dict) and m.get('role') == 'system'), '')
+                sys_text = next(
+                    (m.get('content') or '' for m in messages if isinstance(m, dict) and m.get('role') == 'system'), '')
                 if self._system_deny_re.search(sys_text):
                     dropped.append(dict(row, drop_reason='system_deny_keyword'))
                     continue

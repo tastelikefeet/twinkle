@@ -55,7 +55,7 @@ Do not pad.
 nothing else.\
 """
 
-QUERY_GEN_USER = "Analyze the following text and return a JSON array of queries.\n\n{text}"
+QUERY_GEN_USER = 'Analyze the following text and return a JSON array of queries.\n\n{text}'
 
 COMPRESS_SYSTEM = """\
 You are a compression assistant. For the (query, source) pair, emit a Markdown \
@@ -171,7 +171,7 @@ Topic: Go HTTP fetch 循环 — 并发写共享 map + 未关闭响应体导致�
 Now begin.\
 """
 
-COMPRESS_USER = "## Query\n{query}\n\n## Source\n{text}"
+COMPRESS_USER = '## Query\n{query}\n\n## Source\n{text}'
 
 # Short system prompt embedded in emitted SFT samples — the long COMPRESS_SYSTEM
 # is for data generation only; training samples carry only the binding contract.
@@ -482,7 +482,7 @@ def iter_dataset_py(total: Optional[int], load_from_cache_file: bool) -> Iterato
     """Stream rows directly from ``dataset.py::get_dataset`` without any JSONL hop."""
     # Lazy import: dataset.py triggers HF / ModelScope downloads at module load.
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from dataset import get_dataset
+    from cookbook.exp.condenser.dataset import get_dataset
     hf = get_dataset(total=total, load_from_cache_file=load_from_cache_file)
     sys.stderr.write(f'Loaded dataset.py::get_dataset: {len(hf)} rows\n')
     for row in hf:

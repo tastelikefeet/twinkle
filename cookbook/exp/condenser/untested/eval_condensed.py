@@ -33,15 +33,14 @@ from twinkle.sampler import vLLMSampler
 from twinkle.template import Qwen3_5Template
 from twinkle_agentic.chunker.native import NativeChunker
 from twinkle_agentic.condenser import ModelCondenser
-from twinkle_agentic.reward import F1Reward
-from twinkle_agentic.reward.f1 import _f1_score, _normalize_answer
+from twinkle_agentic.reward.f1 import _f1_score
 from twinkle_agentic.rollout.multi_turn import MultiTurnRollout
 from twinkle_agentic.rollout.multi_turn_condense import MultiTurnCondenseRollout
 from twinkle_agentic.tools.tool_manager import ToolManager
 from twinkle.preprocessor.base import Preprocessor
 
 # Reuse training assets so eval and train share data shape + condensed prompt.
-from cookbook.exp.grpo_condensed import (
+from cookbook.exp.legacy.grpo_condensed import (
     SYSTEM_PROMPT as CONDENSED_SYSTEM_PROMPT,
     HotpotQAProcessor,
     _BOXED_RE,

@@ -28,25 +28,18 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 from twinkle.preprocessor import Preprocessor
 from twinkle.template import Template
 from twinkle.utils import get_logger
-
-from ..data_format import RoundContext, ScoreResult, Scorer
+from ..data_format import RoundContext, Scorer, ScoreResult
 from .llm_backend import LLMBackend
-from .utils import (
-    _chr_min_distinct,
-    _ifd_family_metrics,
-    _lp_to_jsonable,
-    _pad_batch,
-    _to_int_list,
-)
+from .utils import _chr_min_distinct, _ifd_family_metrics, _lp_to_jsonable, _pad_batch, _to_int_list
 
 logger = get_logger(only_local_master=False)
 
 _MIN_RESPONSE_TOKENS = 5
 
-
 # ============================================================================
 # Built-in scorers
 # ============================================================================
+
 
 class ChrMinScorer:
     """chr_dist_min_pos. Dual-threshold: keep samples in [low, high)."""
@@ -62,11 +55,16 @@ class ChrMinScorer:
             cond_lp = ctx.features.get('cond_lp')
             asst_lp = ctx.features.get('asst_lp')
             score = _chr_min_distinct(
-                cond_lp, asst_lp, ctx.cond_ids, ctx.asst_ids, ctx.n_prompt,
+                cond_lp,
+                asst_lp,
+                ctx.cond_ids,
+                ctx.asst_ids,
+                ctx.n_prompt,
             )
             passed = (score is None) or (score < self._threshold)
             out.append(ScoreResult(
-                score=score, passed=passed,
+                score=score,
+                passed=passed,
                 extras={'threshold': self._threshold},
             ))
         return out
@@ -86,8 +84,7 @@ class SIFDScorer:
         for ctx in contexts:
             cond_lp = ctx.features.get('cond_lp')
             asst_lp = ctx.features.get('asst_lp')
-            fam = _ifd_family_metrics(
-                cond_lp, asst_lp, ctx.cond_ids, ctx.asst_ids, ctx.n_prompt)
+            fam = _ifd_family_metrics(cond_lp, asst_lp, ctx.cond_ids, ctx.asst_ids, ctx.n_prompt)
             score = fam.get('ifd')
             if self._ifd_threshold is None or score is None:
                 passed = True
@@ -95,7 +92,6 @@ class SIFDScorer:
                 passed = score >= self._ifd_threshold
             out.append(ScoreResult(score=score, passed=passed, extras=dict(fam)))
         return out
-
 
 
 _JUDGE_SYSTEM_PROMPT = (
@@ -106,8 +102,7 @@ _JUDGE_SYSTEM_PROMPT = (
     '   For open-ended questions (no single correct answer), assess whether the style, stance, and considered dimensions align with the reference answer;\n'
     '3. Completeness: the answer is not truncated, ends naturally, and covers all points of the question.\n\n'
     'First give a brief 1-3 sentence justification, then on the last line strictly output:\n'
-    '<verdict>PASS</verdict> or <verdict>FAIL</verdict>'
-)
+    '<verdict>PASS</verdict> or <verdict>FAIL</verdict>')  # noqa
 
 
 class PassNScorer:
@@ -133,9 +128,8 @@ class PassNScorer:
         judge_max_workers: int = 8,
     ):
         self._backend = backend
-        self._judge_api = self._build_judge_api(
-            judge_api, judge_model, judge_base_url,
-            judge_api_key, judge_client_kwargs)
+        self._judge_api = self._build_judge_api(judge_api, judge_model, judge_base_url, judge_api_key,
+                                                judge_client_kwargs)
         self._n = max(1, int(n))
         self._min_pass = int(min_pass)
         self._sample_temperature = float(sample_temperature)
@@ -145,9 +139,8 @@ class PassNScorer:
         self._judge_max_rollout_chars = int(judge_max_rollout_chars)
         self._judge_max_workers = max(1, int(judge_max_workers))
         if self._judge_api is None:
-            logger.warning(
-                '[PassNScorer] no judge_api configured; rollouts will be sampled '
-                'without verdicts (every round trivially passes).')
+            logger.warning('[PassNScorer] no judge_api configured; rollouts will be sampled '
+                           'without verdicts (every round trivially passes).')
 
     @staticmethod
     def _build_judge_api(api, model, base_url, api_key, client_kwargs):
@@ -156,9 +149,7 @@ class PassNScorer:
         if not model:
             return None
         from twinkle_agentic.protocol.openai import OpenAI as OpenAIAPI
-        return OpenAIAPI(
-            model=model, api_key=api_key, base_url=base_url,
-            client_kwargs=client_kwargs)
+        return OpenAIAPI(model=model, api_key=api_key, base_url=base_url, client_kwargs=client_kwargs)
 
     @staticmethod
     def _extract_text_from_choice(choice: Any) -> str:
@@ -210,16 +201,22 @@ class PassNScorer:
         if not rollout_text or not rollout_text.strip():
             return False, '(empty rollout)'
         from twinkle.data_format.sampling import SamplingParams
-        body = (
-            f'[问题]\n{self._truncate(user_prompt, self._judge_max_rollout_chars)}\n\n'
-            f'[参考答案]\n{self._truncate(gt_text, self._judge_max_rollout_chars)}\n\n'
-            f'[模型回答]\n{self._truncate(rollout_text, self._judge_max_rollout_chars)}\n\n'
-            '请评分。'
-        )
-        trajectory = {'messages': [
-            {'role': 'system', 'content': _JUDGE_SYSTEM_PROMPT},
-            {'role': 'user', 'content': body},
-        ]}
+        body = (f'[问题]\n{self._truncate(user_prompt, self._judge_max_rollout_chars)}\n\n'
+                f'[参考答案]\n{self._truncate(gt_text, self._judge_max_rollout_chars)}\n\n'
+                f'[模型回答]\n{self._truncate(rollout_text, self._judge_max_rollout_chars)}\n\n'
+                '请评分。')
+        trajectory = {
+            'messages': [
+                {
+                    'role': 'system',
+                    'content': _JUDGE_SYSTEM_PROMPT
+                },
+                {
+                    'role': 'user',
+                    'content': body
+                },
+            ]
+        }
         sp = SamplingParams(
             temperature=self._judge_temperature,
             max_tokens=self._judge_max_tokens,
@@ -260,46 +257,45 @@ class PassNScorer:
 
         verdict_by_round: Dict[int, List[Tuple[int, bool, str]]] = {}
         if work and self._judge_api is not None:
+
             def _do(item):
                 i, r_i, up, gt, rt = item
                 ok, raw = self._judge_one(up, gt, rt)
                 return i, r_i, ok, raw
+
             with ThreadPoolExecutor(max_workers=self._judge_max_workers) as ex:
                 for i, r_i, ok, raw in ex.map(_do, work):
                     verdict_by_round.setdefault(i, []).append((r_i, ok, raw))
 
         out: List[ScoreResult] = []
         for i, (ctx, choices) in enumerate(zip(contexts, batched)):
-            rollouts = [
-                {'rollout_idx': r_i,
-                 'content': self._extract_text_from_choice(c)}
-                for r_i, c in enumerate(choices or [])
-            ]
+            rollouts = [{
+                'rollout_idx': r_i,
+                'content': self._extract_text_from_choice(c)
+            } for r_i, c in enumerate(choices or [])]
             verdicts = sorted(verdict_by_round.get(i, []), key=lambda x: x[0])
-            judgments = [
-                {'rollout_idx': r_i, 'passed': bool(p), 'judge_raw': raw}
-                for r_i, p, raw in verdicts
-            ]
+            judgments = [{'rollout_idx': r_i, 'passed': bool(p), 'judge_raw': raw} for r_i, p, raw in verdicts]
             pass_count = sum(1 for _, p, _ in verdicts if p)
             score = (pass_count / self._n) if rollouts else None
             passed = pass_count >= self._min_pass
-            out.append(ScoreResult(
-                score=score, passed=passed,
-                extras={
-                    'pass_count': pass_count,
-                    'n_rollouts': len(rollouts),
-                    'rollouts': rollouts,
-                    'judgments': judgments,
-                    'min_pass': self._min_pass,
-                },
-            ))
+            out.append(
+                ScoreResult(
+                    score=score,
+                    passed=passed,
+                    extras={
+                        'pass_count': pass_count,
+                        'n_rollouts': len(rollouts),
+                        'rollouts': rollouts,
+                        'judgments': judgments,
+                        'min_pass': self._min_pass,
+                    },
+                ))
 
         scored = [r for r in out if r.score is not None]
         if scored:
             avg = sum(r.score for r in scored) / len(scored)
-            logger.info(
-                f'[PassNScorer] graded {len(scored)}/{len(out)} rounds × {self._n} '
-                f'rollouts; avg pass-rate = {avg:.3f}')
+            logger.info(f'[PassNScorer] graded {len(scored)}/{len(out)} rounds × {self._n} '
+                        f'rollouts; avg pass-rate = {avg:.3f}')
         return out
 
 
@@ -334,8 +330,7 @@ class ParaphraseScorer:
             'Below is the reference answer to this question, for your reference only:\n\n'
             f'<reference_answer>\n{gt_text}\n</reference_answer>\n\n'
             'Based on the reference answer above, please provide a complete answer to the preceding question in your own words and reasoning. '
-            'Output your answer directly; do not repeat the reference answer verbatim.'
-        )
+            'Output your answer directly; do not repeat the reference answer verbatim.')
         if msgs and isinstance(msgs[-1], dict) and msgs[-1].get('role') == 'user':
             last = dict(msgs[-1])
             last['content'] = (last.get('content') or '') + '\n\n' + instr
@@ -349,16 +344,13 @@ class ParaphraseScorer:
         budget = self._prompt_budget - n_prompt - 80
         if budget < 50:
             return None
-        gt_ids = _to_int_list(self._template.tokenizer(
-            gt_text, add_special_tokens=False)['input_ids'])
+        gt_ids = _to_int_list(self._template.tokenizer(gt_text, add_special_tokens=False)['input_ids'])
         if len(gt_ids) <= budget:
             return gt_text
-        return self._template.tokenizer.decode(
-            gt_ids[:budget], skip_special_tokens=False)
+        return self._template.tokenizer.decode(gt_ids[:budget], skip_special_tokens=False)
 
     def _encode_prompt(self, ctx_msgs):
-        ids = _to_int_list(self._template.encode(
-            {'messages': list(ctx_msgs)}, add_generation_prompt=True)['input_ids'])
+        ids = _to_int_list(self._template.encode({'messages': list(ctx_msgs)}, add_generation_prompt=True)['input_ids'])
         if self._max_prompt_tokens <= 0 or len(ids) <= self._max_prompt_tokens:
             return ids
         return ids[-self._max_prompt_tokens:]
@@ -377,9 +369,7 @@ class ParaphraseScorer:
             augmented.append(self._inject_gt(ctx.context_messages, gt))
 
         out: List[ScoreResult] = [
-            ScoreResult(score=None, passed=True,
-                        extras={'reason': 'paraphrase skipped'})
-            for _ in contexts
+            ScoreResult(score=None, passed=True, extras={'reason': 'paraphrase skipped'}) for _ in contexts
         ]
         if not keys:
             return out
@@ -404,8 +394,7 @@ class ParaphraseScorer:
                 continue
             ctx = contexts[i]
             prompt_ids = self._encode_prompt(ctx.context_messages)
-            asst_ids = _to_int_list(self._template.tokenizer(
-                text, add_special_tokens=False)['input_ids'])
+            asst_ids = _to_int_list(self._template.tokenizer(text, add_special_tokens=False)['input_ids'])
             if len(asst_ids) < _MIN_RESPONSE_TOKENS + 1:
                 continue
             cond_ids = prompt_ids + asst_ids
@@ -428,7 +417,8 @@ class ParaphraseScorer:
             else:
                 passed = score < self._threshold
             out[i] = ScoreResult(
-                score=score, passed=passed,
+                score=score,
+                passed=passed,
                 extras={
                     'paraphrase_text': text,
                     'n_prompt': n_prompt,
@@ -438,15 +428,15 @@ class ParaphraseScorer:
                 },
             )
 
-        logger.info(
-            f'[ParaphraseScorer] paraphrased + scored {len(para_data)}/'
-            f'{len(contexts)} rounds')
+        logger.info(f'[ParaphraseScorer] paraphrased + scored {len(para_data)}/'
+                    f'{len(contexts)} rounds')
         return out
 
 
 # ============================================================================
 # ScoreFilter (Preprocessor entry point)
 # ============================================================================
+
 
 class ScoreFilter(Preprocessor):
     """Score and filter assistant turns by a pluggable scorer set.
@@ -475,14 +465,12 @@ class ScoreFilter(Preprocessor):
     ):
         super().__init__()
         if not isinstance(template, Template):
-            raise TypeError(
-                f'ScoreFilter requires a `Template` instance, got '
-                f'{type(template).__name__}.')
+            raise TypeError(f'ScoreFilter requires a `Template` instance, got '
+                            f'{type(template).__name__}.')
         self._template = template
         self._backend = backend
         self._scorers = list(scorers)
-        self._intents: Optional[Set[str]] = (
-            None if intents is None else set(intents))
+        self._intents: Optional[Set[str]] = (None if intents is None else set(intents))
         self._keep_if_no_key_rounds = bool(keep_if_no_key_rounds)
         self._drop_row_on_any_fail = bool(drop_row_on_any_fail)
         self._max_prompt_tokens = int(max_prompt_tokens)
@@ -509,12 +497,12 @@ class ScoreFilter(Preprocessor):
 
     def _log_score_summary(self, contexts, score_table):
         for scorer in self._scorers:
-            scores = [t[scorer.name].score for t in score_table
-                      if scorer.name in t and t[scorer.name].score is not None]
+            scores = [
+                t[scorer.name].score for t in score_table if scorer.name in t and t[scorer.name].score is not None
+            ]
             if not scores:
                 continue
-            n_pass = sum(1 for t in score_table
-                         if scorer.name in t and t[scorer.name].passed)
+            n_pass = sum(1 for t in score_table if scorer.name in t and t[scorer.name].passed)
             extras_sample = {}
             for t in score_table:
                 if scorer.name in t and t[scorer.name].extras:
@@ -523,18 +511,18 @@ class ScoreFilter(Preprocessor):
             extra_keys = [k for k in extras_sample if k != 'threshold']
             extra_stats = ''
             for k in extra_keys:
-                vals = [t[scorer.name].extras.get(k) for t in score_table
-                        if scorer.name in t and t[scorer.name].extras
-                        and t[scorer.name].extras.get(k) is not None]
+                vals = [
+                    t[scorer.name].extras.get(k) for t in score_table
+                    if scorer.name in t and t[scorer.name].extras and t[scorer.name].extras.get(k) is not None
+                ]
                 if vals and isinstance(vals[0], (int, float)):
                     avg = sum(vals) / len(vals)
                     extra_stats += f', {k}_avg={avg:.4f}'
-            logger.info(
-                f'[ScoreFilter/{scorer.name}] n={len(scores)}, '
-                f'mean={sum(scores)/len(scores):.4f}, '
-                f'min={min(scores):.4f}, max={max(scores):.4f}, '
-                f'pass={n_pass}/{len(score_table)}'
-                f'{extra_stats}')
+            logger.info(f'[ScoreFilter/{scorer.name}] n={len(scores)}, '
+                        f'mean={sum(scores)/len(scores):.4f}, '
+                        f'min={min(scores):.4f}, max={max(scores):.4f}, '
+                        f'pass={n_pass}/{len(score_table)}'
+                        f'{extra_stats}')
 
     # ---- scoring (inlined DefaultScoreCalculator) --------------------------
 
@@ -545,9 +533,8 @@ class ScoreFilter(Preprocessor):
         for scorer in self._scorers:
             results = scorer.score(contexts)
             if len(results) != len(contexts):
-                raise RuntimeError(
-                    f'scorer {scorer.name!r} returned {len(results)} results '
-                    f'for {len(contexts)} contexts')
+                raise RuntimeError(f'scorer {scorer.name!r} returned {len(results)} results '
+                                   f'for {len(contexts)} contexts')
             for i, r in enumerate(results):
                 out[i][scorer.name] = r
         return out
@@ -578,13 +565,9 @@ class ScoreFilter(Preprocessor):
             if not isinstance(messages, list):
                 continue
             user_data = row.get('user_data') if isinstance(row, dict) else None
-            key_rounds = (user_data.get('key_rounds')
-                          if isinstance(user_data, dict) else None)
+            key_rounds = (user_data.get('key_rounds') if isinstance(user_data, dict) else None)
             if not isinstance(key_rounds, list) or not key_rounds:
-                key_rounds = [
-                    i for i, m in enumerate(messages)
-                    if isinstance(m, dict) and m.get('role') == 'assistant'
-                ]
+                key_rounds = [i for i, m in enumerate(messages) if isinstance(m, dict) and m.get('role') == 'assistant']
             for rnd_idx, asst_idx in enumerate(key_rounds):
                 if not isinstance(asst_idx, int):
                     continue
@@ -600,7 +583,9 @@ class ScoreFilter(Preprocessor):
         self,
         row: Dict[str, Any],
         messages: List[Dict[str, Any]],
-        ri: int, rnd_idx: int, asst_idx: int,
+        ri: int,
+        rnd_idx: int,
+        asst_idx: int,
         intent: Optional[str],
     ) -> Optional[RoundContext]:
         if not (0 <= asst_idx < len(messages)):
@@ -610,8 +595,8 @@ class ScoreFilter(Preprocessor):
             return None
         asst_text = asst_msg.get('content') or ''
         if isinstance(asst_text, list):
-            asst_text = ' '.join(p.get('text', '') for p in asst_text
-                                 if isinstance(p, dict) and p.get('type') == 'text')
+            asst_text = ' '.join(
+                p.get('text', '') for p in asst_text if isinstance(p, dict) and p.get('type') == 'text')
         if not asst_text.strip():
             return None
         context_messages = messages[:asst_idx]
@@ -620,13 +605,15 @@ class ScoreFilter(Preprocessor):
         prompt_ids = self._encode_prompt_within_budget(context_messages)
         # Raw asst_ids (no chat-template wrapping) so cond/asst share byte-equal
         # A-token sequences; otherwise chr_min positions desync.
-        asst_ids = _to_int_list(self._template.tokenizer(
-            asst_text, add_special_tokens=False)['input_ids'])
+        asst_ids = _to_int_list(self._template.tokenizer(asst_text, add_special_tokens=False)['input_ids'])
         if len(asst_ids) < _MIN_RESPONSE_TOKENS + 1:
             return None
         return RoundContext(
-            row_idx=ri, rnd_idx=rnd_idx, asst_idx=asst_idx,
-            row=row, intent=intent,
+            row_idx=ri,
+            rnd_idx=rnd_idx,
+            asst_idx=asst_idx,
+            row=row,
+            intent=intent,
             messages=messages,
             context_messages=context_messages,
             cond_ids=prompt_ids + asst_ids,
@@ -638,8 +625,7 @@ class ScoreFilter(Preprocessor):
 
     def _encode_prompt_within_budget(self, ctx_msgs: List[Dict[str, Any]]) -> List[int]:
         ctx = list(ctx_msgs)
-        ids = _to_int_list(self._template.encode(
-            {'messages': ctx}, add_generation_prompt=True)['input_ids'])
+        ids = _to_int_list(self._template.encode({'messages': ctx}, add_generation_prompt=True)['input_ids'])
         budget = self._max_prompt_tokens
         if budget <= 0 or len(ids) <= budget:
             return ids
@@ -647,8 +633,7 @@ class ScoreFilter(Preprocessor):
         body_start = 1 if has_sys else 0
         while len(ctx) - body_start > 1:
             ctx.pop(body_start)
-            ids = _to_int_list(self._template.encode(
-                {'messages': ctx}, add_generation_prompt=True)['input_ids'])
+            ids = _to_int_list(self._template.encode({'messages': ctx}, add_generation_prompt=True)['input_ids'])
             if len(ids) <= budget:
                 return ids
         # Single message still over budget → keep tail tokens.
@@ -663,8 +648,8 @@ class ScoreFilter(Preprocessor):
             role = m.get('role') or 'user'
             content = m.get('content', '')
             if isinstance(content, list):
-                content = ' '.join(p.get('text', '') for p in content
-                                   if isinstance(p, dict) and p.get('type') == 'text')
+                content = ' '.join(
+                    p.get('text', '') for p in content if isinstance(p, dict) and p.get('type') == 'text')
             if isinstance(content, str) and content.strip():
                 parts.append(f'[{role}] {content.strip()}')
         return '\n\n'.join(parts)
@@ -696,22 +681,17 @@ class ScoreFilter(Preprocessor):
                 record = self._build_trace_record(ctx, scores, kept)
                 if self._trace_callback is not None and not bool(self._trace_callback(record)):
                     continue
-                success = (
-                    bool(self._success_callback(record))
-                    if self._success_callback is not None else kept
-                )
+                success = (bool(self._success_callback(record)) if self._success_callback is not None else kept)
                 prefix = 'ok' if success else 'fail'
                 rid = f'{ctx.row_idx}-{ctx.asst_idx}-{i}-{int(time.time() * 1000)}'
                 rid = re.sub(r'[^A-Za-z0-9_\-.]+', '_', rid)[:64]
                 path = os.path.join(self._trace_dir, f'{prefix}-{rid}.json')
                 with open(path, 'w', encoding='utf-8') as f:
-                    json.dump(record, f, ensure_ascii=False,
-                              indent=2, default=str)
+                    json.dump(record, f, ensure_ascii=False, indent=2, default=str)
             except Exception as e:
                 # Observability must never break filtering; surface the cause.
-                logger.warning(
-                    f'[ScoreFilter] trace dump failed for row={ctx.row_idx} '
-                    f'asst={ctx.asst_idx}: {e}')
+                logger.warning(f'[ScoreFilter] trace dump failed for row={ctx.row_idx} '
+                               f'asst={ctx.asst_idx}: {e}')
 
     @staticmethod
     def _build_trace_record(
@@ -733,7 +713,11 @@ class ScoreFilter(Preprocessor):
                 for k, v in ctx.features.items()
             },
             'scores': {
-                name: {'score': r.score, 'passed': r.passed, 'extras': r.extras}
+                name: {
+                    'score': r.score,
+                    'passed': r.passed,
+                    'extras': r.extras
+                }
                 for name, r in scores.items()
             },
             'kept': bool(kept),
@@ -752,7 +736,8 @@ class ScoreFilter(Preprocessor):
             scores = score_table[i] if i < len(score_table) else {}
             passed = all(r.passed for r in scores.values()) if scores else True
             slot = per_row.setdefault(ctx.row_idx, {
-                'kept': [], 'failed': 0,
+                'kept': [],
+                'failed': 0,
             })
             if passed:
                 slot['kept'].append(ctx.asst_idx)
@@ -766,10 +751,8 @@ class ScoreFilter(Preprocessor):
         for ri, row in enumerate(rows):
             user_data = row.get('user_data') if isinstance(row, dict) else None
             had_key_rounds = (
-                isinstance(user_data, dict)
-                and isinstance(user_data.get('key_rounds'), list)
-                and bool(user_data['key_rounds'])
-            )
+                isinstance(user_data, dict) and isinstance(user_data.get('key_rounds'), list)
+                and bool(user_data['key_rounds']))
             decision = per_row.get(ri)
 
             if decision is None:
@@ -802,7 +785,6 @@ class ScoreFilter(Preprocessor):
                     continue
                 out.append(row)
 
-        logger.info(
-            f'[ScoreFilter] removed {n_removed_rounds} rounds, '
-            f'dropped {n_removed_rows} rows, kept {len(out)}/{len(rows)}')
+        logger.info(f'[ScoreFilter] removed {n_removed_rounds} rounds, '
+                    f'dropped {n_removed_rows} rows, kept {len(out)}/{len(rows)}')
         return out, dropped

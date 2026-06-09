@@ -16,11 +16,11 @@ _EN_CORE = re.compile(
     r'\b(i|we)\b.{0,25}\b('
     r"can'?t|cannot|am\s+not\s+able|are\s+not\s+able|"
     r"won'?t|will\s+not|am\s+unable|are\s+unable|"
-    r"must\s+decline|have\s+to\s+decline|"
-    r"decline\s+to|refuse\s+to|"
-    r"am\s+not\s+(allowed|permitted|authorized|comfortable)\s+to|"
-    r"are\s+not\s+(allowed|permitted|authorized)"
-    r")\b.{0,60}\b("
+    r'must\s+decline|have\s+to\s+decline|'
+    r'decline\s+to|refuse\s+to|'
+    r'am\s+not\s+(allowed|permitted|authorized|comfortable)\s+to|'
+    r'are\s+not\s+(allowed|permitted|authorized)'
+    r')\b.{0,60}\b('
     r'help|assist|answer|respond|provide|generate|create|produce|'
     r'fulfill|comply|address|process|complete|handle|discuss|support'
     r')\b',
@@ -107,8 +107,8 @@ _KO_PATTERNS = (
 
 _ALL_PATTERNS = _EN_PATTERNS + _ZH_PATTERNS + _JA_PATTERNS + _KO_PATTERNS
 
-
 # ── Core helper ───────────────────────────────────────────────────────────────
+
 
 def _is_refusal(text: str, check_window: int = 600) -> bool:
     """Return True if the text contains a self-referential refusal signal."""
@@ -117,6 +117,7 @@ def _is_refusal(text: str, check_window: int = 600) -> bool:
 
 
 # ── Preprocessor ─────────────────────────────────────────────────────────────
+
 
 class RefuseFilter(Preprocessor):
 
@@ -129,10 +130,7 @@ class RefuseFilter(Preprocessor):
         dropped = []
         for row in rows:
             messages = row.get('messages') or []
-            asst_msgs = [
-                m for m in messages
-                if isinstance(m, dict) and m.get('role') == 'assistant'
-            ]
+            asst_msgs = [m for m in messages if isinstance(m, dict) and m.get('role') == 'assistant']
             if not asst_msgs:
                 out.append(row)
                 continue

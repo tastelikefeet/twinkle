@@ -6,17 +6,10 @@ Covers Hermes/Qwen, ReAct, Cline parsing, cleaning, and — most importantly
 :class:`twinkle.template.base.Template`.
 """
 import json
-
 import pytest
 
 from twinkle.template.base import Template
-from twinkle.template.tools import (
-    ClineParser,
-    HermesQwenParser,
-    ReActParser,
-    ToolCallRegistry,
-    trailing_prefix_of,
-)
+from twinkle.template.tools import ClineParser, HermesQwenParser, ReActParser, ToolCallRegistry, trailing_prefix_of
 
 
 class _StubTemplate:
@@ -67,7 +60,12 @@ class TestHermesQwenParser:
         out = self.p.parse(text)
         assert out == [{
             'type': 'function',
-            'function': {'name': 'get_weather', 'arguments': {'city': 'Paris'}},
+            'function': {
+                'name': 'get_weather',
+                'arguments': {
+                    'city': 'Paris'
+                }
+            },
         }]
 
     def test_parse_function_xml_variant(self):
@@ -239,7 +237,12 @@ class TestReActParser:
         out = self.p.parse(text)
         assert out == [{
             'type': 'function',
-            'function': {'name': 'search', 'arguments': {'input': 'hello world'}},
+            'function': {
+                'name': 'search',
+                'arguments': {
+                    'input': 'hello world'
+                }
+            },
         }]
 
     def test_parse_multiple_actions(self):
@@ -330,7 +333,12 @@ class TestClineParser:
         out = self.p.parse(text)
         assert out == [{
             'type': 'function',
-            'function': {'name': 'read_file', 'arguments': {'path': 'src/foo.py'}},
+            'function': {
+                'name': 'read_file',
+                'arguments': {
+                    'path': 'src/foo.py'
+                }
+            },
         }]
 
     def test_parse_multi_arg_with_whitespace(self):

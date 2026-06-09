@@ -1,5 +1,6 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 import asyncio
+import contextlib
 import json
 import logging
 import numpy as np
@@ -10,7 +11,6 @@ import threading
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import contextlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from peft import LoraConfig, PeftConfig, PeftModel, get_peft_model
@@ -367,8 +367,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
 
         _mb_counter = [0]  # mutable counter for closure
 
-        def post_loss_function(output_tensor, inputs, logps, unpacked_logits=None, entropies=None,
-                               embeddings=None):
+        def post_loss_function(output_tensor, inputs, logps, unpacked_logits=None, entropies=None, embeddings=None):
             mb_idx = _mb_counter[0]
             _mb_counter[0] += 1
             current_kwargs = loss_extra_kwargs_per_mb[mb_idx % len(loss_extra_kwargs_per_mb)]

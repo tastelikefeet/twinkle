@@ -19,14 +19,12 @@ INTENT_OTHER = 'other'
 
 # ── Heuristic patterns ────────────────────────────────────────────────────────
 _CODE_BLOCK_RE = re.compile(r'```[\s\S]{10,}?```')
-_CODE_KEYWORD_RE = re.compile(
-    r'\b(def |class |import |from |function |const |let |var |return |if \(|for \(|while \(|'
-    r'#include|public class|private |protected |async |await |yield |throw |throws |catch |'
-    r'switch |case |break |continue |void |struct |enum |interface |abstract |static |final |'
-    r'namespace |package |module |export |lambda |func |fn |println|console\.log)\b|'
-    # Symbolic call / arrow signatures occur even without the keywords above.
-    r'(?:[a-zA-Z_]\w*\([^)\n]*\)\s*\{|=>\s*\{|->\s*[A-Za-z_]\w*)'
-)
+_CODE_KEYWORD_RE = re.compile(r'\b(def |class |import |from |function |const |let |var |return |if \(|for \(|while \(|'
+                              r'#include|public class|private |protected |async |await |yield |throw |throws |catch |'
+                              r'switch |case |break |continue |void |struct |enum |interface |abstract |static |final |'
+                              r'namespace |package |module |export |lambda |func |fn |println|console\.log)\b|'
+                              # Symbolic call / arrow signatures occur even without the keywords above.
+                              r'(?:[a-zA-Z_]\w*\([^)\n]*\)\s*\{|=>\s*\{|->\s*[A-Za-z_]\w*)')
 
 _MATH_LATEX_RE = re.compile(
     r'(\$\$.+?\$\$|\$[^$\n]+?\$|'
@@ -132,8 +130,7 @@ _DISSATISFACTION_ZH_RE = re.compile(
     # Time / value waste.
     r'浪费时间|没意义|没价值|垃圾|废物|'
     # Generic anger.
-    r'什么(玩意|东西|鬼)|你这是|你这答',
-)
+    r'什么(玩意|东西|鬼)|你这是|你这答', )
 _DISSATISFACTION_EN_RE = re.compile(
     # Negative adjectives.
     r'\b(wrong|incorrect|useless|terrible|awful|horrible|bad|poor|lousy|sloppy|stupid|dumb|'
@@ -165,18 +162,15 @@ _DISSATISFACTION_EN_RE = re.compile(
     re.IGNORECASE,
 )
 
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _msg_text(msg: Dict[str, Any]) -> str:
     c = msg.get('content')
     if isinstance(c, str):
         return c
     if isinstance(c, list):
-        return ' '.join(
-            p.get('text', '') for p in c
-            if isinstance(p, dict) and p.get('type') == 'text'
-        )
+        return ' '.join(p.get('text', '') for p in c if isinstance(p, dict) and p.get('type') == 'text')
     return ''
 
 
@@ -193,6 +187,7 @@ def _pair_assistant(messages: List[Dict[str, Any]], idx: int, role: str) -> Opti
 
 
 # ── Intent detectors (extensible pipeline) ────────────────────────────────────
+
 
 class IntentDetector:
     """Base class. Each subclass sets ``intent`` and implements ``__call__``.
@@ -340,6 +335,7 @@ class UserDissatisfactionDetector(_RegexDetector):
 
 # ── Preprocessor ──────────────────────────────────────────────────────────────
 
+
 class IntentClassifier(Preprocessor):
     """Annotate each trajectory with its primary intent and key-round indices.
 
@@ -395,9 +391,7 @@ class IntentClassifier(Preprocessor):
         for row in rows:
             row = dict(row)
             messages = row.get('messages')
-            round_intents = (
-                self._detect(messages) if isinstance(messages, list) and messages else {}
-            )
+            round_intents = (self._detect(messages) if isinstance(messages, list) and messages else {})
 
             if round_intents:
                 primary = Counter(round_intents.values()).most_common(1)[0][0]

@@ -1,12 +1,10 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
-from typing import List, Union
-
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from typing import List, Union
 
 from twinkle.data_format import InputFeature, ModelOutput
-
 from .base import Metric
 
 

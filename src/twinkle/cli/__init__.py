@@ -1,29 +1,7 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
-from .cli import (
-    CLI,
-    Args,
-    CheckpointArgs,
-    CLISource,
-    ConfigResolver,
-    ConfigSource,
-    DatasetArgs,
-    DotEnvSource,
-    EnvVarSource,
-    InfraArgs,
-    LoraArgs,
-    LossArgs,
-    ModelArgs,
-    OptimizerArgs,
-    RLArgs,
-    SamplerArgs,
-    SamplingArgs,
-    SchedulerArgs,
-    ServerArgs,
-    TemplateArgs,
-    TrainingArgs,
-    ValueCaster,
-    YamlSource,
-)
+from .cli import (CLI, Args, CheckpointArgs, CLISource, ConfigResolver, ConfigSource, DatasetArgs, DotEnvSource,
+                  EnvVarSource, InfraArgs, LoraArgs, LossArgs, ModelArgs, OptimizerArgs, RLArgs, SamplerArgs,
+                  SamplingArgs, SchedulerArgs, ServerArgs, TemplateArgs, TrainingArgs, ValueCaster, YamlSource)
 
 __all__ = [
     'CLI',

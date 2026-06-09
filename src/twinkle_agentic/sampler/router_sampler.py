@@ -1,9 +1,8 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
+import httpx
 import math
 from copy import copy
 from typing import Any, Dict, List, Literal, Optional, Union
-
-import httpx
 
 from twinkle import get_logger
 from twinkle.data_format import SampledSequence, SampleResponse, SamplingParams, Trajectory
@@ -130,12 +129,14 @@ class RouterSampler:
             entry['content'] = content or ''
             api_messages.append(entry)
         try:
-            resp = self._client.post(self._fb_endpoint, json={
-                'model': self._fb_model,
-                'messages': api_messages,
-                'temperature': self._fb_temperature,
-                'max_tokens': self._fb_max_tokens,
-            })
+            resp = self._client.post(
+                self._fb_endpoint,
+                json={
+                    'model': self._fb_model,
+                    'messages': api_messages,
+                    'temperature': self._fb_temperature,
+                    'max_tokens': self._fb_max_tokens,
+                })
             resp.raise_for_status()
             choices = resp.json().get('choices', [])
             if choices:
@@ -166,8 +167,7 @@ class RouterSampler:
         inputs_list = inputs if isinstance(inputs, list) else [inputs]
         is_trajectory = isinstance(inputs_list[0], dict) and 'input_ids' not in inputs_list[0]
 
-        results = self.sampler.sample(
-            inputs_list, routed_params, adapter_name, adapter_path=adapter_path, **kwargs)
+        results = self.sampler.sample(inputs_list, routed_params, adapter_name, adapter_path=adapter_path, **kwargs)
 
         if not is_trajectory:
             return results
@@ -178,12 +178,13 @@ class RouterSampler:
                 if self._should_route(seq):
                     fallback_text = self._fallback_generate(traj)
                     if fallback_text is not None:
-                        new_sequences.append(SampledSequence(
-                            stop_reason='stop',
-                            tokens=[],
-                            logprobs=None,
-                            decoded=fallback_text,
-                        ))
+                        new_sequences.append(
+                            SampledSequence(
+                                stop_reason='stop',
+                                tokens=[],
+                                logprobs=None,
+                                decoded=fallback_text,
+                            ))
                         continue
                 new_sequences.append(seq)
             results[i] = SampleResponse(

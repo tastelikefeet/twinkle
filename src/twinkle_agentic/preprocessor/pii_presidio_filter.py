@@ -54,6 +54,7 @@ def _is_valid_luhn(s: str) -> bool:
 
 # ─── Replacement primitives ─────────────────────────────────────────────────────
 
+
 class Strategy(str, Enum):
     MASK = 'mask'
     REPLACE = 'replace'
@@ -81,25 +82,26 @@ def _hash_short(s: str, salt: str = '') -> str:
 
 # ─── Faker dispatcher (per-instance, thread-safe) ───────────────────────────────
 
+
 class FakerProvider:
     """Maps Presidio entity_type → Faker provider call, with lang-locale cache."""
 
     _PROVIDER: Dict[str, Any] = {
-        'PERSON':         lambda f: f.name(),
-        'LOCATION':       lambda f: f.city(),
-        'ORGANIZATION':   lambda f: f.company(),
-        'EMAIL_ADDRESS':  lambda f: f.email(),
-        'PHONE_NUMBER':   lambda f: f.phone_number(),
-        'CN_PHONE':       lambda f: f.phone_number(),
-        'CN_LANDLINE':    lambda f: f.phone_number(),
-        'IP_ADDRESS':     lambda f: f.ipv4(),
-        'URL':            lambda f: f.url(),
-        'IBAN_CODE':      lambda f: f.iban(),
-        'CREDIT_CARD':    lambda f: f.credit_card_number(),
+        'PERSON': lambda f: f.name(),
+        'LOCATION': lambda f: f.city(),
+        'ORGANIZATION': lambda f: f.company(),
+        'EMAIL_ADDRESS': lambda f: f.email(),
+        'PHONE_NUMBER': lambda f: f.phone_number(),
+        'CN_PHONE': lambda f: f.phone_number(),
+        'CN_LANDLINE': lambda f: f.phone_number(),
+        'IP_ADDRESS': lambda f: f.ipv4(),
+        'URL': lambda f: f.url(),
+        'IBAN_CODE': lambda f: f.iban(),
+        'CREDIT_CARD': lambda f: f.credit_card_number(),
         'US_BANK_NUMBER': lambda f: f.credit_card_number(),
-        'CN_BANK':        lambda f: f.credit_card_number(),
-        'CRYPTO':         lambda f: f.sha256()[:34],
-        'DATE_TIME':      lambda f: str(f.date()),
+        'CN_BANK': lambda f: f.credit_card_number(),
+        'CRYPTO': lambda f: f.sha256()[:34],
+        'DATE_TIME': lambda f: str(f.date()),
     }
     _LOCALE: Dict[str, str] = {'zh': 'zh_CN', 'en': 'en_US'}
 
@@ -126,15 +128,18 @@ class FakerProvider:
 
 # ─── CN recognizers (module-level so they introspect/pickle cleanly) ────────────
 
+
 def _cn_recognizer_classes():
     """Lazy-imported once; PatternRecognizer requires presidio_analyzer at import time."""
     from presidio_analyzer import Pattern, PatternRecognizer
 
     class CNIDRecognizer(PatternRecognizer):
+
         def validate_result(self, pattern_text: str) -> bool:
             return _is_valid_cn_id(pattern_text)
 
     class CNBankRecognizer(PatternRecognizer):
+
         def validate_result(self, pattern_text: str) -> bool:
             return _is_valid_luhn(pattern_text)
 
@@ -144,39 +149,51 @@ def _cn_recognizer_classes():
 def _build_cn_recognizers(languages: Sequence[str]) -> List[Any]:
     Pattern, PatternRecognizer, CNIDRecognizer, CNBankRecognizer = _cn_recognizer_classes()
     specs = [
-        ('CN_ID',       r'(?<![\dA-Za-z])\d{17}[\dXx](?![\dA-Za-z])', 0.85, CNIDRecognizer),
-        ('CN_PHONE',    r'(?<!\d)1[3-9]\d{9}(?!\d)',                 0.85, PatternRecognizer),
-        ('CN_LANDLINE', r'(?<!\d)0\d{2,3}[-\s]?\d{7,8}(?!\d)',       0.70, PatternRecognizer),
-        ('CN_BANK',     r'(?<!\d)\d{13,19}(?!\d)',                   0.40, CNBankRecognizer),
+        ('CN_ID', r'(?<![\dA-Za-z])\d{17}[\dXx](?![\dA-Za-z])', 0.85, CNIDRecognizer),
+        ('CN_PHONE', r'(?<!\d)1[3-9]\d{9}(?!\d)', 0.85, PatternRecognizer),
+        ('CN_LANDLINE', r'(?<!\d)0\d{2,3}[-\s]?\d{7,8}(?!\d)', 0.70, PatternRecognizer),
+        ('CN_BANK', r'(?<!\d)\d{13,19}(?!\d)', 0.40, CNBankRecognizer),
     ]
     out: List[Any] = []
     for entity, regex, score, cls in specs:
         pat = Pattern(name=entity.lower(), regex=regex, score=score)
         for lang in languages:
-            out.append(cls(supported_entity=entity, patterns=[pat],
-                           supported_language=lang))
+            out.append(cls(supported_entity=entity, patterns=[pat], supported_language=lang))
     return out
 
 
 # ─── Filter ─────────────────────────────────────────────────────────────────────
+
 
 class PIIPresidioFilter(Preprocessor):
     """Multi-language, multi-country PII rewriter (Presidio + spaCy + Faker)."""
 
     DEFAULT_ENTITY_STRATEGY: Dict[str, Strategy] = {
         'EMAIL_ADDRESS': Strategy.REPLACE,
-        'PHONE_NUMBER': Strategy.MASK, 'IP_ADDRESS': Strategy.MASK,
-        'CREDIT_CARD': Strategy.MASK, 'IBAN_CODE': Strategy.MASK,
-        'CRYPTO': Strategy.MASK, 'US_BANK_NUMBER': Strategy.MASK,
-        'US_SSN': Strategy.MASK, 'US_ITIN': Strategy.MASK,
-        'US_PASSPORT': Strategy.MASK, 'US_DRIVER_LICENSE': Strategy.MASK,
-        'UK_NHS': Strategy.MASK, 'UK_NINO': Strategy.MASK,
-        'IN_AADHAAR': Strategy.MASK, 'IN_PAN': Strategy.MASK,
-        'AU_ABN': Strategy.MASK, 'SG_NRIC': Strategy.MASK,
-        'IT_FISCAL_CODE': Strategy.MASK, 'ES_NIF': Strategy.MASK,
-        'ES_NIE': Strategy.MASK, 'MEDICAL_LICENSE': Strategy.MASK,
-        'CN_ID': Strategy.MASK, 'CN_PHONE': Strategy.MASK,
-        'CN_LANDLINE': Strategy.MASK, 'CN_BANK': Strategy.MASK,
+        'PHONE_NUMBER': Strategy.MASK,
+        'IP_ADDRESS': Strategy.MASK,
+        'CREDIT_CARD': Strategy.MASK,
+        'IBAN_CODE': Strategy.MASK,
+        'CRYPTO': Strategy.MASK,
+        'US_BANK_NUMBER': Strategy.MASK,
+        'US_SSN': Strategy.MASK,
+        'US_ITIN': Strategy.MASK,
+        'US_PASSPORT': Strategy.MASK,
+        'US_DRIVER_LICENSE': Strategy.MASK,
+        'UK_NHS': Strategy.MASK,
+        'UK_NINO': Strategy.MASK,
+        'IN_AADHAAR': Strategy.MASK,
+        'IN_PAN': Strategy.MASK,
+        'AU_ABN': Strategy.MASK,
+        'SG_NRIC': Strategy.MASK,
+        'IT_FISCAL_CODE': Strategy.MASK,
+        'ES_NIF': Strategy.MASK,
+        'ES_NIE': Strategy.MASK,
+        'MEDICAL_LICENSE': Strategy.MASK,
+        'CN_ID': Strategy.MASK,
+        'CN_PHONE': Strategy.MASK,
+        'CN_LANDLINE': Strategy.MASK,
+        'CN_BANK': Strategy.MASK,
     }
     DEFAULT_SPACY_MODELS: Dict[str, str] = {'en': 'en_core_web_sm', 'zh': 'zh_core_web_sm'}
     CJK_LANG_THRESHOLD: float = 0.15
@@ -189,10 +206,9 @@ class PIIPresidioFilter(Preprocessor):
     # identifiers (phone/email/IDs/bank/cards) reliably indicate real PII. URL is also dropped—redacting
     # links in technical/instruction text changes semantics without privacy benefit.
     IGNORED_ENTITIES: Tuple[str, ...] = ('PERSON', 'LOCATION', 'ORGANIZATION', 'NRP', 'DATE_TIME', 'URL')
-    INSTALL_HINT = (
-        'PIIPresidioFilter requires: pip install presidio-analyzer presidio-anonymizer '
-        'faker spacy && python -m spacy download en_core_web_sm && '
-        'python -m spacy download zh_core_web_sm')
+    INSTALL_HINT = ('PIIPresidioFilter requires: pip install presidio-analyzer presidio-anonymizer '
+                    'faker spacy && python -m spacy download en_core_web_sm && '
+                    'python -m spacy download zh_core_web_sm')
 
     def __init__(
         self,
@@ -220,8 +236,7 @@ class PIIPresidioFilter(Preprocessor):
 
         self._strategy = {k: Strategy.coerce(v) for k, v in self.DEFAULT_ENTITY_STRATEGY.items()}
         if entity_strategy:
-            self._strategy.update({k.upper(): Strategy.coerce(v)
-                                   for k, v in entity_strategy.items()})
+            self._strategy.update({k.upper(): Strategy.coerce(v) for k, v in entity_strategy.items()})
         self._default_strategy = Strategy.coerce(default_strategy)
 
         self._score_threshold = score_threshold
@@ -248,9 +263,9 @@ class PIIPresidioFilter(Preprocessor):
     @classmethod
     def _require_deps(cls) -> None:
         try:
+            import faker  # noqa: F401
             import presidio_analyzer  # noqa: F401
             import presidio_anonymizer  # noqa: F401
-            import faker  # noqa: F401
             import spacy  # noqa: F401
         except ImportError as e:
             raise ImportError(f'{e}. {cls.INSTALL_HINT}') from e
@@ -261,8 +276,10 @@ class PIIPresidioFilter(Preprocessor):
 
         nlp_conf = {
             'nlp_engine_name': 'spacy',
-            'models': [{'lang_code': l, 'model_name': self._spacy_models[l]}
-                       for l in self._languages],
+            'models': [{
+                'lang_code': lang,
+                'model_name': self._spacy_models[lang]
+            } for lang in self._languages],
         }
         nlp_engine = NlpEngineProvider(nlp_configuration=nlp_conf).create_engine()
         # NER pipe is the heaviest spaCy component and we discard all NER entities; disable to save 2-4x latency.
@@ -274,8 +291,7 @@ class PIIPresidioFilter(Preprocessor):
         registry.load_predefined_recognizers(languages=self._languages, nlp_engine=nlp_engine)
         for r in _build_cn_recognizers(self._languages):
             registry.add_recognizer(r)
-        return AnalyzerEngine(registry=registry, nlp_engine=nlp_engine,
-                              supported_languages=self._languages)
+        return AnalyzerEngine(registry=registry, nlp_engine=nlp_engine, supported_languages=self._languages)
 
     # ── language routing ────────────────────────────────────────────────────
 
@@ -287,7 +303,10 @@ class PIIPresidioFilter(Preprocessor):
     # ── replacement ─────────────────────────────────────────────────────────
 
     def _replacement_for(
-        self, entity: str, original: str, lang: str,
+        self,
+        entity: str,
+        original: str,
+        lang: str,
         local_map: Dict[Tuple[str, str], str],
     ) -> str:
         strategy = self._strategy.get(entity.upper(), self._default_strategy)
@@ -326,14 +345,15 @@ class PIIPresidioFilter(Preprocessor):
     # ── core scrubbing ──────────────────────────────────────────────────────
 
     def _scrub_text(
-        self, text: str, local_map: Dict[Tuple[str, str], str],
+        self,
+        text: str,
+        local_map: Dict[Tuple[str, str], str],
     ) -> Tuple[str, Dict[str, int]]:
         if not text:
             return text, {}
         lang = self._resolve_language(text)
-        results = self._analyzer.analyze(text=text, language=lang,
-                                         entities=self._allowed_entities.get(lang),
-                                         score_threshold=self._score_threshold)
+        results = self._analyzer.analyze(
+            text=text, language=lang, entities=self._allowed_entities.get(lang), score_threshold=self._score_threshold)
         if not results:
             return text, {}
 
@@ -354,7 +374,9 @@ class PIIPresidioFilter(Preprocessor):
         return out, hits
 
     def _scrub_row(
-        self, row: Dict[str, Any], local_map: Dict[Tuple[str, str], str],
+        self,
+        row: Dict[str, Any],
+        local_map: Dict[Tuple[str, str], str],
     ) -> Dict[str, int]:
         row_hits: Dict[str, int] = {}
         for m in row.get('messages') or []:

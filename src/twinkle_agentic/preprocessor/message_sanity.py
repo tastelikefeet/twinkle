@@ -9,15 +9,8 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from twinkle.preprocessor import Preprocessor
-
-from .utils import (
-    build_sensitive_regex,
-    cjk_ratio,
-    is_agent_row,
-    load_sensitive_words,
-    msg_content_text,
-    normalize_tool_calls,
-)
+from .utils import (build_sensitive_regex, cjk_ratio, is_agent_row, load_sensitive_words, msg_content_text,
+                    normalize_tool_calls)
 
 # backward compat: other modules import these from here
 _msg_content_text = msg_content_text
@@ -26,10 +19,10 @@ _normalize_tool_calls = normalize_tool_calls
 _VALID_ROLES = {'system', 'user', 'assistant', 'tool'}
 _IDENTIFIER_RE = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_.\-]*$')
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # Transforms (applied before checks, may modify messages)
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 def consolidate_system_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Fold multiple system messages into one at index 0."""
@@ -70,6 +63,7 @@ def trim_to_last_assistant(messages: List[Dict[str, Any]]) -> List[Dict[str, Any
 # ══════════════════════════════════════════════════════════════════════════════
 # Check functions: (messages, is_agent, cfg) -> bool   (True = pass)
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 def check_role_order(messages: List[Dict[str, Any]], is_agent: bool, cfg: dict) -> bool:
     """Validate conversational role ordering."""
@@ -198,7 +192,8 @@ def check_content_integrity(messages: List[Dict[str, Any]], is_agent: bool, cfg:
         # consecutive duplicate detection (skip tool and assistant-with-tool_calls)
         if i > 0 and role != 'tool' and not m.get('tool_calls') and isinstance(messages[i - 1], dict):
             prev = messages[i - 1]
-            if prev.get('role') == role and not prev.get('tool_calls') and msg_content_text(prev) == content and content:
+            if prev.get('role') == role and not prev.get('tool_calls') and msg_content_text(
+                    prev) == content and content:
                 return False
     if user_count < 1 or assistant_count < 1:
         return False

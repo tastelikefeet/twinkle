@@ -41,8 +41,10 @@ def _to_int_list(x) -> List[int]:
 
 
 def _chr_min_distinct(
-    cond_lp: List, asst_lp: List,
-    cond_ids: List[int], asst_ids: List[int],
+    cond_lp: List,
+    asst_lp: List,
+    cond_ids: List[int],
+    asst_ids: List[int],
     n_prompt: int,
     exclude_ids: Optional[Set[int]] = None,
 ) -> Optional[float]:
@@ -75,8 +77,10 @@ def _chr_min_distinct(
 
 
 def _chr_min_weighted(
-    cond_lp: List, asst_lp: List,
-    cond_ids: List[int], asst_ids: List[int],
+    cond_lp: List,
+    asst_lp: List,
+    cond_ids: List[int],
+    asst_ids: List[int],
     n_prompt: int,
 ) -> Optional[float]:
     """Magnitude-weighted chr_min: each distinct token contributes |min_delta|
@@ -115,8 +119,10 @@ def _chr_min_weighted(
 
 
 def _ifd_family_metrics(
-    cond_lp: List, asst_lp: List,
-    cond_ids: List[int], asst_ids: List[int],
+    cond_lp: List,
+    asst_lp: List,
+    cond_ids: List[int],
+    asst_ids: List[int],
     n_prompt: int,
 ) -> Dict[str, Any]:
     """IFD (Cherry-LLM) and S-IFD-{50,75} (T-SHIRT) for one round."""
@@ -156,8 +162,10 @@ def _ifd_family_metrics(
 
 
 def _mean_logprob_delta(
-    cond_lp: List, asst_lp: List,
-    cond_ids: List[int], asst_ids: List[int],
+    cond_lp: List,
+    asst_lp: List,
+    cond_ids: List[int],
+    asst_ids: List[int],
     n_prompt: int,
 ) -> Optional[float]:
     """Mean per-token (cond_lp - asst_lp) over the response span."""
@@ -200,9 +208,11 @@ def _lp_to_jsonable(lp_list):
         d = {}
         for k, v in lp.items():
             if hasattr(v, 'logprob'):
-                d[str(k)] = {'logprob': float(v.logprob),
-                             'rank': getattr(v, 'rank', None),
-                             'decoded': getattr(v, 'decoded_token', None)}
+                d[str(k)] = {
+                    'logprob': float(v.logprob),
+                    'rank': getattr(v, 'rank', None),
+                    'decoded': getattr(v, 'decoded_token', None)
+                }
             elif isinstance(v, dict):
                 d[str(k)] = v
             else:
@@ -222,16 +232,14 @@ def _pad_batch(batch: List[List[int]], floor: int) -> Tuple[List[List[int]], int
 # Message-format utilities
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def msg_content_text(msg: Dict[str, Any]) -> str:
     """Extract plain text from a message's content (str | list | dict)."""
     c = msg.get('content')
     if isinstance(c, str):
         return c
     if isinstance(c, list):
-        return ' '.join(
-            p.get('text', '') for p in c
-            if isinstance(p, dict) and p.get('type') == 'text'
-        )
+        return ' '.join(p.get('text', '') for p in c if isinstance(p, dict) and p.get('type') == 'text')
     if isinstance(c, dict) and c.get('type') == 'text':
         return c.get('text', '')
     return ''
@@ -273,8 +281,7 @@ def normalize_tool_calls(msg: Dict[str, Any]) -> Optional[List[Any]]:
     return result
 
 
-CJK_CHARS_RE = re.compile(
-    r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7a3]')
+CJK_CHARS_RE = re.compile(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7a3]')
 
 
 def cjk_ratio(text: str) -> float:
@@ -290,7 +297,7 @@ def load_sensitive_words(path: Optional[str]) -> Set[str]:
     if not path or not os.path.isfile(path):
         return set()
     words: Set[str] = set()
-    with open(path, 'r', encoding='utf-8') as f:
+    with open(path, encoding='utf-8') as f:
         for line in f:
             line = line.strip()
             if line and not line.startswith('#'):

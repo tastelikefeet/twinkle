@@ -5,7 +5,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from twinkle.preprocessor import Preprocessor
 from twinkle.utils import get_logger
-
 from .llm_backend import LLMBackend, OpenAIBackend
 
 logger = get_logger(only_local_master=False)
@@ -28,31 +27,21 @@ Output format:
 """
 
 _INTENT_PROMPT_SUFFIX = {
-    'code': (
-        '\nFocus: This round is about CODE. '
-        'Ensure the code is correct, complete, runnable, and well-commented. '
-        'Fix any bugs in the original. Use proper formatting with language-tagged fenced blocks.'
-    ),
-    'math': (
-        '\nFocus: This round is about MATH. '
-        'Show derivation steps clearly with proper LaTeX notation. '
-        'Verify the final answer by substitution or sanity check.'
-    ),
-    'complex_logic': (
-        '\nFocus: This round requires COMPLEX REASONING. '
-        'Present a clean logical chain without backtracking. '
-        'Number each reasoning step. State assumptions explicitly.'
-    ),
-    'user_dissatisfaction': (
-        '\nFocus: The user was DISSATISFIED with the previous response. '
-        'Address the root cause of dissatisfaction directly. '
-        'Acknowledge the issue and provide a substantially improved answer.'
-    ),
-    'tool_call': (
-        '\nFocus: This round involves TOOL CALLS. '
-        'Ensure tool call arguments are correct and the synthesis of tool results is accurate. '
-        'Present the final answer clearly based on tool outputs.'
-    ),
+    'code': ('\nFocus: This round is about CODE. '
+             'Ensure the code is correct, complete, runnable, and well-commented. '
+             'Fix any bugs in the original. Use proper formatting with language-tagged fenced blocks.'),
+    'math': ('\nFocus: This round is about MATH. '
+             'Show derivation steps clearly with proper LaTeX notation. '
+             'Verify the final answer by substitution or sanity check.'),
+    'complex_logic': ('\nFocus: This round requires COMPLEX REASONING. '
+                      'Present a clean logical chain without backtracking. '
+                      'Number each reasoning step. State assumptions explicitly.'),
+    'user_dissatisfaction': ('\nFocus: The user was DISSATISFIED with the previous response. '
+                             'Address the root cause of dissatisfaction directly. '
+                             'Acknowledge the issue and provide a substantially improved answer.'),
+    'tool_call': ('\nFocus: This round involves TOOL CALLS. '
+                  'Ensure tool call arguments are correct and the synthesis of tool results is accurate. '
+                  'Present the final answer clearly based on tool outputs.'),
 }
 
 
@@ -129,8 +118,7 @@ class ResponseRefiner(Preprocessor):
         if backend is not None:
             self._backend = backend
         else:
-            self._backend = OpenAIBackend(
-                endpoint=api_endpoint, model=model, api_key=api_key, timeout=180.0)
+            self._backend = OpenAIBackend(endpoint=api_endpoint, model=model, api_key=api_key, timeout=180.0)
         self._temperature = temperature
         self._max_tokens = max_tokens
         self._max_workers = max_workers
@@ -166,8 +154,13 @@ class ResponseRefiner(Preprocessor):
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
             future_to_key = {
                 pool.submit(
-                    _refine_round, self._backend,
-                    msgs, asst_idx, self._temperature, self._max_tokens, intent,
+                    _refine_round,
+                    self._backend,
+                    msgs,
+                    asst_idx,
+                    self._temperature,
+                    self._max_tokens,
+                    intent,
                 ): (ri, rnd_idx)
                 for ri, rnd_idx, asst_idx, msgs, intent in tasks
             }
@@ -222,8 +215,7 @@ class ResponseRefiner(Preprocessor):
                 row['user_data'] = dict(user_data, refined=True)
             out.append(row)
 
-        logger.info(
-            f'[ResponseRefiner] refined {n_refined} rounds, '
-            f'dropped {len(dropped)} rows without key_rounds, '
-            f'output {len(out)} rows')
+        logger.info(f'[ResponseRefiner] refined {n_refined} rounds, '
+                    f'dropped {len(dropped)} rows without key_rounds, '
+                    f'output {len(out)} rows')
         return out, dropped

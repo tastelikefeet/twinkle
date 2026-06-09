@@ -4,13 +4,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
 from twinkle.preprocessor import Preprocessor
-
 from .llm_backend import LLMBackend, OpenAIBackend
 
 _MIN_RESPONSE_TOKENS = 5
 
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _encode_pair(
     tokenizer,
@@ -27,17 +26,21 @@ def _encode_pair(
 
     try:
         prompt_text = tokenizer.apply_chat_template(
-            messages[:last_asst], tokenize=False, add_generation_prompt=True,
+            messages[:last_asst],
+            tokenize=False,
+            add_generation_prompt=True,
         )
         full_text = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=False,
+            messages,
+            tokenize=False,
+            add_generation_prompt=False,
         )
     except Exception:
         return None
 
     # Template already embeds special tokens as text; avoid double-adding them
     n_prompt = len(tokenizer(prompt_text, add_special_tokens=False)['input_ids'])
-    n_full   = len(tokenizer(full_text,   add_special_tokens=False)['input_ids'])
+    n_full = len(tokenizer(full_text, add_special_tokens=False)['input_ids'])
     if n_full - n_prompt < _MIN_RESPONSE_TOKENS:
         return None
     return messages, n_prompt
@@ -79,6 +82,7 @@ def _score_one(
 
 # ── Preprocessor ─────────────────────────────────────────────────────────────
 
+
 class PerplexityFilter(Preprocessor):
     """Filter dataset rows by model perplexity on the assistant response.
 
@@ -109,9 +113,9 @@ class PerplexityFilter(Preprocessor):
             self._backend = backend
         else:
             self._backend = OpenAIBackend(endpoint=api_endpoint, model=model)
-        self._tokenizer   = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
-        self.ppl_min      = ppl_min
-        self.ppl_max      = ppl_max
+        self._tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
+        self.ppl_min = ppl_min
+        self.ppl_max = ppl_max
         self._max_workers = max_workers
 
     def __call__(self, rows) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:

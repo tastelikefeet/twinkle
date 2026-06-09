@@ -12,24 +12,17 @@ Conventions used in this test file:
   * Each lp entry is a dict {token_id: logprob_float}.
 """
 import math
-
 import pytest
 
-from twinkle_agentic.preprocessor.utils import (
-    _chr_min_distinct,
-    _chr_min_weighted,
-    _extract_logprob,
-    _ifd_family_metrics,
-    _lp_to_jsonable,
-    _mean_logprob_delta,
-    _pad_batch,
-    _to_int_list,
-)
-
+from twinkle_agentic.preprocessor.utils import (_chr_min_distinct, _chr_min_weighted, _extract_logprob,
+                                                _ifd_family_metrics, _lp_to_jsonable, _mean_logprob_delta, _pad_batch,
+                                                _to_int_list)
 
 # ── _extract_logprob ────────────────────────────────────────────────────────
 
+
 class TestExtractLogprob:
+
     def test_none(self):
         assert _extract_logprob(None) is None
 
@@ -60,9 +53,12 @@ class TestExtractLogprob:
         assert _extract_logprob(lp, token_id=7) == -3.0
 
     def test_dict_with_logprob_attr_object(self):
+
         class Entry:
+
             def __init__(self, v):
                 self.logprob = v
+
         lp = {7: Entry(-0.7)}
         assert _extract_logprob(lp, token_id=7) == -0.7
 
@@ -86,7 +82,9 @@ class TestExtractLogprob:
 
 # ── _to_int_list ────────────────────────────────────────────────────────────
 
+
 class TestToIntList:
+
     def test_plain_list(self):
         assert _to_int_list([1, 2, 3]) == [1, 2, 3]
 
@@ -94,9 +92,12 @@ class TestToIntList:
         assert _to_int_list((1, 2, 3)) == [1, 2, 3]
 
     def test_with_tolist(self):
+
         class Tensor:
+
             def tolist(self):
                 return [4, 5, 6]
+
         assert _to_int_list(Tensor()) == [4, 5, 6]
 
     def test_empty(self):
@@ -105,7 +106,9 @@ class TestToIntList:
 
 # ── _chr_min_distinct ───────────────────────────────────────────────────────
 
+
 class TestChrMinDistinct:
+
     def test_empty_inputs_returns_none(self):
         assert _chr_min_distinct([], [{1: -1.0}], [], [1], 0) is None
         assert _chr_min_distinct([{1: -1.0}], [], [1], [], 0) is None
@@ -115,9 +118,17 @@ class TestChrMinDistinct:
         # cond_lp[i] - asst_lp[i] > 0 for all i → ratio = 1.0
         n_prompt = 1
         # cond covers prompt(1) + asst(2) = 3 positions
-        cond_lp = [{0: -10.0},  # prompt position
-                   {1: -0.1},   # asst pos 0 — high cond logprob
-                   {2: -0.2}]   # asst pos 1
+        cond_lp = [
+            {
+                0: -10.0
+            },  # prompt position
+            {
+                1: -0.1
+            },  # asst pos 0 — high cond logprob
+            {
+                2: -0.2
+            }
+        ]  # asst pos 1
         asst_lp = [{1: -1.0}, {2: -1.5}]
         cond_ids = [0, 1, 2]
         asst_ids = [1, 2]
@@ -147,8 +158,7 @@ class TestChrMinDistinct:
         cond_lp = [{0: 0.0}, {1: -0.1}, {2: -0.1}]
         asst_lp = [{1: -1.0}, {2: -1.0}]
         # Without exclude: 2 distinct tokens, both positive → 1.0
-        ratio = _chr_min_distinct(cond_lp, asst_lp, [0, 1, 2], [1, 2],
-                                  n_prompt, exclude_ids={1})
+        ratio = _chr_min_distinct(cond_lp, asst_lp, [0, 1, 2], [1, 2], n_prompt, exclude_ids={1})
         assert ratio == 1.0  # only token 2 counted, still positive
 
     def test_truncation_when_cond_short(self):
@@ -162,7 +172,9 @@ class TestChrMinDistinct:
 
 # ── _chr_min_weighted ───────────────────────────────────────────────────────
 
+
 class TestChrMinWeighted:
+
     def test_empty_returns_none(self):
         assert _chr_min_weighted([], [{1: -1.0}], [], [1], 0) is None
 
@@ -185,8 +197,8 @@ class TestChrMinWeighted:
         # Token B: min_delta = -1.0  (weight 1)
         # pos / total = 2 / 3
         n_prompt = 1
-        cond_lp = [{0: 0.0}, {1: 1.0}, {2: -2.0}]   # cond: A=1.0, B=-2.0
-        asst_lp = [{1: -1.0}, {2: -1.0}]            # asst: A=-1.0, B=-1.0
+        cond_lp = [{0: 0.0}, {1: 1.0}, {2: -2.0}]  # cond: A=1.0, B=-2.0
+        asst_lp = [{1: -1.0}, {2: -1.0}]  # asst: A=-1.0, B=-1.0
         # delta A = 1.0 - (-1.0) = 2.0
         # delta B = -2.0 - (-1.0) = -1.0
         ratio = _chr_min_weighted(cond_lp, asst_lp, [0, 1, 2], [1, 2], n_prompt)
@@ -195,7 +207,9 @@ class TestChrMinWeighted:
 
 # ── _ifd_family_metrics ─────────────────────────────────────────────────────
 
+
 class TestIfdFamilyMetrics:
+
     def test_empty_returns_empty_dict(self):
         assert _ifd_family_metrics([], [{1: -1.0}], [], [1], 0) == {}
 
@@ -226,7 +240,9 @@ class TestIfdFamilyMetrics:
 
 # ── _mean_logprob_delta ─────────────────────────────────────────────────────
 
+
 class TestMeanLogprobDelta:
+
     def test_empty(self):
         assert _mean_logprob_delta([], [{1: -1.0}], [], [1], 0) is None
 
@@ -256,7 +272,9 @@ class TestMeanLogprobDelta:
 
 # ── _lp_to_jsonable ─────────────────────────────────────────────────────────
 
+
 class TestLpToJsonable:
+
     def test_none_input(self):
         assert _lp_to_jsonable(None) == []
 
@@ -270,15 +288,16 @@ class TestLpToJsonable:
         assert _lp_to_jsonable([1, -2.0]) == [1.0, -2.0]
 
     def test_dict_with_logprob_object(self):
+
         class Entry:
+
             def __init__(self, lp, rank, decoded):
                 self.logprob = lp
                 self.rank = rank
                 self.decoded_token = decoded
+
         out = _lp_to_jsonable([{7: Entry(-0.5, 1, 'hello')}])
-        assert out == [{
-            '7': {'logprob': -0.5, 'rank': 1, 'decoded': 'hello'}
-        }]
+        assert out == [{'7': {'logprob': -0.5, 'rank': 1, 'decoded': 'hello'}}]
 
     def test_dict_with_nested_dict(self):
         out = _lp_to_jsonable([{7: {'logprob': -0.5}}])
@@ -297,7 +316,9 @@ class TestLpToJsonable:
 
 # ── _pad_batch ──────────────────────────────────────────────────────────────
 
+
 class TestPadBatch:
+
     def test_empty_batch(self):
         padded, n = _pad_batch([], floor=4)
         assert padded == []

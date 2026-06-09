@@ -14,19 +14,13 @@ Coverage:
   * ``Strategy.coerce``      — enum coercion + strict failure mode
 """
 import hashlib
-
 import pytest
 
-from twinkle_agentic.preprocessor.pii_presidio_filter import (
-    Strategy,
-    _hash_short,
-    _is_valid_cn_id,
-    _is_valid_luhn,
-    _mask_keep_edges,
-)
-
+from twinkle_agentic.preprocessor.pii_presidio_filter import (Strategy, _hash_short, _is_valid_cn_id, _is_valid_luhn,
+                                                              _mask_keep_edges)
 
 # ── _is_valid_cn_id ─────────────────────────────────────────────────────────
+
 
 class TestIsValidCnId:
     """
@@ -66,6 +60,7 @@ class TestIsValidCnId:
 
 # ── _is_valid_luhn ──────────────────────────────────────────────────────────
 
+
 class TestIsValidLuhn:
     """
     `4532015112830366` is a well-known Visa test number that satisfies Luhn.
@@ -103,7 +98,9 @@ class TestIsValidLuhn:
 
 # ── _mask_keep_edges ────────────────────────────────────────────────────────
 
+
 class TestMaskKeepEdges:
+
     def test_default_head_tail(self):
         # head=3, tail=4 → keep 3 + mask middle + keep 4
         s = '13800138000'  # 11 chars
@@ -144,7 +141,9 @@ class TestMaskKeepEdges:
 
 # ── _hash_short ─────────────────────────────────────────────────────────────
 
+
 class TestHashShort:
+
     def test_length_is_12(self):
         assert len(_hash_short('alice@example.com')) == 12
 
@@ -178,13 +177,15 @@ class TestHashShort:
 
     def test_unicode_input(self):
         # UTF-8 encoding before hashing.
-        expected = hashlib.sha256('张三'.encode('utf-8')).hexdigest()[:12]
+        expected = hashlib.sha256('张三'.encode()).hexdigest()[:12]
         assert _hash_short('张三') == expected
 
 
 # ── Strategy.coerce ─────────────────────────────────────────────────────────
 
+
 class TestStrategyCoerce:
+
     def test_coerce_string_to_enum(self):
         assert Strategy.coerce('mask') is Strategy.MASK
         assert Strategy.coerce('replace') is Strategy.REPLACE

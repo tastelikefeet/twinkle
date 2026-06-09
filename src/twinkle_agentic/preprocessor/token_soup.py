@@ -33,26 +33,25 @@ _SPECIAL_TOKEN_RE = re.compile(
 #     Geometric shapes (U+25A0-25FF), Braille patterns (U+2800-28FF)
 #   - Em/en dash (U+2013-2015), fullwidth dash/hyphen (U+30FC, U+FF0D)
 _SINGLE_CHAR_REPEAT_RE = re.compile(
-    r'([^\s\n\-=_.\*\+~#|><0-9\u2013-\u2015\u2500-\u25ff\u2800-\u28ff\u30fc\uff0d])\1{19,}'
-)
-
+    r'([^\s\n\-=_.\*\+~#|><0-9\u2013-\u2015\u2500-\u25ff\u2800-\u28ff\u30fc\uff0d])\1{19,}')
 
 # ── Unicode script classifier ─────────────────────────────────────────────────
 
+
 def _script_of(cp: int) -> str:
     """Map a codepoint to a coarse script bucket."""
-    if cp <= 0x024F:                       return 'latin'
-    if 0x0370 <= cp <= 0x03FF:             return 'greek'
-    if 0x0400 <= cp <= 0x04FF:             return 'cyrillic'
-    if 0x0590 <= cp <= 0x05FF:             return 'hebrew'
-    if 0x0600 <= cp <= 0x06FF:             return 'arabic'
-    if 0x0900 <= cp <= 0x097F:             return 'devanagari'
-    if 0x0E00 <= cp <= 0x0E7F:             return 'thai'
-    if 0x3040 <= cp <= 0x309F:             return 'hiragana'
-    if 0x30A0 <= cp <= 0x30FF:             return 'katakana'
-    if 0x4E00 <= cp <= 0x9FFF:             return 'cjk'
-    if 0xAC00 <= cp <= 0xD7A3:             return 'hangul'
-    if 0xE000 <= cp <= 0xF8FF:             return 'private'
+    if cp <= 0x024F: return 'latin'
+    if 0x0370 <= cp <= 0x03FF: return 'greek'
+    if 0x0400 <= cp <= 0x04FF: return 'cyrillic'
+    if 0x0590 <= cp <= 0x05FF: return 'hebrew'
+    if 0x0600 <= cp <= 0x06FF: return 'arabic'
+    if 0x0900 <= cp <= 0x097F: return 'devanagari'
+    if 0x0E00 <= cp <= 0x0E7F: return 'thai'
+    if 0x3040 <= cp <= 0x309F: return 'hiragana'
+    if 0x30A0 <= cp <= 0x30FF: return 'katakana'
+    if 0x4E00 <= cp <= 0x9FFF: return 'cjk'
+    if 0xAC00 <= cp <= 0xD7A3: return 'hangul'
+    if 0xE000 <= cp <= 0xF8FF: return 'private'
     return 'other'
 
 
@@ -67,6 +66,7 @@ def _script_chaos(text: str, min_chars: int = 40) -> float:
 
 
 # ── Per-signal detectors ──────────────────────────────────────────────────────
+
 
 def _ratio(pattern: re.Pattern, text: str) -> float:
     return len(pattern.findall(text)) / max(len(text), 1)
@@ -106,6 +106,7 @@ def _is_token_soup(
 
 # ── Preprocessor ─────────────────────────────────────────────────────────────
 
+
 class TokenSoupFilter(Preprocessor):
 
     def __init__(
@@ -132,26 +133,21 @@ class TokenSoupFilter(Preprocessor):
         dropped = []
         for row in rows:
             messages = row.get('messages') or []
-            asst_msgs = [
-                m for m in messages
-                if isinstance(m, dict) and m.get('role') == 'assistant'
-            ]
+            asst_msgs = [m for m in messages if isinstance(m, dict) and m.get('role') == 'assistant']
             if not asst_msgs:
                 out.append(row)
                 continue
             if any(
-                _is_token_soup(
-                    (m.get('content') or '').strip(),
-                    replacement_char_ratio=self._replacement_char_ratio,
-                    control_char_ratio=self._control_char_ratio,
-                    private_use_ratio=self._private_use_ratio,
-                    special_token_count=self._special_token_count,
-                    script_chaos_threshold=self._script_chaos_threshold,
-                    script_chaos_min_chars=self._script_chaos_min_chars,
-                    max_chars=self._max_chars,
-                )
-                for m in asst_msgs
-            ):
+                    _is_token_soup(
+                        (m.get('content') or '').strip(),
+                        replacement_char_ratio=self._replacement_char_ratio,
+                        control_char_ratio=self._control_char_ratio,
+                        private_use_ratio=self._private_use_ratio,
+                        special_token_count=self._special_token_count,
+                        script_chaos_threshold=self._script_chaos_threshold,
+                        script_chaos_min_chars=self._script_chaos_min_chars,
+                        max_chars=self._max_chars,
+                    ) for m in asst_msgs):
                 dropped.append(dict(row, drop_reason='token_soup'))
             else:
                 out.append(row)

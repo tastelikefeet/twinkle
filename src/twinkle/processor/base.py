@@ -166,7 +166,9 @@ class InputProcessor:
         boundaries = torch.cat([starts, end_anchor])
         return (boundaries[1:] - 1).long()
 
-    def _postprocess_embedding(self, inputs: Dict[str, Any], outputs: Dict[str, Any],
+    def _postprocess_embedding(self,
+                               inputs: Dict[str, Any],
+                               outputs: Dict[str, Any],
                                sp_strategy=None) -> tuple[Dict[str, Any], Dict[str, Any]]:
         """Pool per-token features to per-sequence embeddings (last-valid-token).
 
@@ -176,15 +178,15 @@ class InputProcessor:
         tensor across SP × RP. No feature gather; uniform across
         DP / Ulysses / zigzag-ring / padding-free.
         """
-        from copy import copy
         import torch.distributed as dist
+        from copy import copy
 
         features = outputs.get('features')
         assert features is not None
 
-        sp_enabled = (self.framework == 'transformers' and sp_strategy is not None
-                      and getattr(sp_strategy, 'enabled', False)
-                      and getattr(sp_strategy, 'world_size', 1) > 1)
+        sp_enabled = (
+            self.framework == 'transformers' and sp_strategy is not None and getattr(sp_strategy, 'enabled', False)
+            and getattr(sp_strategy, 'world_size', 1) > 1)
 
         ref_pos = sp_strategy.real_position_ids if sp_enabled else inputs['position_ids']
         if ref_pos.dim() == 3:
@@ -192,8 +194,7 @@ class InputProcessor:
         cu_seq_lens_q = inputs.get('cu_seq_lens_q')
 
         is_packed = (
-            features.shape[0] == 1
-            and (cu_seq_lens_q is not None or int((ref_pos.reshape(-1) == 0).sum()) > 1))
+            features.shape[0] == 1 and (cu_seq_lens_q is not None or int((ref_pos.reshape(-1) == 0).sum()) > 1))
 
         device, dtype = features.device, features.dtype
         T_real = ref_pos.shape[-1]
@@ -219,8 +220,9 @@ class InputProcessor:
             mask = sp_strategy.pad(mask, padding_value=0, position_ids=rp, dim=1)
             mask = sp_strategy.split(mask, dim=1, position_ids=rp_padded)
 
-        embeddings = (torch.einsum('th,tn->nh', features.squeeze(0), mask.squeeze(0))
-                      if is_packed else (features * mask).sum(dim=1))
+        embeddings = (
+            torch.einsum('th,tn->nh', features.squeeze(0), mask.squeeze(0)) if is_packed else
+            (features * mask).sum(dim=1))
 
         if sp_enabled and dist.is_available() and dist.is_initialized():
             for grp_attr, size_attr in (('_sp_group', 'sp_world_size'), ('_rp_group', 'rp_world_size')):
@@ -754,5 +756,6 @@ class InputProcessor:
         if self.device_mesh.cp_world_size <= 1:
             return tensor
         from megatron.core import parallel_state as mpu
+
         from twinkle.utils.torch_utils import gather_cp_load_balanced
         return gather_cp_load_balanced(tensor, mpu.get_context_parallel_group(), seq_dim=1)

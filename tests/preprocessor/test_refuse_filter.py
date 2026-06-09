@@ -13,10 +13,7 @@ refusal signal across en/zh/ja/ko.  Key invariants:
 """
 import pytest
 
-from twinkle_agentic.preprocessor.refuse_filter import (
-    RefuseFilter,
-    _is_refusal,
-)
+from twinkle_agentic.preprocessor.refuse_filter import RefuseFilter, _is_refusal
 
 
 def _row(messages):
@@ -29,7 +26,9 @@ def _fil(rows, **kw):
 
 # ── _is_refusal: English ────────────────────────────────────────────────────
 
+
 class TestRefusalEnglish:
+
     def test_core_self_referential(self):
         assert _is_refusal("I can't help with that request.") is True
         assert _is_refusal('I cannot assist with creating malware.') is True
@@ -66,13 +65,15 @@ class TestRefusalEnglish:
         assert _is_refusal('You cannot use this without auth.') is False
 
     def test_case_insensitive(self):
-        assert _is_refusal("I CANNOT HELP with that.") is True
+        assert _is_refusal('I CANNOT HELP with that.') is True
         assert _is_refusal("i can't assist you here") is True
 
 
 # ── _is_refusal: Chinese ────────────────────────────────────────────────────
 
+
 class TestRefusalChinese:
+
     def test_apology_inability(self):
         assert _is_refusal('非常抱歉，我无法回答这个问题。') is True
         assert _is_refusal('对不起，我不能提供这类信息。') is True
@@ -105,7 +106,9 @@ class TestRefusalChinese:
 
 # ── _is_refusal: Japanese ───────────────────────────────────────────────────
 
+
 class TestRefusalJapanese:
+
     def test_apology_inability(self):
         # Pattern is `(申し訳|恐れ入り)ます(が|けれど)` — only 恐れ入りますが
         # is grammatically natural.
@@ -124,7 +127,9 @@ class TestRefusalJapanese:
 
 # ── _is_refusal: Korean ─────────────────────────────────────────────────────
 
+
 class TestRefusalKorean:
+
     def test_apology_inability(self):
         assert _is_refusal('죄송하지만 답변을 드릴 수 없습니다.') is True
         assert _is_refusal('유감스럽게도 도와드릴 수 없습니다.') is True
@@ -136,7 +141,9 @@ class TestRefusalKorean:
 
 # ── check_window ────────────────────────────────────────────────────────────
 
+
 class TestCheckWindow:
+
     def test_window_excludes_late_refusal(self):
         # Refusal at position 700 — beyond default 600-char window
         text = 'a' * 700 + " I can't help you complete that task."
@@ -152,40 +159,78 @@ class TestCheckWindow:
 
 # ── RefuseFilter pipeline ───────────────────────────────────────────────────
 
+
 class TestRefuseFilterPipeline:
+
     def test_drops_refusal_row(self):
-        rows = [_row([
-            {'role': 'user', 'content': 'do bad thing'},
-            {'role': 'assistant', 'content':
-                "I'm sorry, but I cannot help with that request."},
-        ])]
+        rows = [
+            _row([
+                {
+                    'role': 'user',
+                    'content': 'do bad thing'
+                },
+                {
+                    'role': 'assistant',
+                    'content': "I'm sorry, but I cannot help with that request."
+                },
+            ])
+        ]
         assert _fil(rows) == []
 
     def test_keeps_normal_reply(self):
-        rows = [_row([
-            {'role': 'user', 'content': 'explain X'},
-            {'role': 'assistant', 'content': 'X is a concept that...'},
-        ])]
+        rows = [
+            _row([
+                {
+                    'role': 'user',
+                    'content': 'explain X'
+                },
+                {
+                    'role': 'assistant',
+                    'content': 'X is a concept that...'
+                },
+            ])
+        ]
         assert len(_fil(rows)) == 1
 
     def test_only_first_assistant_scanned(self):
         # Refusal in SECOND assistant turn → kept (filter only checks first).
-        rows = [_row([
-            {'role': 'user', 'content': 'q1'},
-            {'role': 'assistant', 'content': 'A clean reply.'},
-            {'role': 'user', 'content': 'q2'},
-            {'role': 'assistant', 'content': "I can't help with that."},
-        ])]
+        rows = [
+            _row([
+                {
+                    'role': 'user',
+                    'content': 'q1'
+                },
+                {
+                    'role': 'assistant',
+                    'content': 'A clean reply.'
+                },
+                {
+                    'role': 'user',
+                    'content': 'q2'
+                },
+                {
+                    'role': 'assistant',
+                    'content': "I can't help with that."
+                },
+            ])
+        ]
         assert len(_fil(rows)) == 1
 
     def test_think_block_stripped(self):
         # Refusal phrasing inside <think>...</think> must NOT trigger.
-        rows = [_row([
-            {'role': 'user', 'content': 'q'},
-            {'role': 'assistant', 'content':
-                "<think>I cannot help with this request</think>"
-                "Sure, here is the answer: 42."},
-        ])]
+        rows = [
+            _row([
+                {
+                    'role': 'user',
+                    'content': 'q'
+                },
+                {
+                    'role': 'assistant',
+                    'content': '<think>I cannot help with this request</think>'
+                    'Sure, here is the answer: 42.'
+                },
+            ])
+        ]
         assert len(_fil(rows)) == 1
 
     def test_no_assistant_kept(self):
@@ -194,8 +239,14 @@ class TestRefuseFilterPipeline:
 
     def test_empty_assistant_kept(self):
         rows = [_row([
-            {'role': 'user', 'content': 'q'},
-            {'role': 'assistant', 'content': ''},
+            {
+                'role': 'user',
+                'content': 'q'
+            },
+            {
+                'role': 'assistant',
+                'content': ''
+            },
         ])]
         assert len(_fil(rows)) == 1
 
@@ -210,18 +261,34 @@ class TestRefuseFilterPipeline:
     def test_mixed_batch(self):
         rows = [
             _row([
-                {'role': 'user', 'content': 'q1'},
-                {'role': 'assistant', 'content': 'a normal answer'},
+                {
+                    'role': 'user',
+                    'content': 'q1'
+                },
+                {
+                    'role': 'assistant',
+                    'content': 'a normal answer'
+                },
             ]),
             _row([
-                {'role': 'user', 'content': 'q2'},
-                {'role': 'assistant', 'content':
-                    'I refuse to help you with that task.'},
+                {
+                    'role': 'user',
+                    'content': 'q2'
+                },
+                {
+                    'role': 'assistant',
+                    'content': 'I refuse to help you with that task.'
+                },
             ]),
             _row([
-                {'role': 'user', 'content': 'q3'},
-                {'role': 'assistant', 'content':
-                    '抱歉，我无法回答这个问题。'},
+                {
+                    'role': 'user',
+                    'content': 'q3'
+                },
+                {
+                    'role': 'assistant',
+                    'content': '抱歉，我无法回答这个问题。'
+                },
             ]),
         ]
         out = _fil(rows)
@@ -231,11 +298,18 @@ class TestRefuseFilterPipeline:
     def test_custom_check_window(self):
         # Default 600 would miss a late refusal; tighten via pipeline kw.
         long_prefix = 'a' * 700
-        rows = [_row([
-            {'role': 'user', 'content': 'q'},
-            {'role': 'assistant', 'content':
-                long_prefix + " I can't help you complete that."},
-        ])]
+        rows = [
+            _row([
+                {
+                    'role': 'user',
+                    'content': 'q'
+                },
+                {
+                    'role': 'assistant',
+                    'content': long_prefix + " I can't help you complete that."
+                },
+            ])
+        ]
         # default window → kept
         assert len(_fil(rows)) == 1
         # widen → dropped

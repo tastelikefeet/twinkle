@@ -1,15 +1,14 @@
 import hashlib
 import json
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from twinkle.preprocessor import Preprocessor
 from twinkle.utils.parallel import PosixFileLock
 
-
-import re
-
-_SYSTEM_INJECTION_RE = re.compile(r'^<(?:system-reminder|system_reminder|context|user_info|attached_files)[ >]', re.IGNORECASE)
+_SYSTEM_INJECTION_RE = re.compile(r'^<(?:system-reminder|system_reminder|context|user_info|attached_files)[ >]',
+                                  re.IGNORECASE)
 
 
 def _is_injected_user(content: str) -> bool:
@@ -66,7 +65,10 @@ class DedupFilter(Preprocessor):
     Uses file-backed state + PosixFileLock for multi-process safety.
     """
 
-    def __init__(self, max_per_sig: int = 1, prefix_chars: int = 100, asst_chars: int = 100,
+    def __init__(self,
+                 max_per_sig: int = 1,
+                 prefix_chars: int = 100,
+                 asst_chars: int = 100,
                  state_file: Optional[str] = None):
         self._max = max_per_sig
         self._prefix = prefix_chars

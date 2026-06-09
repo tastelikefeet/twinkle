@@ -3,7 +3,6 @@ import re
 from typing import Any, Dict, List, Tuple
 
 from twinkle.preprocessor import Preprocessor
-
 from .utils import is_agent_row
 
 # ── Hesitation-marker regexes ─────────────────────────────────────────────────
@@ -22,7 +21,7 @@ _EN_HESITATE = re.compile(
     # Self-correction cascade starters
     r'actually[,\s]+no|actually[,\s]+wait|actually[,\s]+i\s+was|'
     r'no[,\s]+actually[,\s]+(that|this|i)|'
-    # Explicit restart / reconsideration  
+    # Explicit restart / reconsideration
     r'let\s+me\s+(re-?think|try\s+again|start\s+over|reconsider)|'
     r'i\'?ll\s+(start\s+over|try\s+again|redo\s+this)|'
     # Confusion / disorientation
@@ -90,8 +89,8 @@ _CASCADE_RE = re.compile(
     re.IGNORECASE | re.UNICODE,
 )
 
-
 # ── Detection helpers ─────────────────────────────────────────────────────────
+
 
 def _hesitation_density(text: str) -> float:
     """Count hesitation markers per 1000 chars across all language patterns."""
@@ -109,7 +108,10 @@ def _has_correction_cascade_with_threshold(text: str, threshold: int, window: in
     return False
 
 
-def _high_repetition_with_threshold(text: str, threshold: float, ngram_size: int = 8, ngram_min_words: int = 30) -> bool:
+def _high_repetition_with_threshold(text: str,
+                                    threshold: float,
+                                    ngram_size: int = 8,
+                                    ngram_min_words: int = 30) -> bool:
     words = text.split()
     if len(words) < ngram_min_words:
         return False
@@ -139,22 +141,19 @@ def _is_stuck(
         think_stuck = (
             _hesitation_density(think_part) > think_hesitation_density_threshold
             or _has_correction_cascade_with_threshold(think_part, think_cascade_threshold, cascade_window)
-            or _high_repetition_with_threshold(think_part, think_repetition_threshold, ngram_size, ngram_min_words)
-        )
+            or _high_repetition_with_threshold(think_part, think_repetition_threshold, ngram_size, ngram_min_words))
         response_stuck = response_part.strip() and (
             _hesitation_density(response_part) > hesitation_density_threshold
             or _has_correction_cascade_with_threshold(response_part, cascade_threshold, cascade_window)
-            or _high_repetition_with_threshold(response_part, repetition_threshold, ngram_size, ngram_min_words)
-        )
+            or _high_repetition_with_threshold(response_part, repetition_threshold, ngram_size, ngram_min_words))
         return think_stuck or response_stuck
-    return (
-        _hesitation_density(text) > hesitation_density_threshold
-        or _has_correction_cascade_with_threshold(text, cascade_threshold, cascade_window)
-        or _high_repetition_with_threshold(text, repetition_threshold, ngram_size, ngram_min_words)
-    )
+    return (_hesitation_density(text) > hesitation_density_threshold
+            or _has_correction_cascade_with_threshold(text, cascade_threshold, cascade_window)
+            or _high_repetition_with_threshold(text, repetition_threshold, ngram_size, ngram_min_words))
 
 
 # ── Preprocessor ─────────────────────────────────────────────────────────────
+
 
 class DeadLoopFilter(Preprocessor):
 
@@ -189,10 +188,7 @@ class DeadLoopFilter(Preprocessor):
             if is_agent_row(messages):
                 out.append(row)
                 continue
-            asst_msgs = [
-                m for m in messages
-                if isinstance(m, dict) and m.get('role') == 'assistant'
-            ]
+            asst_msgs = [m for m in messages if isinstance(m, dict) and m.get('role') == 'assistant']
             if not asst_msgs:
                 out.append(row)
                 continue
@@ -208,9 +204,7 @@ class DeadLoopFilter(Preprocessor):
                     think_hesitation_density_threshold=self._think_hesitation_density_threshold,
                     think_cascade_threshold=self._think_cascade_threshold,
                     think_repetition_threshold=self._think_repetition_threshold,
-                )
-                for m in asst_msgs
-            )
+                ) for m in asst_msgs)
             if stuck:
                 dropped.append(dict(row, drop_reason='dead_loop'))
             else:

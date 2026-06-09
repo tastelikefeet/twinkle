@@ -6,24 +6,29 @@ script-chaos analyzer and the row-filter pipeline.
 """
 import pytest
 
-from twinkle_agentic.preprocessor.token_soup import (
-    TokenSoupFilter,
-    _is_token_soup,
-    _script_chaos,
-    _script_of,
-)
+from twinkle_agentic.preprocessor.token_soup import TokenSoupFilter, _is_token_soup, _script_chaos, _script_of
 
 
 def _row(content):
-    return {'messages': [
-        {'role': 'user', 'content': 'q'},
-        {'role': 'assistant', 'content': content},
-    ]}
+    return {
+        'messages': [
+            {
+                'role': 'user',
+                'content': 'q'
+            },
+            {
+                'role': 'assistant',
+                'content': content
+            },
+        ]
+    }
 
 
 # ── Per-signal detector tests ────────────────────────────────────────────────
 
+
 class TestReplacementChar:
+
     def test_above_threshold(self):
         text = '\ufffd' * 5 + 'short'  # 5/10 = 50% > 2%
         assert _is_token_soup(text) is True
@@ -38,6 +43,7 @@ class TestReplacementChar:
 
 
 class TestControlChar:
+
     def test_above_threshold(self):
         text = '\x01\x02\x03\x04\x05' + 'a' * 100  # 5/105 ≈ 4.8% > 1%
         assert _is_token_soup(text) is True
@@ -52,6 +58,7 @@ class TestControlChar:
 
 
 class TestPrivateUseArea:
+
     def test_bmp_pua_above_threshold(self):
         text = '\ue000\ue001\ue002\ue003\ue004' + 'a' * 100  # 5/105 ≈ 4.8% > 3%
         assert _is_token_soup(text) is True
@@ -62,6 +69,7 @@ class TestPrivateUseArea:
 
 
 class TestSpecialTokens:
+
     def test_repeated_pipe_token(self):
         text = '<|endoftext|>' * 25
         assert _is_token_soup(text, special_token_count=20) is True
@@ -89,6 +97,7 @@ class TestSpecialTokens:
 
 
 class TestSingleCharRepeat:
+
     def test_letter_repeat_triggers(self):
         text = 'aaaaaaaaaaaaaaaaaaaaaaaaaa hello world'  # 26 a's > 19
         assert _is_token_soup(text) is True
@@ -120,7 +129,9 @@ class TestSingleCharRepeat:
 
 # ── Script-chaos analyzer ────────────────────────────────────────────────────
 
+
 class TestScriptOf:
+
     def test_latin(self):
         assert _script_of(ord('A')) == 'latin'
         assert _script_of(ord('z')) == 'latin'
@@ -146,6 +157,7 @@ class TestScriptOf:
 
 
 class TestScriptChaos:
+
     def test_pure_latin_zero_chaos(self):
         assert _script_chaos('hello world this is a long english sentence') == 0.0
 
@@ -164,8 +176,7 @@ class TestScriptChaos:
 
     def test_filter_with_chaos(self):
         text = ('aあbいcうdえeお' * 5)  # high chaos
-        assert _is_token_soup(text, script_chaos_min_chars=40,
-                              script_chaos_threshold=0.55) is True
+        assert _is_token_soup(text, script_chaos_min_chars=40, script_chaos_threshold=0.55) is True
 
     def test_skips_punct_whitespace(self):
         # Categories not in (L, N) are dropped before script-of pairing.
@@ -175,24 +186,26 @@ class TestScriptChaos:
 
 # ── max_chars head-sampling ──────────────────────────────────────────────────
 
+
 class TestMaxChars:
+
     def test_only_head_examined(self):
         # Soup at the tail; head is clean. With max_chars=100 we should not see it.
         head = 'hello world this is plain text. ' * 4  # ~128 chars, no repeat-20
         text = head[:100] + '\ufffd' * 100
-        assert _is_token_soup(text, max_chars=100,
-                              replacement_char_ratio=0.02) is False
+        assert _is_token_soup(text, max_chars=100, replacement_char_ratio=0.02) is False
 
     def test_full_text_when_max_chars_zero(self):
         head = 'hello world this is plain text. ' * 4
         text = head[:100] + '\ufffd' * 100
-        assert _is_token_soup(text, max_chars=0,
-                              replacement_char_ratio=0.02) is True
+        assert _is_token_soup(text, max_chars=0, replacement_char_ratio=0.02) is True
 
 
 # ── Empty / trivial inputs ───────────────────────────────────────────────────
 
+
 class TestTrivial:
+
     def test_empty_text(self):
         assert _is_token_soup('') is False
 
@@ -202,7 +215,9 @@ class TestTrivial:
 
 # ── Pipeline ─────────────────────────────────────────────────────────────────
 
+
 class TestTokenSoupFilterPipeline:
+
     def test_drops_soupy_assistant(self):
         f = TokenSoupFilter()
         rows = [_row('clean response'), _row('aaaaaaaaaaaaaaaaaaaaaaaaaaaaa')]
@@ -218,12 +233,26 @@ class TestTokenSoupFilterPipeline:
 
     def test_any_assistant_soupy_drops_row(self):
         f = TokenSoupFilter()
-        rows = [{'messages': [
-            {'role': 'user', 'content': 'q'},
-            {'role': 'assistant', 'content': 'fine'},
-            {'role': 'user', 'content': 'q2'},
-            {'role': 'assistant', 'content': '\ufffd' * 10 + 'a' * 5},
-        ]}]
+        rows = [{
+            'messages': [
+                {
+                    'role': 'user',
+                    'content': 'q'
+                },
+                {
+                    'role': 'assistant',
+                    'content': 'fine'
+                },
+                {
+                    'role': 'user',
+                    'content': 'q2'
+                },
+                {
+                    'role': 'assistant',
+                    'content': '\ufffd' * 10 + 'a' * 5
+                },
+            ]
+        }]
         out = f(rows)
         assert out == []
 

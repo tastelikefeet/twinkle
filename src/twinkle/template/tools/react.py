@@ -23,7 +23,9 @@ class ReActParser(ToolCallParser):
                 'type': 'function',
                 'function': {
                     'name': m.group('name'),
-                    'arguments': {'input': m.group('args')},
+                    'arguments': {
+                        'input': m.group('args')
+                    },
                 },
             })
         return calls

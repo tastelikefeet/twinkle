@@ -11,24 +11,13 @@ Focus areas:
 """
 import pytest
 
-from twinkle_agentic.preprocessor.intent_classifier import (
-    INTENT_CODE,
-    INTENT_MATH,
-    INTENT_OTHER,
-    INTENT_TOOL_CALL,
-    INTENT_USER_DISSATISFACTION,
-    CodeDetector,
-    IntentClassifier,
-    IntentDetector,
-    MathDetector,
-    ToolCallDetector,
-    UserDissatisfactionDetector,
-    _msg_text,
-    _pair_assistant,
-)
-
+from twinkle_agentic.preprocessor.intent_classifier import (INTENT_CODE, INTENT_MATH, INTENT_OTHER, INTENT_TOOL_CALL,
+                                                            INTENT_USER_DISSATISFACTION, CodeDetector, IntentClassifier,
+                                                            IntentDetector, MathDetector, ToolCallDetector,
+                                                            UserDissatisfactionDetector, _msg_text, _pair_assistant)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _u(text):
     return {'role': 'user', 'content': text}
@@ -52,16 +41,29 @@ def _classify_one(*messages, detectors=None):
 
 # ── Helper functions ──────────────────────────────────────────────────────────
 
+
 class TestHelpers:
+
     def test_msg_text_string(self):
         assert _msg_text({'content': 'hi'}) == 'hi'
 
     def test_msg_text_list_with_text_parts(self):
-        msg = {'content': [
-            {'type': 'text', 'text': 'foo'},
-            {'type': 'image', 'url': 'x'},
-            {'type': 'text', 'text': 'bar'},
-        ]}
+        msg = {
+            'content': [
+                {
+                    'type': 'text',
+                    'text': 'foo'
+                },
+                {
+                    'type': 'image',
+                    'url': 'x'
+                },
+                {
+                    'type': 'text',
+                    'text': 'bar'
+                },
+            ]
+        }
         assert _msg_text(msg) == 'foo bar'
 
     def test_msg_text_missing_content(self):
@@ -93,7 +95,9 @@ class TestHelpers:
 
 # ── ToolCallDetector ─────────────────────────────────────────────────────────
 
+
 class TestToolCallDetector:
+
     def test_definitive_flag(self):
         assert ToolCallDetector.definitive is True
 
@@ -113,7 +117,9 @@ class TestToolCallDetector:
         # When ToolCall fires it must suppress later detectors on the same round.
         msgs = [
             _u('解一元二次方程 x^2 - 5x + 6 = 0 的因式分解'),
-            _a('answer', tool_calls=[{'name': 'calc'}]),
+            _a('answer', tool_calls=[{
+                'name': 'calc'
+            }]),
         ]
         out = _classify_one(*msgs)
         assert out['intent'] == INTENT_TOOL_CALL
@@ -123,7 +129,9 @@ class TestToolCallDetector:
 
 # ── CodeDetector ──────────────────────────────────────────────────────────────
 
+
 class TestCodeDetector:
+
     def test_fenced_code_block(self):
         text = '```python\ndef f():\n    return 1\n```'
         assert CodeDetector()._match(text)
@@ -145,9 +153,7 @@ class TestCodeDetector:
 
     def test_call_signature_with_brace(self):
         # `name(args) {` is a strong code indicator.
-        assert CodeDetector()._match(
-            'function fetchData(url) { return fetch(url); } and async await yield'
-        )
+        assert CodeDetector()._match('function fetchData(url) { return fetch(url); } and async await yield')
 
     def test_chitchat_with_word_class_no_fp(self):
         assert not CodeDetector()._match('I took a yoga class today')
@@ -155,7 +161,9 @@ class TestCodeDetector:
 
 # ── MathDetector ──────────────────────────────────────────────────────────────
 
+
 class TestMathDetector:
+
     @pytest.mark.parametrize('text', [
         '设 $f(x)=x^2$ 求导得 2x',
         '矩阵 A 的行列式 det(A) 不等于 0',
@@ -170,15 +178,17 @@ class TestMathDetector:
     def test_math_recall(self, text):
         assert MathDetector()._match(text), f'should detect: {text!r}'
 
-    @pytest.mark.parametrize('text', [
-        '今天天气真好',
-        '我最近在追一部电视剧',
-        '帮我写一首诗',
-        '请帮我翻译这句英文',
-        # Single math keyword in non-math context — must not trip ≥2 threshold.
-        '积分兑换可以兑换礼品',
-        '矩阵这个电影很好看',
-    ])
+    @pytest.mark.parametrize(
+        'text',
+        [
+            '今天天气真好',
+            '我最近在追一部电视剧',
+            '帮我写一首诗',
+            '请帮我翻译这句英文',
+            # Single math keyword in non-math context — must not trip ≥2 threshold.
+            '积分兑换可以兑换礼品',
+            '矩阵这个电影很好看',
+        ])
     def test_math_fp_guard(self, text):
         assert not MathDetector()._match(text), f'must NOT detect: {text!r}'
 
@@ -190,6 +200,7 @@ class TestMathDetector:
         # Subclass with looser threshold catches single-hit case.
         class LooseMath(MathDetector):
             threshold = 1
+
         assert LooseMath()._match('计算 30 ÷ 6 = 5')
 
     def test_subscript_pattern(self):
@@ -198,7 +209,9 @@ class TestMathDetector:
 
 # ── UserDissatisfactionDetector ───────────────────────────────────────────────
 
+
 class TestUserDissatisfactionDetector:
+
     @pytest.mark.parametrize('text', [
         '不对，再来一次',
         '完全错了',
@@ -259,7 +272,10 @@ class TestUserDissatisfactionDetector:
 
     def test_system_first_then_user_complaint_ignored(self):
         msgs = [
-            {'role': 'system', 'content': 'You are helpful.'},
+            {
+                'role': 'system',
+                'content': 'You are helpful.'
+            },
             _u('上次回答简直一塌糊涂'),
             _a('sorry'),
         ]
@@ -284,7 +300,9 @@ class TestUserDissatisfactionDetector:
 
 # ── End-to-end IntentClassifier ───────────────────────────────────────────────
 
+
 class TestIntentClassifierE2E:
+
     def test_chitchat_other(self):
         out = _classify_one(_u('今天天气真好'), _a('是的，挺适合出门的'))
         assert out['intent'] == INTENT_OTHER
@@ -336,7 +354,9 @@ class TestIntentClassifierE2E:
     def test_tool_call_definitive_short_circuits(self):
         out = _classify_one(
             _u('解一元二次方程 x^2 - 5x + 6 = 0'),
-            _a('', tool_calls=[{'name': 'calc'}]),
+            _a('', tool_calls=[{
+                'name': 'calc'
+            }]),
         )
         assert out['intent'] == INTENT_TOOL_CALL
         # MathDetector must not have run after the definitive ToolCallDetector.
@@ -345,8 +365,17 @@ class TestIntentClassifierE2E:
     def test_multimodal_list_content(self):
         # List-content messages must work transparently.
         msgs = [
-            _u([{'type': 'text', 'text': '求一元二次方程'}, {'type': 'image', 'url': 'x'}]),
-            _a([{'type': 'text', 'text': '因式分解后得到结果'}]),
+            _u([{
+                'type': 'text',
+                'text': '求一元二次方程'
+            }, {
+                'type': 'image',
+                'url': 'x'
+            }]),
+            _a([{
+                'type': 'text',
+                'text': '因式分解后得到结果'
+            }]),
         ]
         out = _classify_one(*msgs)
         assert out['intent'] == INTENT_MATH
@@ -354,7 +383,9 @@ class TestIntentClassifierE2E:
 
 # ── Edge / robustness ─────────────────────────────────────────────────────────
 
+
 class TestEdgeCases:
+
     def test_empty_rows(self):
         assert IntentClassifier().classify_intent([]) == []
 
@@ -372,19 +403,24 @@ class TestEdgeCases:
 
     def test_messages_with_non_dict_entries(self):
         # Non-dict entries must be silently skipped.
-        out = IntentClassifier().classify_intent([{'messages': [
-            'not a dict',
-            None,
-            _u('求一元二次方程'),
-            _a('因式分解'),
-        ]}])
+        out = IntentClassifier().classify_intent([{
+            'messages': [
+                'not a dict',
+                None,
+                _u('求一元二次方程'),
+                _a('因式分解'),
+            ]
+        }])
         assert out[0]['intent'] == INTENT_MATH
 
     def test_user_data_preexists_preserved(self):
         # IntentClassifier merges into existing user_data, must not clobber.
         rows = [{
             'messages': [_u('解一元二次方程 x^2'), _a('因式分解 (x-2)(x-3)')],
-            'user_data': {'source': 'gsm8k', 'difficulty': 'easy'},
+            'user_data': {
+                'source': 'gsm8k',
+                'difficulty': 'easy'
+            },
         }]
         out = IntentClassifier().classify_intent(rows)
         ud = out[0]['user_data']
@@ -408,15 +444,17 @@ class TestEdgeCases:
 
 # ── Pluggability ──────────────────────────────────────────────────────────────
 
+
 class TestPluggability:
+
     def test_custom_detector_via_constructor(self):
+
         class GreetingDetector(IntentDetector):
             intent = 'greeting'
 
             def __call__(self, messages):
                 return [
-                    i for i, m in enumerate(messages)
-                    if isinstance(m, dict) and m.get('role') == 'assistant'
+                    i for i, m in enumerate(messages) if isinstance(m, dict) and m.get('role') == 'assistant'
                     and isinstance(m.get('content'), str) and 'hello' in m['content'].lower()
                 ]
 
@@ -442,12 +480,14 @@ class TestPluggability:
         class StopAll(IntentDetector):
             intent = 'stop'
             definitive = True
+
             def __call__(self, messages):
                 seen.append('stop')
                 return [len(messages) - 1]
 
         class NeverRuns(IntentDetector):
             intent = 'never'
+
             def __call__(self, messages):
                 seen.append('never')
                 return [0]

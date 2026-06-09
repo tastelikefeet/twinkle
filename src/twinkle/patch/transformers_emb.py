@@ -17,7 +17,9 @@ Both mutations are reverted by ``unpatch``.
 """
 from types import MethodType
 from typing import TYPE_CHECKING, Optional
+
 from twinkle.patch import Patch
+
 if TYPE_CHECKING:
     import torch
 
@@ -26,7 +28,7 @@ _LM_HEADS = ['lm_head', 'output', 'embed_out', 'output_layer']
 
 def get_lm_head_model(module, lm_heads=None):
     from peft import PeftModel
-    import torch
+    from torch.nn import Module
     if isinstance(module, PeftModel):
         module = module.model
     if lm_heads is None:
@@ -34,7 +36,7 @@ def get_lm_head_model(module, lm_heads=None):
     for sub in module.modules():
         for name in lm_heads:
             child = getattr(sub, name, None)
-            if isinstance(child, torch.nn.Module):
+            if isinstance(child, Module):
                 return sub
     return module
 
@@ -53,10 +55,10 @@ class TransformersEmbeddingPatch(Patch):
     """Convert a causal LM into a sentence-embedding feature extractor. Reversible via ``unpatch``."""
 
     def __call__(self, module, *args, **kwargs):
-        import torch
+        from torch.nn import Module
         lm_head_model = get_lm_head_model(module, lm_heads=_LM_HEADS)
 
-        head: Optional[torch.nn.Module] = None
+        head: Optional[Module] = None
         for name in _LM_HEADS:
             if hasattr(lm_head_model, name):
                 head = getattr(lm_head_model, name)

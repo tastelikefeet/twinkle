@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Tuple
 
 from twinkle.preprocessor import Preprocessor
 
-
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
 _OP_CACHE: Dict = {}
@@ -59,6 +58,7 @@ def _has_tool_calls(row: Dict[str, Any], role: str = 'assistant') -> bool:
 
 
 class FixUnicodeFilter(Preprocessor):
+
     def __init__(self, normalization: str = 'NFC', role: str = 'assistant'):
         self._normalization = normalization
         self._role = role
@@ -82,6 +82,7 @@ class FixUnicodeFilter(Preprocessor):
 
 
 class RemoveRepeatSentencesFilter(Preprocessor):
+
     def __init__(self, lowercase: bool = False, ignore_special_character: bool = True, role: str = 'assistant'):
         self._lowercase = lowercase
         self._ignore = ignore_special_character
@@ -106,6 +107,7 @@ class RemoveRepeatSentencesFilter(Preprocessor):
 
 
 class SpecialCharsFilter(Preprocessor):
+
     def __init__(self, max_ratio: float = 0.25, role: str = 'assistant'):
         self._max_ratio = max_ratio
         self._role = role
@@ -128,7 +130,12 @@ class SpecialCharsFilter(Preprocessor):
 
 
 class TokenNumFilter(Preprocessor):
-    def __init__(self, hf_tokenizer: str = 'Qwen/Qwen2.5-0.5B', min_num: int = 10, max_num: int = 8192, role: str = 'assistant'):
+
+    def __init__(self,
+                 hf_tokenizer: str = 'Qwen/Qwen2.5-0.5B',
+                 min_num: int = 10,
+                 max_num: int = 8192,
+                 role: str = 'assistant'):
         self._hf_tokenizer = hf_tokenizer
         self._min_num = min_num
         self._max_num = max_num

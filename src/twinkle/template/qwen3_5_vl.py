@@ -43,8 +43,7 @@ class Qwen3_5Template(Template):
         # Fix upstream Qwen3 chat_template parse bugs (orphan </think> handling).
         # Deferred import to avoid cycles; idempotent across Ray actor re-init.
         from twinkle.patch import apply_patch
-        from twinkle.patch.qwen3_chat_template import (
-            Qwen3AllowToolTailTemplate, Qwen3ChatTemplate)
+        from twinkle.patch.qwen3_chat_template import Qwen3AllowToolTailTemplate, Qwen3ChatTemplate
         apply_patch(self.tokenizer, Qwen3ChatTemplate)
         # Allow ScoreFilter to render multi-turn agent prefixes ending in `tool`.
         apply_patch(self.tokenizer, Qwen3AllowToolTailTemplate)

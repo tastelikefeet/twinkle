@@ -53,8 +53,7 @@ def _get_twinkle_sampler_adapter_name(request: Request, adapter_name: str | None
     return request.state.request_id + '-' + adapter_name
 
 
-def _openai_body_to_trajectory_and_params(
-        body: Dict[str, Any]) -> Tuple[Trajectory, SamplingParams]:
+def _openai_body_to_trajectory_and_params(body: dict[str, Any]) -> tuple[Trajectory, SamplingParams]:
     """Map an OpenAI ``/v1/chat/completions`` body to (Trajectory, SamplingParams).
 
     Trajectory.messages / .tools are already OpenAI-shaped TypedDicts, so they
@@ -67,7 +66,7 @@ def _openai_body_to_trajectory_and_params(
     if body.get('tools'):
         trajectory['tools'] = list(body['tools'])
 
-    sp_kwargs: Dict[str, Any] = {}
+    sp_kwargs: dict[str, Any] = {}
     if body.get('temperature') is not None:
         sp_kwargs['temperature'] = float(body['temperature'])
     if body.get('top_p') is not None:
@@ -94,10 +93,10 @@ def _openai_body_to_trajectory_and_params(
     return trajectory, SamplingParams(**sp_kwargs)
 
 
-def _format_openai_choice(seq: Any, idx: int, template: Any) -> Dict[str, Any]:
+def _format_openai_choice(seq: Any, idx: int, template: Any) -> dict[str, Any]:
     """Build one ``choices[]`` entry from a SampledSequence."""
     decoded = seq.decoded or ''
-    tool_calls: List[Dict[str, Any]] = []
+    tool_calls: list[dict[str, Any]] = []
     if template is not None:
         try:
             parsed = template.parse_tool_call(decoded)
@@ -120,26 +119,21 @@ def _format_openai_choice(seq: Any, idx: int, template: Any) -> Dict[str, Any]:
             except Exception:
                 pass
 
-    finish_reason = 'length' if seq.stop_reason == 'length' else (
-        'tool_calls' if tool_calls else 'stop')
-    message: Dict[str, Any] = {'role': 'assistant', 'content': decoded}
+    finish_reason = 'length' if seq.stop_reason == 'length' else ('tool_calls' if tool_calls else 'stop')
+    message: dict[str, Any] = {'role': 'assistant', 'content': decoded}
     if tool_calls:
         message['tool_calls'] = tool_calls
-    choice: Dict[str, Any] = {'index': idx, 'message': message, 'finish_reason': finish_reason}
+    choice: dict[str, Any] = {'index': idx, 'message': message, 'finish_reason': finish_reason}
     if seq.logprobs:
         choice['logprobs'] = {'token_logprobs': [lp[0][1] if lp else None for lp in seq.logprobs]}
     return choice
 
 
-def _build_openai_completion(
-        response: Any, model_id: str, template: Any) -> Dict[str, Any]:
+def _build_openai_completion(response: Any, model_id: str, template: Any) -> dict[str, Any]:
     """Wrap a SampleResponse as an OpenAI ChatCompletion object."""
-    choices = [
-        _format_openai_choice(seq, i, template)
-        for i, seq in enumerate(response.sequences)
-    ]
+    choices = [_format_openai_choice(seq, i, template) for i, seq in enumerate(response.sequences)]
     completion_tokens = sum(len(seq.tokens) for seq in response.sequences)
-    result: Dict[str, Any] = {
+    result: dict[str, Any] = {
         'id': f'chatcmpl-{uuid.uuid4().hex}',
         'object': 'chat.completion',
         'created': int(time.time()),
@@ -156,19 +150,21 @@ def _build_openai_completion(
     return result
 
 
-def _build_openai_chunk(
-        delta_event: Dict[str, Any], completion_id: str, created: int,
-        model_id: str) -> Dict[str, Any]:
+def _build_openai_chunk(delta_event: dict[str, Any], completion_id: str, created: int, model_id: str) -> dict[str, Any]:
     """Wrap a sampler delta dict as an OpenAI ``chat.completion.chunk`` object.
 
     ``delta_event`` is one item yielded by ``Sampler.astream_one``, with keys
     ``index``, ``delta``, ``finish_reason``.
     """
     return {
-        'id': completion_id,
-        'object': 'chat.completion.chunk',
-        'created': created,
-        'model': model_id,
+        'id':
+        completion_id,
+        'object':
+        'chat.completion.chunk',
+        'created':
+        created,
+        'model':
+        model_id,
         'choices': [{
             'index': delta_event.get('index', 0),
             'delta': delta_event.get('delta') or {},
@@ -288,7 +284,7 @@ def _register_twinkle_sampler_routes(app: FastAPI, self_fn: Callable[[], Sampler
     @app.post('/v1/chat/completions')
     async def chat_completions(
             request: Request,
-            body: Dict[str, Any],
+            body: dict[str, Any],
             self: SamplerManagement = Depends(self_fn),
     ):
         """OpenAI-compatible chat completions endpoint.
@@ -310,7 +306,7 @@ def _register_twinkle_sampler_routes(app: FastAPI, self_fn: Callable[[], Sampler
         token = await self._on_request_start(request)
 
         # Resolve adapter (shared by stream / non-stream paths)
-        async def _resolve_adapter() -> Tuple[str, Any]:
+        async def _resolve_adapter() -> tuple[str, Any]:
             adapter_path = None
             adapter_name = body.get('adapter_name') or ''
             full_adapter_name = _get_twinkle_sampler_adapter_name(request, adapter_name) or ''
@@ -353,7 +349,10 @@ def _register_twinkle_sampler_routes(app: FastAPI, self_fn: Callable[[], Sampler
                         'object': 'chat.completion.chunk',
                         'created': created,
                         'model': model_id,
-                        'error': {'message': err_tb, 'type': 'internal_error'},
+                        'error': {
+                            'message': err_tb,
+                            'type': 'internal_error'
+                        },
                     }
                     yield f'data: {json.dumps(err_chunk, ensure_ascii=False)}\n\n'
                     yield 'data: [DONE]\n\n'
@@ -387,8 +386,7 @@ def _register_twinkle_sampler_routes(app: FastAPI, self_fn: Callable[[], Sampler
         # Rough char-based estimate for queue scheduling; trajectory tokens are unknown pre-encode
         rough_tokens = sum(
             len(m.get('content') or '') if isinstance(m.get('content'), str) else 0
-            for m in (body.get('messages') or [])
-        ) // 4
+            for m in (body.get('messages') or [])) // 4
         return await run_task(
             self.schedule_task_and_wait(
                 _task,

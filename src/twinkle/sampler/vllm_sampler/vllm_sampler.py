@@ -434,14 +434,11 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
                         mm_processor_kwargs=feat.get('mm_processor_kwargs'),
                         disable_lora=use_base_model,
                 ):
-                    asyncio.run_coroutine_threadsafe(
-                        out_queue.put(('chunk', output)), ray_loop).result()
+                    asyncio.run_coroutine_threadsafe(out_queue.put(('chunk', output)), ray_loop).result()
             except BaseException as _e:  # noqa: BLE001
-                asyncio.run_coroutine_threadsafe(
-                    out_queue.put((_ERR_KIND, _e)), ray_loop).result()
+                asyncio.run_coroutine_threadsafe(out_queue.put((_ERR_KIND, _e)), ray_loop).result()
             finally:
-                asyncio.run_coroutine_threadsafe(
-                    out_queue.put((_SENTINEL, None)), ray_loop).result()
+                asyncio.run_coroutine_threadsafe(out_queue.put((_SENTINEL, None)), ray_loop).result()
 
         asyncio.run_coroutine_threadsafe(_producer(), self._async_loop)
 
@@ -474,8 +471,7 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
 
                 is_finished = bool(seq_output.finish_reason) and not finished.get(idx)
                 if delta_text or is_finished:
-                    for ev in template.parse_tool_call_stream(
-                            state['tc_state'], delta_text, finished=is_finished):
+                    for ev in template.parse_tool_call_stream(state['tc_state'], delta_text, finished=is_finished):
                         if 'tool_calls' in ev:
                             had_tool_call[idx] = True
                         yield {'index': idx, 'delta': ev, 'finish_reason': None}

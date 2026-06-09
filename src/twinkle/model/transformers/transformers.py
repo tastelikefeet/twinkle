@@ -445,8 +445,7 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
         outputs['past_key_values'] = None
         if not (return_logits or loss_require_logits):
             outputs['logits'] = None
-        inputs, outputs = processor.postprocess_tensor_sp(
-            inputs, outputs, sp_strategy=self.sp_strategy, task=task)
+        inputs, outputs = processor.postprocess_tensor_sp(inputs, outputs, sp_strategy=self.sp_strategy, task=task)
         inputs, outputs = processor.unpack_packed_sequences(inputs, outputs, task=task)
         optimizer_config.train_status.inputs = inputs
         optimizer_config.train_status.outputs = outputs
@@ -504,9 +503,9 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
             labels = inputs.pop('labels', None)
             optimizer_config.accumulate_metrics(False)
             unwrapped_model = self.strategy.unwrap_model(self.model)
-            lora_ctx = (unwrapped_model.disable_adapter()
-                        if disable_lora and isinstance(unwrapped_model, PeftModel)
-                        else contextlib.nullcontext())
+            lora_ctx = (
+                unwrapped_model.disable_adapter()
+                if disable_lora and isinstance(unwrapped_model, PeftModel) else contextlib.nullcontext())
             with _resolve_task_context(self.model, task), lora_ctx:
                 outputs = self.model(**inputs)
             inputs['labels'] = labels
@@ -525,8 +524,7 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
             outputs['past_key_values'] = None
             if not (return_logits or loss_require_logits):
                 outputs['logits'] = None
-            inputs, outputs = processor.postprocess_tensor_sp(
-                inputs, outputs, sp_strategy=self.sp_strategy, task=task)
+            inputs, outputs = processor.postprocess_tensor_sp(inputs, outputs, sp_strategy=self.sp_strategy, task=task)
             inputs, outputs = processor.unpack_packed_sequences(inputs, outputs, task=task)
             optimizer_config.eval_status.inputs = inputs
             optimizer_config.eval_status.outputs = outputs

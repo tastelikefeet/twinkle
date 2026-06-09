@@ -193,7 +193,9 @@ class TokenizeByRound:
     """
 
     @staticmethod
-    def tokenize_with_assistant_labels(tokenizer: 'PreTrainedTokenizer', encode_func: Callable, trajectory: Trajectory,
+    def tokenize_with_assistant_labels(tokenizer: 'PreTrainedTokenizer',
+                                       encode_func: Callable,
+                                       trajectory: Trajectory,
                                        train_indices: Optional[set] = None,
                                        **kwargs) -> Tuple[List[int], List[int], Dict[str, Any]]:
         """Tokenize trajectory and generate labels for assistant turns.

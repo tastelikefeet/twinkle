@@ -1,14 +1,15 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 import json as _json
 import os.path
+import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datasets import DatasetDict, IterableDataset, concatenate_datasets, interleave_datasets, load_dataset
-from torch.utils.data import Dataset as TorchDataset, IterableDataset as TorchIterableDataset
-from typing import Any, Callable, Dict, List, Optional, Type, Union
-import threading
 from queue import Queue
-from twinkle.utils.parallel import PosixFileLock
+from torch.utils.data import Dataset as TorchDataset
+from torch.utils.data import IterableDataset as TorchIterableDataset
+from typing import Any, Callable, Dict, List, Optional, Type, Union
+
 import twinkle
 from twinkle import preprocessor
 from twinkle.hub import HubOperation
@@ -16,6 +17,7 @@ from twinkle.infra import remote_class, remote_function
 from twinkle.preprocessor import DataFilter, Preprocessor
 from twinkle.template import Template
 from twinkle.utils import construct_class, processing_lock
+from twinkle.utils.parallel import PosixFileLock
 
 try:
     import multiprocess
@@ -165,9 +167,8 @@ class Dataset(TorchDataset):
             if callable(d):
                 cls = HFIterableDataset if kwargs.get('streaming') else HFDataset
                 return cls.from_generator(d)
-            raise ValueError(
-                f'DatasetMeta.data must be list, dict, callable, or HF Dataset/IterableDataset, '
-                f'got {type(d).__name__}')
+            raise ValueError(f'DatasetMeta.data must be list, dict, callable, or HF Dataset/IterableDataset, '
+                             f'got {type(d).__name__}')
 
         dataset_id = dataset_meta.dataset_id
         subset_name = dataset_meta.subset_name
@@ -198,7 +199,7 @@ class Dataset(TorchDataset):
                 dataset = load_dataset(file_type, **load_kwargs, **kwargs)
             else:
                 dataset = HubOperation.load_dataset(dataset_id, subset_name, split, **kwargs)
-        
+
         # fix: Some dataset sources return DatasetDict instead of Dataset, which breaks downstream select/map calls.
         # fix: Normalize split resolution here (target split first, then train) and fail early with a clear error.
         if isinstance(dataset, DatasetDict):
@@ -259,8 +260,7 @@ class Dataset(TorchDataset):
         kwargs['batched'] = True
 
         if self._mixed:
-            self.dataset = self.dataset.map(
-                preprocess_func, **self._normalize_cache_kwargs(self.dataset, kwargs))
+            self.dataset = self.dataset.map(preprocess_func, **self._normalize_cache_kwargs(self.dataset, kwargs))
         else:
             if dataset_meta is None:
                 assert len(self.datasets) == 1
@@ -336,7 +336,7 @@ class Dataset(TorchDataset):
                 dataset_types) or not any(dataset_types), 'All datasets must be all streaming=True or streaming=False'
             # Align features: cast large_string → string to avoid concatenation type mismatch
             if not any(dataset_types):
-                from datasets import Features, Value, Sequence
+                from datasets import Features, Sequence, Value
                 dsets = list(self.datasets.values())
                 ref_features = dsets[0].features
                 aligned = []
@@ -353,8 +353,12 @@ class Dataset(TorchDataset):
             self._mixed = True
 
     @remote_function()
-    def save_as(self, output_path: str, format: Optional[str] = None,
-                batch_size: int = 1000, mode: str = 'immediate', **kwargs) -> None:
+    def save_as(self,
+                output_path: str,
+                format: Optional[str] = None,
+                batch_size: int = 1000,
+                mode: str = 'immediate',
+                **kwargs) -> None:
         """Save the merged dataset to a local file.
 
         Args:
@@ -404,8 +408,13 @@ class Dataset(TorchDataset):
     @staticmethod
     def _infer_format(path: str) -> str:
         ext = os.path.splitext(path)[1].lstrip('.').lower()
-        return {'jsonl': 'jsonl', 'json': 'jsonl', 'csv': 'csv',
-                'parquet': 'parquet', 'pq': 'parquet'}.get(ext, 'jsonl')
+        return {
+            'jsonl': 'jsonl',
+            'json': 'jsonl',
+            'csv': 'csv',
+            'parquet': 'parquet',
+            'pq': 'parquet'
+        }.get(ext, 'jsonl')
 
     def _should_materialize(self) -> bool:
         if isinstance(self.dataset, IterableDataset):
@@ -578,8 +587,7 @@ class _SaveState:
                 if buffer:
                     self._acquire_lock()
                     try:
-                        pd.DataFrame(buffer).to_csv(
-                            self._path, mode='a', header=not header_written, index=False)
+                        pd.DataFrame(buffer).to_csv(self._path, mode='a', header=not header_written, index=False)
                     finally:
                         self._release_lock()
                 return
@@ -587,8 +595,7 @@ class _SaveState:
             if len(buffer) >= self._batch_size:
                 self._acquire_lock()
                 try:
-                    pd.DataFrame(buffer).to_csv(
-                        self._path, mode='a', header=not header_written, index=False)
+                    pd.DataFrame(buffer).to_csv(self._path, mode='a', header=not header_written, index=False)
                     header_written = True
                 finally:
                     self._release_lock()

@@ -50,16 +50,13 @@ _NEW = ("            {%- if content.startswith('<think>') and '</think>' in cont
         "                {%- set content = _parts[1].lstrip('\\n') %}\n"
         '            {%- endif %}')
 
+_OLD_TAIL = ('{%- if ns.multi_step_tool %}\n'
+             "    {{- raise_exception('No user query found in messages.') }}\n"
+             '{%- endif %}')
 
-_OLD_TAIL = (
-    '{%- if ns.multi_step_tool %}\n'
-    "    {{- raise_exception('No user query found in messages.') }}\n"
-    '{%- endif %}')
-
-_NEW_TAIL = (
-    '{%- if ns.multi_step_tool %}\n'
-    '    {#- patched: tool-tail prefix allowed (Qwen3AllowToolTailTemplate) -#}\n'
-    '{%- endif %}')
+_NEW_TAIL = ('{%- if ns.multi_step_tool %}\n'
+             '    {#- patched: tool-tail prefix allowed (Qwen3AllowToolTailTemplate) -#}\n'
+             '{%- endif %}')
 
 
 class Qwen3ChatTemplate(Patch):

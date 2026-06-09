@@ -59,7 +59,7 @@ def train():
     # npu patch
     if Torch.is_npu_available():
         model = kernelize_model(model, mode='train', device='npu')
-    
+
     lora_config = LoraConfig(**args.get_lora_args())
     model.add_adapter_to_model(
         args.lora.adapter_name, lora_config,

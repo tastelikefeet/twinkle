@@ -80,7 +80,7 @@ def _augment_exc_with_caller(exc: BaseException, caller: Optional[str]) -> None:
         if exc.args:
             exc.args = (prefix + str(exc.args[0]), *exc.args[1:])
         else:
-            exc.args = (prefix.rstrip(),)
+            exc.args = (prefix.rstrip(), )
         setattr(exc, '_twinkle_caller_augmented', True)
     except Exception:  # noqa: BLE001
         pass
@@ -444,7 +444,8 @@ def _dispatch_args(workers, dispatch, execute, device_mesh: Optional[DeviceMesh]
             if isinstance(arg, list) or isinstance(arg, torch.Tensor):
                 _args = []
                 for i in range(n):
-                    _args.append(arg[device_mesh.get_slice(len(arg), device_mesh.get_data_rank_from_global_rank(i * _rank_stride))])
+                    _args.append(arg[device_mesh.get_slice(
+                        len(arg), device_mesh.get_data_rank_from_global_rank(i * _rank_stride))])
                 return _args
             elif isinstance(arg, dict):
                 _args = [{} for _ in range(n)]

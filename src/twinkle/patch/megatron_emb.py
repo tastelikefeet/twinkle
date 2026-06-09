@@ -17,11 +17,10 @@ Intermediate PP stages (``post_process=False``) are left untouched.
 
 Both mutations are reverted by ``unpatch``.
 """
-from types import MethodType
-from typing import List, Optional
-
 import torch
 import torch.nn.functional as F
+from types import MethodType
+from typing import List, Optional
 
 from twinkle.patch import Patch
 from twinkle.utils.torch_utils import gather_cp_load_balanced
@@ -79,7 +78,7 @@ def _output_embedding_hook(module, args, kwargs, output):
     elif attention_mask is not None and attention_mask.dim() == 2:
         last_idx = _last_valid_from_attention_mask(attention_mask)
     else:
-        last_idx = torch.full((output.shape[0],), output.shape[1] - 1, device=output.device, dtype=torch.long)
+        last_idx = torch.full((output.shape[0], ), output.shape[1] - 1, device=output.device, dtype=torch.long)
 
     last_idx = last_idx.to(device=output.device, dtype=torch.long)
     embeddings = output[torch.arange(output.shape[0], device=output.device), last_idx]

@@ -308,7 +308,7 @@ def train():
     ]
     model_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, dp_size=2, cp_size=4)
     # sampler_mesh = DeviceMesh.from_sizes(world_size=SAMPLER_GPUS, dp_size=SAMPLER_GPUS // 2, tp_size=2)
-    twinkle.initialize(mode='local', nproc_per_node=NUM_GPUS, groups=device_groups, 
+    twinkle.initialize(mode='local', nproc_per_node=NUM_GPUS, groups=device_groups,
                        global_device_mesh=model_mesh, lazy_collect=False)
 
     # ── vLLMSampler on GPUs 4-7 (Ray actor, no HTTP overhead) ────────────────
@@ -355,11 +355,11 @@ def train():
     logger.info(f'Total steps: {NUM_STEPS}, model GPUs: {MODEL_GPUS}, sampler GPUs: {SAMPLER_GPUS}')
 
     for cur_step, batch in enumerate(dataloader):
-        
+
         print([len(m['input_ids']) for m in batch])
         if cur_step == 17:
             print()
-        
+
         model.forward_backward(inputs=batch)
         model.clip_grad_and_step()
 

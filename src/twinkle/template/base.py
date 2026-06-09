@@ -178,8 +178,7 @@ class Template:
             try:
                 parsed = parser.parse(block) or []
             except Exception:
-                logger.warn(
-                    'tool-call parse failed for streamed block; emitting as raw content')
+                logger.warn('tool-call parse failed for streamed block; emitting as raw content')
                 events.append({'content': block})
                 state['pending'] = buf[block_end:]
                 continue
@@ -727,8 +726,7 @@ class Template:
                 # key-round-only: always use TokenizeByRound with filtered indices
                 if kwargs.get('tokenize', True):
                     input_ids, labels, encoded = TokenizeByRound.tokenize_with_assistant_labels(
-                        self.tokenizer, self._apply_chat_template, trajectory,
-                        train_indices=train_indices, **kwargs)
+                        self.tokenizer, self._apply_chat_template, trajectory, train_indices=train_indices, **kwargs)
                 else:
                     encoded = self._apply_chat_template(trajectory, **kwargs)
             elif self._template_support_assistant_tokens_mask:
