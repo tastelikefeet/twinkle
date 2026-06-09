@@ -1,24 +1,9 @@
-"""Streaming SFT with QualityPreprocessor on a streaming IterableDataset (Ray mode).
-
-Architecture (8 GPUs single-node):
-    GPU 0-3: LoRA SFT training (4x DP)
-    GPU 4-7: vLLMSampler Ray actor (same model, for QualityPreprocessor)
-
-QualityPreprocessor phases (intent, IFD, refine) use SamplerBackend
-which calls vLLMSampler directly via Ray (no HTTP overhead).
-
-Two output files are produced:
-  - trained_data.jsonl: write-through of rows actually consumed by training
-  - dropped_data.jsonl: rows dropped by QualityPreprocessor (with step annotation)
-
-Launch:
-    python cookbook/exp/train_streaming_sft.py
-"""
 import json
 import os
+from functools import partial
 from pathlib import Path
 from typing import Any, Dict, Iterator, List
-from functools import partial
+
 from peft import LoraConfig
 
 import twinkle
@@ -27,17 +12,11 @@ from twinkle.dataloader import DataLoader
 from twinkle.dataset import Dataset, PackingDataset
 from twinkle.dataset.base import DatasetMeta
 from twinkle.model import MegatronModel
-from twinkle.sampler import vLLMSampler
-from twinkle.template import Qwen3_5Template
 from twinkle_agentic.preprocessor import (
     QualityPreprocessor, SamplerBackend,
-    IntentClassifier, ResponseRefiner, ScoreFilter,
-    HardFilter, RefuseFilter, DeadLoopFilter, TokenSoupFilter, MessageSanityFilter,
-    SpecialCharsFilter, PIIPresidioFilter, ModelFilter, DedupFilter,
+    IntentClassifier, HardFilter, RefuseFilter, DeadLoopFilter, TokenSoupFilter, MessageSanityFilter,
+    SpecialCharsFilter, ModelFilter, DedupFilter,
     MessageNormalizer,
-)
-from twinkle_agentic.preprocessor.score_filter import (
-    ChrMinScorer, PassNScorer, ParaphraseScorer,
 )
 
 logger = get_logger()
@@ -68,8 +47,7 @@ DROPPED_DATA_PATH = os.path.join(OUTPUT_DIR, 'dropped_data.jsonl')
 ADAPTER_NAME = 'default'
 
 # ── Data source ──────────────────────────────────────────────────────────────
-CSV_PATH = os.environ.get(
-    'CSV_PATH', '/mnt/workspace/yzhao/tastelikefeet/bc/ds_csv/data/20260531.csv')
+CSV_PATH = os.environ.get('CSV_PATH')
 DATASET_TOTAL = int(os.environ.get('DATASET_TOTAL', 10000))  # 0 = full materialized dataset
 # Worker count for HF Dataset.map(num_proc=N); spawn start method is forced in twinkle.dataset.base.
 MAP_NUM_PROC = int(os.environ.get('MAP_NUM_PROC', 16))
