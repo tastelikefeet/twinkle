@@ -1,6 +1,9 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 import numpy as np
 import torch
+import torch.distributed as dist
+import torch.nn.functional as F
+from copy import copy
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional, Union
 
@@ -178,11 +181,9 @@ class InputProcessor:
         tensor across SP × RP. No feature gather; uniform across
         DP / Ulysses / zigzag-ring / padding-free.
         """
-        import torch.distributed as dist
-        from copy import copy
-
         features = outputs.get('features')
-        assert features is not None
+        assert features is not None, (
+            "outputs['features'] missing; ensure TransformersEmbeddingPatch is applied for task='embedding'.")
 
         sp_enabled = (
             self.framework == 'transformers' and sp_strategy is not None and getattr(sp_strategy, 'enabled', False)
@@ -191,7 +192,8 @@ class InputProcessor:
         ref_pos = sp_strategy.real_position_ids if sp_enabled else inputs['position_ids']
         if ref_pos.dim() == 3:
             ref_pos = ref_pos[0]
-        cu_seq_lens_q = inputs.get('cu_seq_lens_q')
+        # Accept both flash-attn (cu_seq_lens_q) and Megatron (cu_seqlens_q) conventions.
+        cu_seq_lens_q = inputs.get('cu_seq_lens_q', inputs.get('cu_seqlens_q'))
 
         is_packed = (
             features.shape[0] == 1 and (cu_seq_lens_q is not None or int((ref_pos.reshape(-1) == 0).sum()) > 1))
@@ -205,13 +207,19 @@ class InputProcessor:
             else:
                 end_idx = self._packed_last_indices(ref_pos, T_real).to(device)
             n_seqs = end_idx.shape[0]
-            mask = torch.zeros(1, T_real, n_seqs, dtype=dtype, device=device)
-            mask[0, end_idx, torch.arange(n_seqs, device=device)] = 1.0
+            batch_idx = torch.zeros_like(end_idx)
+            target_idx = torch.arange(n_seqs, device=device)
+            B_mask, n_targets = 1, n_seqs
         else:
-            B = ref_pos.shape[0]
-            end_idx = (ref_pos >= 0).long().sum(-1) - 1
-            mask = torch.zeros(B, T_real, 1, dtype=dtype, device=device)
-            mask[torch.arange(B, device=device), end_idx, 0] = 1.0
+            n_seqs = ref_pos.shape[0]
+            # clamp_min(0) prevents negative indexing when a row is fully padded (sum == 0).
+            end_idx = ((ref_pos >= 0).long().sum(-1) - 1).clamp_min(0)
+            batch_idx = torch.arange(n_seqs, device=device)
+            target_idx = torch.zeros(n_seqs, dtype=torch.long, device=device)
+            B_mask, n_targets = n_seqs, 1
+
+        mask = torch.zeros(B_mask, T_real, n_targets, dtype=dtype, device=device)
+        mask[batch_idx, end_idx, target_idx] = 1.0
 
         if sp_enabled:
             # Route mask through the same pad+split as input_ids to align with local features.
@@ -220,9 +228,12 @@ class InputProcessor:
             mask = sp_strategy.pad(mask, padding_value=0, position_ids=rp, dim=1)
             mask = sp_strategy.split(mask, dim=1, position_ids=rp_padded)
 
-        embeddings = (
-            torch.einsum('th,tn->nh', features.squeeze(0), mask.squeeze(0)) if is_packed else
-            (features * mask).sum(dim=1))
+        assert mask.shape[1] == features.shape[1], (
+            f'mask seq-dim {mask.shape[1]} != features seq-dim {features.shape[1]}; '
+            'sp_strategy.split contract broken or T_real mismatched.')
+
+        embeddings = torch.einsum('bth,btn->bnh', features, mask)
+        embeddings = embeddings.squeeze(0) if is_packed else embeddings.squeeze(1)
 
         if sp_enabled and dist.is_available() and dist.is_initialized():
             for grp_attr, size_attr in (('_sp_group', 'sp_world_size'), ('_rp_group', 'rp_world_size')):
@@ -231,8 +242,7 @@ class InputProcessor:
                     dist.all_reduce(embeddings, op=dist.ReduceOp.SUM, group=grp)
 
         # Normalize after pool+reduce so swapping pooling strategy (last/mean/CLS) stays mathematically correct.
-        from torch.nn.functional import normalize
-        embeddings = normalize(embeddings, p=2, dim=-1)
+        embeddings = F.normalize(embeddings, p=2, dim=-1)
 
         outputs = copy(outputs)
         outputs.pop('features', None)
