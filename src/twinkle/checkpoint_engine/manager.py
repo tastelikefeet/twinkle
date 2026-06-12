@@ -116,12 +116,12 @@ class CheckpointEngineManager:
         peft_config = None
         if self.base_sync_done and not merge_and_sync:
             if self._peft_config is None:
-                self._peft_config = self.model.get_peft_config_dict(lazy_collect=False)
+                self._peft_config = self.model.get_peft_config_dict()
             peft_config = self._peft_config
 
         if self._model_keys is None:
             if hasattr(self.sampler, 'get_state_keys'):
-                self._model_keys = self.sampler.get_state_keys(lazy_collect=False)
+                self._model_keys = self.sampler.get_state_keys()
 
             if self._model_keys is None:
                 self._model_keys = []

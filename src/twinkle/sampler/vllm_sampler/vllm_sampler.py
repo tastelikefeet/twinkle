@@ -446,7 +446,7 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
     def reset_encoder_cache(self):
         self._run_in_loop(self.engine.reset_encoder_cache())
 
-    @remote_function(dispatch='all', collect='first')
+    @remote_function(dispatch='all', collect='first', lazy_collect=False)
     def get_state_keys(self):
         return self._run_in_loop(self.engine.get_state_keys())
 

@@ -1647,7 +1647,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         if result_container['error'] is not None:
             raise result_container['error']
 
-    @remote_function(collect='first')
+    @remote_function(collect='first', lazy_collect=False)
     def get_peft_config_dict(self, adapter_name: str = None) -> Optional[Dict[str, Any]]:
         """Return the PEFT config as a dict for vLLM's PEFTHelper.
 

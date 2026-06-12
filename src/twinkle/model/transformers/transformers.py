@@ -1180,7 +1180,7 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
     def get_state_dict(self, **kwargs):
         return self._get_trainable_parameters(kwargs.pop('adapter_name', self._get_default_group()))
 
-    @remote_function(collect='first')
+    @remote_function(collect='first', lazy_collect=False)
     def get_peft_config_dict(self, adapter_name: str = None) -> dict:
         """Return the PEFT config as a dict for vLLM's PEFTHelper.
 
