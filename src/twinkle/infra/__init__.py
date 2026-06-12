@@ -7,7 +7,7 @@ import numpy as np
 import os
 import random
 import sys
-from typing import Any, AsyncIterator, Callable, List, Literal, Optional, TypeVar, Union
+from typing import Any, Callable, List, Literal, Optional, TypeVar, Union
 
 from twinkle.notifier import Notifier, notify_exception
 from twinkle.utils import DeviceGroup, DeviceMesh, Platform, check_unsafe, framework_util, get_logger, requires
@@ -834,26 +834,4 @@ def remote_function(dispatch: Union[Literal['slice', 'all', 'slice_dp'], Callabl
 
     return decorator
 
-
-async def _wrap_async_iter_with_notify(gen: AsyncIterator, ctx: str, caller: Optional[str] = None) -> AsyncIterator:
-    """Re-emit chunks from a local async generator and forward exceptions to the notifier."""
-    try:
-        async for chunk in gen:
-            yield chunk
-    except Exception as _e:  # noqa: BLE001
-        _tag_exc(_e, caller)
-        notify_exception(_notifier, ctx, _e, _name)
-        raise
-
-
-async def _wrap_objrefgen_with_notify(ref_gen: Any, ctx: str, caller: Optional[str] = None) -> AsyncIterator:
-    """Drain a Ray ObjectRefGenerator chunk-by-chunk; forward exceptions to the notifier."""
-    import ray
-    try:
-        async for ref in ref_gen:
-            yield await ref
-    except Exception as _e:  # noqa: BLE001
-        _tag_exc(_e, caller)
-        notify_exception(_notifier, ctx, _e, _name)
-        raise
 
