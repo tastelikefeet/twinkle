@@ -2,11 +2,11 @@
 import copy
 import math
 import os
+import pytest
 import socket
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-import pytest
 from datetime import timedelta
 from transformers import LlamaConfig, LlamaForCausalLM
 from transformers.modeling_flash_attention_utils import is_flash_attn_available

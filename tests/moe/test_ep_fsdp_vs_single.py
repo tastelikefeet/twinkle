@@ -22,11 +22,11 @@ mp.spawn (1 for the single-GPU baseline and 4 for the EP+FSDP run).
 
 import numpy as np
 import os
+import pytest
 import socket
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-import pytest
 from datetime import timedelta
 from transformers import AutoConfig, AutoModelForCausalLM
 

@@ -1,11 +1,10 @@
 import os
+import pytest
 import sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import types
-
-import pytest
 
 try:
     import requests
