@@ -23,7 +23,7 @@ from twinkle.patch import Patch
 if TYPE_CHECKING:
     import torch
 
-_LM_HEADS = ['lm_head', 'output', 'embed_out', 'output_layer']
+_LM_HEADS = ['lm_head', 'embed_out', 'output_layer', 'output']
 
 
 def get_lm_head_model(module, lm_heads=None):
@@ -42,9 +42,12 @@ def get_lm_head_model(module, lm_heads=None):
 
 
 def _output_features_hook(module, args, kwargs, output):
-    import torch.nn.functional as F
+    # Replaces the model's structured output entirely; downstream HF utilities
+    # (generate, loss, past_key_values, ...) won't work until ``unpatch``.
+    # Pooling + L2-normalize is deferred to ``InputProcessor._postprocess_embedding``
+    # so the hook stays pooling-agnostic (last-token / mean / CLS all work uniformly).
     hidden_states = output.logits
-    return {'features': F.normalize(hidden_states, p=2, dim=-1).contiguous()}
+    return {'features': hidden_states.contiguous()}
 
 
 def _identity_forward(self, hidden_states):

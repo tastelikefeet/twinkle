@@ -59,6 +59,9 @@ def _output_embedding_hook(module, args, kwargs, output):
 
     if cu_seqlens_q is not None and cu_seqlens_q.numel() >= 2:
         # cu is full-seq based (built before CP split), so it indexes the gathered output directly.
+        assert int(cu_seqlens_q[-1]) == output.shape[1], (
+            f'Expected [B, T, H] with T == cu_seqlens_q[-1]; got output.shape={tuple(output.shape)}, '
+            f'cu_seqlens_q[-1]={int(cu_seqlens_q[-1])}. GPTModel layout contract may have changed.')
         last_idx = (cu_seqlens_q[1:].long() - 1).to(output.device)
         embeddings = output[0, last_idx]
         return F.normalize(embeddings, p=2, dim=1).contiguous()
@@ -66,6 +69,10 @@ def _output_embedding_hook(module, args, kwargs, output):
     position_ids = kwargs.get('position_ids', None)
     attention_mask = kwargs.get('attention_mask', None)
     if position_ids is not None and cp_group is not None and cp_group.size() > 1:
+        # Non-packed branch only; reject packed-via-position_ids since CP gather without cu_seqlens scrambles segments.
+        assert cu_seqlens_q is None or cu_seqlens_q.numel() < 2, (
+            'Packed batch detected without usable cu_seqlens_q; CP gather of position_ids '
+            'cannot reconstruct multi-segment ordering. Pass cu_seqlens_q via packed_seq_params.')
         position_ids = gather_cp_load_balanced(
             position_ids if position_ids.dim() >= 2 else position_ids.unsqueeze(0),
             cp_group,
@@ -102,12 +109,16 @@ def _iter_chunks(module) -> List[torch.nn.Module]:
 def _find_post_process_owner(chunk: torch.nn.Module) -> Optional[torch.nn.Module]:
     """Locate the GPTModel-like owner of ``output_layer`` inside a chunk.
 
-    Walks all submodules so it transparently handles DDP/Float16Module/PeftModel wrappers.
+    Walks all submodules and matches only modules that *directly* register
+    ``output_layer`` as a child (i.e., it appears in ``sub._modules``), so
+    proxies via ``__getattr__`` on wrappers like ``Float16Module`` /
+    ``DistributedDataParallel`` / ``PeftModel`` do not steal the match.
     """
     for sub in chunk.modules():
-        layer = getattr(sub, 'output_layer', None)
+        if 'output_layer' not in sub._modules:
+            continue
         post_process = getattr(sub, 'post_process', None)
-        if isinstance(layer, torch.nn.Module) and (post_process is None or post_process):
+        if post_process is None or post_process:
             return sub
     return None
 

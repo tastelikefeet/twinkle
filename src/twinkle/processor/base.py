@@ -230,6 +230,10 @@ class InputProcessor:
                 if grp is not None and getattr(sp_strategy, size_attr, 1) > 1:
                     dist.all_reduce(embeddings, op=dist.ReduceOp.SUM, group=grp)
 
+        # Normalize after pool+reduce so swapping pooling strategy (last/mean/CLS) stays mathematically correct.
+        from torch.nn.functional import normalize
+        embeddings = normalize(embeddings, p=2, dim=-1)
+
         outputs = copy(outputs)
         outputs.pop('features', None)
         outputs['embeddings'] = embeddings.contiguous()
