@@ -3,21 +3,28 @@ import json
 import re
 from typing import Any, Dict, List
 
-from twinkle import remote_class
-from twinkle.template import Template
+from .base import ToolCallParser
 
 
-@remote_class()
-class QwenTemplate(Template):
+class HermesQwenParser(ToolCallParser):
+    name = 'hermes_qwen'
+    open_marker = '<tool_call>'
+    close_marker = '</tool_call>'
 
     _BLOCK_RE = re.compile(r'<tool_call>\s*([\s\S]*?)\s*(?:</tool_call>|\Z)')
     _FUNCTION_RE = re.compile(r'<function=([^>]+)>([\s\S]*?)</function>')
     _PARAMETER_RE = re.compile(r'<parameter=([^>]+)>\s*([\s\S]*?)\s*</parameter>')
     _STRIP_RE = re.compile(r'<tool_call>[\s\S]*?(?:</tool_call>|\Z)')
 
-    def parse(self, decoded: str) -> List[Dict[str, Any]]:
+    def matches_model(self, model_id: str) -> bool:
+        return 'qwen' in model_id
+
+    def detect(self, text: str) -> bool:
+        return self.open_marker in text
+
+    def parse(self, text: str) -> List[Dict[str, Any]]:
         calls: List[Dict[str, Any]] = []
-        for block_m in self._BLOCK_RE.finditer(decoded or ''):
+        for block_m in self._BLOCK_RE.finditer(text or ''):
             block = block_m.group(1)
             func_m = self._FUNCTION_RE.search(block)
             if func_m:
@@ -37,7 +44,6 @@ class QwenTemplate(Template):
                     },
                 })
                 continue
-            # JSON fallback: ``{"name": ..., "arguments": ...}`` inside the block.
             try:
                 data = json.loads(block)
             except json.JSONDecodeError:
@@ -60,26 +66,5 @@ class QwenTemplate(Template):
             })
         return calls
 
-    def clean(self, decoded: str) -> str:
-        return self._STRIP_RE.sub('', decoded or '').rstrip()
-
-    def parse_tool_call(self, decoded: str) -> List[Dict[str, Any]]:
-        """Parse tool calls from the assistant's decoded output.
-
-        Dispatches by model family on ``self.model_id``; the actual
-        wire-format logic lives in :mod:`.tool_call_parser`.
-        """
-        mid = (self.model_id or '').lower()
-        if 'qwen' in mid:
-            return self.parse(decoded)
-        # TODO: Other models (Llama3, OpenAI JSON, …) — add a parser in
-        # ``tool_call_parser.py`` and extend this dispatch.
-        return []
-
-    def clean_tool_call(self, decoded: str) -> str:
-        """Strip family-specific tool-call markup from assistant text."""
-        mid = (self.model_id or '').lower()
-        if 'qwen' in mid:
-            return self.clean(decoded)
-        # TODO: Other models
-        return (decoded or '').rstrip()
+    def clean(self, text: str) -> str:
+        return self._STRIP_RE.sub('', text or '').rstrip()

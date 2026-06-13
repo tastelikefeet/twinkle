@@ -1,2 +1,2 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
-from .base import LossScale
+from .router_sampler import RouterSampler

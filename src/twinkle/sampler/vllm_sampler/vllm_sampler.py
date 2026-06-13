@@ -341,13 +341,12 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
             sampling_params = copy(sampling_params)
             sampling_params.max_tokens = 1
             logprobs_only = True
-            assert not is_trajectory, 'Logprobs only not supported for Trajectory inputs'
 
         multi_modal_data_list = []
         for feat in inputs_list:
             multi_modal_data_list.append(self._extract_multi_modal_data(feat))
 
-        if is_trajectory and not logprobs_only:
+        if is_trajectory:
             template = self.template
             assert template is not None, \
                 'Use set_template to add a template when trying to input Trajectory'
@@ -447,7 +446,7 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
     def reset_encoder_cache(self):
         self._run_in_loop(self.engine.reset_encoder_cache())
 
-    @remote_function(dispatch='all', collect='first')
+    @remote_function(dispatch='all', collect='first', lazy_collect=False)
     def get_state_keys(self):
         return self._run_in_loop(self.engine.get_state_keys())
 
