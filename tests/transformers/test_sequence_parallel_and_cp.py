@@ -16,6 +16,9 @@ from twinkle.loss import CrossEntropyLoss
 from twinkle.model.transformers.strategy.sequence_parallel import SequenceParallelStrategy, sequence_parallel
 from twinkle.utils import DeviceMesh, Platform, ensure_hccl_socket_env, selective_log_softmax, torch_util
 
+pytestmark = pytest.mark.skip(
+    reason='Heavy SP/CP test (mp.spawn, world_size up to 4); not viable on dual-V100 CI, run manually.')
+
 LOGITS_RTOL = 1e-2
 LOGITS_ATOL = 5e-3
 LOSS_ATOL = 5e-3

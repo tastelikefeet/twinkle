@@ -34,6 +34,9 @@ from twinkle.model.transformers.moe import apply_expert_parallel
 from twinkle.model.transformers.strategy import NativeFSDPStrategy
 from twinkle.utils import DeviceMesh
 
+pytestmark = pytest.mark.skip(
+    reason='Heavy multi-GPU MoE test (needs 4 GPUs + Qwen3.5-4B); not viable on dual-V100 CI, run manually.')
+
 ABS_TOL = 5e-3
 LOSS_TOL = 1e-4
 REL_TOL = 1e-4

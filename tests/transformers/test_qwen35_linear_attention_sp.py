@@ -36,6 +36,9 @@ else:
     _FLA_CAUSAL_CONV1D_FN = None
     _FLA_CHUNK_GATED_DELTA_RULE = None
 
+pytestmark = pytest.mark.skip(
+    reason='Heavy Qwen3.5 SP linear-attention test (FLA + multi-GPU); not viable on dual-V100 CI, run manually.')
+
 WORLD_SIZE = 2
 LOGITS_RTOL = 5e-3
 LOGITS_ATOL = 5e-3
