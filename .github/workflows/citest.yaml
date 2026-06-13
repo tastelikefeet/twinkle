@@ -73,4 +73,5 @@ jobs:
         shell: bash
         run: |
           set -e
+          pip install pytest
           bash .dev_scripts/dockerci.sh
