@@ -1,5 +1,5 @@
 install_twinkle_with_kernels() {
-    pip install ".[kernels,test]" -i https://mirrors.aliyun.com/pypi/simple/ || pip install ".[kernels,test]"
+    pip install ".[kernels,test,tinker]" -i https://mirrors.aliyun.com/pypi/simple/ || pip install ".[kernels,test,tinker]"
 }
 
 if [ "$MODELSCOPE_SDK_DEBUG" == "True" ]; then
@@ -26,7 +26,9 @@ if [ "$MODELSCOPE_SDK_DEBUG" == "True" ]; then
     pip uninstall autoawq -y
     pip uninstall lmdeploy -y
     pip uninstall tensorflow -y
-    pip install kernels -U
+    # Pin kernels<0.15 to avoid transformers' hub_kernels.py LayerRepository
+    # crash (huggingface/transformers#46291).
+    pip install 'kernels<0.15'
     pip install ray==2.48
     pip install optimum
 
@@ -34,6 +36,8 @@ if [ "$MODELSCOPE_SDK_DEBUG" == "True" ]; then
     install_twinkle_with_kernels
 else
     install_twinkle_with_kernels
+    # Same kernels pin for the release-image branch.
+    pip install 'kernels<0.15'
     echo "Running case in release image, run case directly!"
 fi
 # remove torch_extensions folder to avoid ci hang.
