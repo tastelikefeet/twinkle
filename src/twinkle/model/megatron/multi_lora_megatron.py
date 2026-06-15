@@ -256,6 +256,9 @@ class MultiLoraMegatronModel(MegatronModel):
 
         torch.save(state_dict, self._rank_local_optimizer_path(checkpoint_dir))
 
+        if dist.is_initialized():
+            dist.barrier()
+
     def _load_multi_lora_optimizer(self, checkpoint_dir: str, adapter_name: str = '', **kwargs):
         no_load_optim = kwargs.pop('no_load_optim', False)
         no_load_rng = kwargs.pop('no_load_rng', False)
@@ -265,6 +268,13 @@ class MultiLoraMegatronModel(MegatronModel):
         if not no_load_optim and optimizer_config is not None:
             if optimizer_config.optimizer is not None and 'optimizer' in state_dict:
                 optimizer_config.optimizer.load_state_dict(state_dict['optimizer'])
+                device = Platform.get_local_device()
+                for group_state in optimizer_config.optimizer.state.values():
+                    if not isinstance(group_state, dict):
+                        continue
+                    for k, v in group_state.items():
+                        if isinstance(v, torch.Tensor):
+                            group_state[k] = v.to(device)
             if optimizer_config.lr_scheduler is not None and 'opt_param_scheduler' in state_dict:
                 optimizer_config.lr_scheduler.load_state_dict(state_dict['opt_param_scheduler'])
         if not no_load_rng and 'rng_state' in state_dict:

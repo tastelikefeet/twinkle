@@ -1260,7 +1260,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
 
         For distributed training:
         - All PP ranks participate in export (each has different layers)
-        - Only DP rank 0 actually writes to disk
+        - Only global rank 0 actually writes shared config files
         - Uses barrier for synchronization
 
         For LoRA training:
@@ -1268,12 +1268,9 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         """
         # Check if this is LoRA training
         is_peft_format = (adapter_name != _default_adapter_name)
+        is_global_zero = (not dist.is_initialized()) or dist.get_rank() == 0
 
-        # Create output directory on rank 0 only
-        from megatron.core import parallel_state as mpu
-        dp_rank = mpu.get_data_parallel_rank() if mpu.is_initialized() else 0
-
-        if dp_rank == 0:
+        if is_global_zero:
             os.makedirs(output_dir, exist_ok=True)
 
         # Synchronize before saving
@@ -1285,8 +1282,8 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         self.strategy.bridge.save_weights(
             model, output_dir, peft_format=is_peft_format, adapter_name=adapter_name, converter=lora_converter)
 
-        # Save config on rank 0 only
-        if dp_rank == 0:
+        # Save config on global rank 0 only (avoid concurrent writers).
+        if is_global_zero:
             self.hf_config.save_pretrained(output_dir)
             if isinstance(model[0], PeftModel):
                 config = model[0].peft_config[adapter_name]
@@ -1295,11 +1292,13 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
                 model[0].peft_config[adapter_name].save_pretrained(output_dir)
                 config.target_modules = target_modules
 
+        if dist.is_initialized():
+            dist.barrier()
+
     def _save_megatron_format(self, output_dir: str, adapter_name: str, lora_converter=None):
         """Save in Megatron checkpoint format."""
+        is_global_zero = (not dist.is_initialized()) or dist.get_rank() == 0
         os.makedirs(output_dir, exist_ok=True)
-        from megatron.core import parallel_state as mpu
-        dp_rank = mpu.get_data_parallel_rank() if mpu.is_initialized() else 0
         state_dict = self._get_trainable_parameters(adapter_name)
         cpu_state_dict = {}
         for k, v in state_dict.items():
@@ -1315,12 +1314,17 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         rank = dist.get_rank() if dist.is_initialized() else 0
         checkpoint_path = os.path.join(output_dir, f'model_rank{rank}.pt')
         torch.save(cpu_state_dict, checkpoint_path)
-        # Save config on rank 0 only
+        # Save shared config on global rank 0 only (avoid concurrent writers).
         model = self.strategy.unwrap_model(self.model)
-        if dp_rank == 0:
+        if is_global_zero:
             self.hf_config.save_pretrained(output_dir)
             if isinstance(model[0], PeftModel):
                 model[0].peft_config[adapter_name].save_pretrained(output_dir)
+
+        # Finalize barrier: ensure all ranks finish writing model_rank*.pt
+        # before the caller proceeds (e.g. uploading / loading the ckpt).
+        if dist.is_initialized():
+            dist.barrier()
 
     def _save_tokenizer(self, output_dir: str, **kwargs):
         from twinkle.utils import is_last_rank
