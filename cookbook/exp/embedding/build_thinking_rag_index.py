@@ -2,9 +2,10 @@
 
 Pipeline (per row, batched):
   1. Load (user_query, reasoning_content) pairs from ``dataset_think.get_dataset``.
-  2. Compress query with ``FIXED_QUERY_NEED`` and cot with ``FIXED_QUERY_SKILL``
-     using a Twinkle ``vLLMSampler`` (TP=4 across GPUs 0-3). Reuses the prompt
-     suite from ``cookbook/exp/condenser/make_condenser_dataset.py``.
+  2. Compress query with ``RAG_QUERY_HINT`` and cot with ``RAG_THINKING_HINT``
+     (a symmetric Problem/Skill/Knowledge schema defined in this file) using a
+     Twinkle ``vLLMSampler`` (TP=4 across GPUs 0-3). Reuses the system/user
+     wrappers from ``cookbook/exp/condenser/make_condenser_dataset.py``.
   3. On condenser truncation (``stop_reason='length'`` or skeleton-incomplete
      output), fall back to an external OpenAI-compatible API.
   4. Encode the condensed pair via the trained embedding model — Twinkle
@@ -55,8 +56,6 @@ sys.path.insert(0, str(_HERE))
 from make_condenser_dataset import (  # noqa: E402  (after sys.path tweak)
     COMPRESS_SYSTEM,
     COMPRESS_USER,
-    FIXED_QUERY_NEED,
-    FIXED_QUERY_SKILL,
 )
 # Default dataset loader is the index-time corpus (broader retrieval profile);
 # pass --dataset-module dataset_think to fall back to the training mix.
@@ -84,7 +83,7 @@ logger = get_logger()
 
 EMBED_MODEL_ID = os.environ.get(
     'EMBED_MODEL_ID',
-    'ms://twinkle-kit/Qwen3.5-4B-QA-emb',
+    '/mnt/workspace/yzhao/tastelikefeet/Qwen3.5-4B-QA-emb-v2',
 )
 CONDENSE_MODEL_ID = os.environ.get('CONDENSE_MODEL_ID', 'ms://twinkle-kit/Qwen3.5-4B-CM-v2')
 
@@ -105,6 +104,31 @@ EMBED_MAX_LENGTH = int(os.environ.get('EMBED_MAX_LENGTH', 8192))
 
 SIM_THRESHOLD = float(os.environ.get('SIM_THRESHOLD', 0.65))
 MIN_TEXT_CHARS = int(os.environ.get('MIN_TEXT_CHARS', 256))
+
+# Hard-templated hints: the condenser SFT prior maps `Skill` to the legacy
+# `Use when: / numbered steps / Output:` skeleton on long inputs; embedding the
+# exact 4-line body template + explicit negative constraints is the only way to
+# override it deterministically across query and cot sides.
+RAG_QUERY_HINT = (
+    'Summarize this query for retrieval. '
+    'The body of ## Summary MUST follow this EXACT 4-line template — '
+    'do NOT emit "Use when:", numbered procedure steps, or "Output:":\n'
+    'Topic: <specific pattern name — scope>\n'
+    'Problem: <what concrete problem is being asked>\n'
+    'Skill: <which specific method/technique/pattern is required to solve it>\n'
+    'Knowledge: <which domains/concepts/facts must be invoked>\n'
+    'Then emit the mandatory ## More section as usual. '
+    'Topic must name the specific pattern, never generic labels.')
+RAG_THINKING_HINT = (
+    'Summarize this reasoning trace for retrieval. '
+    'The body of ## Summary MUST follow this EXACT 4-line template — '
+    'do NOT emit "Use when:", numbered procedure steps, or "Output:":\n'
+    'Topic: <specific pattern name — scope>\n'
+    'Problem: <what concrete problem this trace tackled>\n'
+    'Skill: <which specific method/technique/pattern was applied>\n'
+    'Knowledge: <which domains/concepts/facts were used>\n'
+    'Then emit the mandatory ## More section as usual. '
+    'Topic must name the specific pattern, never generic labels.')
 
 # OpenAI API fallback (used when vLLM truncates).
 COMPRESS_API_KEY = os.environ.get('COMPRESS_API_KEY', '')
@@ -128,12 +152,19 @@ DOMAIN_MAP = {
 # Small helpers
 # ===========================================================================
 
-def _is_truncated_compression(text: str) -> bool:
-    """Detect structurally incomplete condenser output even when stop='stop'.
+_LEGACY_USE_WHEN_RE = re.compile(r'(?im)^\s*Use when\s*:')
+_SCHEMA_MARKERS = ('Problem:', 'Skill:', 'Knowledge:')
 
-    The skeleton mandates a ``## Summary`` plus a ``## More`` bullet list whose
-    last line begins with ``-`` or ends with ``)`` (the ``(none)`` sentinel).
-    Anything short of that signals truncation; the API fallback is invoked.
+
+def _is_truncated_compression(text: str) -> bool:
+    """Reject structurally incomplete OR schema-regressed condenser output.
+
+    Triggers API fallback when the vLLM output:
+      * lacks ``## Summary`` / ``## More``,
+      * has an empty or unterminated ``## More`` bullet list, or
+      * regresses to the legacy ``Use when: / numbered-steps / Output:`` skeleton
+        instead of the mandated Problem/Skill/Knowledge 4-line body — the
+        dominant cot-side failure mode that drives sim < 0.45 drops.
     """
     if not text or not text.strip():
         return True
@@ -144,6 +175,11 @@ def _is_truncated_compression(text: str) -> bool:
         return True
     last_line = after_more.splitlines()[-1].strip()
     if not (last_line.startswith('-') or last_line.endswith(')')):
+        return True
+    summary_body = text.split('## Summary', 1)[1].split('## More', 1)[0]
+    if _LEGACY_USE_WHEN_RE.search(summary_body):
+        return True
+    if not all(marker in summary_body for marker in _SCHEMA_MARKERS):
         return True
     return False
 
@@ -494,11 +530,11 @@ def build_index(args: argparse.Namespace,
         nonlocal n_kept, n_dropped_compress, n_dropped_sim
         if not rows:
             return
-        # Phase 1 — compress query (FIXED_QUERY_NEED) and cot (FIXED_QUERY_SKILL).
+        # Phase 1 — compress query (RAG_QUERY_HINT) and cot (RAG_THINKING_HINT).
         q_compressed = _resolve_compressed(
-            sampler, api, [r['query_raw'] for r in rows], FIXED_QUERY_NEED)
+            sampler, api, [r['query_raw'] for r in rows], RAG_QUERY_HINT)
         c_compressed = _resolve_compressed(
-            sampler, api, [r['cot_raw'] for r in rows], FIXED_QUERY_SKILL)
+            sampler, api, [r['cot_raw'] for r in rows], RAG_THINKING_HINT)
         kept_rows: List[Dict[str, Any]] = []
         for r, q_cmp, c_cmp in zip(rows, q_compressed, c_compressed):
             if not q_cmp or not c_cmp:
@@ -655,7 +691,7 @@ def eval_recall(args: argparse.Namespace,
         if not rows:
             return
         compressed = _resolve_compressed(
-            sampler, api, [r['query_raw'] for r in rows], FIXED_QUERY_NEED)
+            sampler, api, [r['query_raw'] for r in rows], RAG_QUERY_HINT)
         useful = [(r, c) for r, c in zip(rows, compressed) if c]
         if not useful:
             return
