@@ -15,7 +15,7 @@ from torch.optim.lr_scheduler import LRScheduler
 from transformers import AutoConfig, PretrainedConfig
 from typing import Any, Callable, Dict, List, Literal, Optional, Type, Union
 
-from twinkle import DeviceMesh, remote_class, remote_function, requires, template, torch_util
+from twinkle import DeviceMesh, Platform, remote_class, remote_function, requires, template, torch_util
 from twinkle.data_format import InputFeature, Trajectory
 from twinkle.hub import HubOperation
 from twinkle.infra import collect_tensor_dict
@@ -221,8 +221,11 @@ class MultiLoraMegatronModel(MegatronModel):
             'np_rng_state': np.random.get_state(),
             'torch_rng_state': torch.get_rng_state(),
         }
-        if torch.cuda.is_available():
-            rng_state['cuda_rng_state'] = torch.cuda.get_rng_state()
+        # Backend-agnostic device RNG capture (CUDA / NPU / MPS). Key is kept as
+        # 'cuda_rng_state' for backward compatibility with existing checkpoints.
+        device_rng = Platform.get_device_rng_state()
+        if device_rng is not None:
+            rng_state['cuda_rng_state'] = device_rng
         rng_state['rng_tracker_states'] = tensor_parallel.get_cuda_rng_tracker().get_states()
         return rng_state
 
@@ -233,8 +236,10 @@ class MultiLoraMegatronModel(MegatronModel):
         random.setstate(rng_state['random_rng_state'])
         np.random.set_state(rng_state['np_rng_state'])
         torch.set_rng_state(rng_state['torch_rng_state'])
-        if 'cuda_rng_state' in rng_state and torch.cuda.is_available():
-            torch.cuda.set_rng_state(rng_state['cuda_rng_state'])
+        # Backend-agnostic device RNG restore: tolerates ckpt produced on different
+        # backend (key absent or None) and avoids hard-coded torch.cuda on NPU.
+        if 'cuda_rng_state' in rng_state:
+            Platform.set_device_rng_state(rng_state['cuda_rng_state'])
         tensor_parallel.get_cuda_rng_tracker().set_states(rng_state['rng_tracker_states'])
 
     def _save_multi_lora_optimizer(self, checkpoint_dir: str, optimizer_config, **kwargs):

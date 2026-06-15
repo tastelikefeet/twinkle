@@ -990,7 +990,9 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
             'random_rng_state': random.getstate(),
             'np_rng_state': np.random.get_state(),
             'torch_rng_state': torch.get_rng_state(),
-            'cuda_rng_state': torch.cuda.get_rng_state(),
+            # Backend-agnostic device RNG (CUDA / NPU / MPS); key kept as
+            # 'cuda_rng_state' for backward compatibility with existing checkpoints.
+            'cuda_rng_state': Platform.get_device_rng_state(),
             'rng_tracker_states': tensor_parallel.get_cuda_rng_tracker().get_states(),
         }
         rng_state_list = [rng_state]
@@ -1112,7 +1114,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
             with open(tracker_path, 'w') as f:
                 f.write(str(iteration))
 
-        logging.getLogger(__name__).info(f'Saved mcore optimizer state at iteration {iteration} '
+        logger.info(f'Saved mcore optimizer state at iteration {iteration} '
                                          f'to {checkpoint_dir}')
 
     def _load_mcore_optimizer(
@@ -1201,7 +1203,9 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
             random.setstate(rng['random_rng_state'])
             np.random.set_state(rng['np_rng_state'])
             torch.set_rng_state(rng['torch_rng_state'])
-            torch.cuda.set_rng_state(rng['cuda_rng_state'])
+            # Backend-agnostic restore: tolerates ckpt produced on different backend
+            # (returns None) and avoids hard-coded torch.cuda which crashes on NPU.
+            Platform.set_device_rng_state(rng.get('cuda_rng_state'))
             tensor_parallel.get_cuda_rng_tracker().set_states(rng['rng_tracker_states'], )
 
         # Restore iteration counter.
@@ -1211,7 +1215,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         if dist.is_initialized():
             dist.barrier()
 
-        logging.getLogger(__name__).info(f'Resumed from mcore checkpoint at iteration {iteration} '
+        logger.info(f'Resumed from mcore checkpoint at iteration {iteration} '
                                          f'from {checkpoint_dir}')
 
     @staticmethod
