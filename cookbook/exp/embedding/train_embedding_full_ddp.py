@@ -18,7 +18,6 @@ import re
 import sys
 import threading
 import time
-from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
@@ -34,7 +33,7 @@ from twinkle.metric import EmbeddingMetric
 from twinkle.model import TransformersModel
 from twinkle.processor import InputProcessor
 from twinkle.sampler import vLLMSampler
-from twinkle.template import Template
+from twinkle.template import Qwen3_5Template, Template
 from twinkle.utils.parallel import PosixFileLock
 from twinkle_agentic.protocol.openai import OpenAI as OpenAIClient
 
@@ -91,8 +90,8 @@ COMPRESS_TEMPERATURE = 0.2
 COMPRESS_TOP_P = 0.5
 COMPRESS_MAX_MODEL_LEN = 32768
 
-# Prefetch depth: >1 lets next batch's vLLM/API run while current batch trains.
-PREFETCH_WORKERS = int(os.environ.get('PREFETCH_WORKERS', 2))
+# How many BATCH_SIZE chunks to fetch and compress in one vLLM call.
+PREFETCH_BATCH_MULTIPLIER = int(os.environ.get('PREFETCH_BATCH_MULTIPLIER', 8))
 
 # -- OpenAI API fallback for truncated compressions ---------------------------
 COMPRESS_API_KEY = os.environ.get('COMPRESS_API_KEY', '')
@@ -100,6 +99,9 @@ COMPRESS_BASE_URL = os.environ.get('COMPRESS_BASE_URL', 'https://dashscope.aliyu
 COMPRESS_MODEL = os.environ.get('COMPRESS_MODEL', 'qwen3.7-max')
 # Minimum gap between API calls (seconds); bounds dashscope qps under provider limits.
 API_MIN_INTERVAL = float(os.environ.get('API_MIN_INTERVAL', 0.1))
+API_CONCURRENCY = int(os.environ.get('API_CONCURRENCY', 8))
+# vLLM sampler timeout (seconds); if a sample() call exceeds this, fall back to API.
+SAMPLER_TIMEOUT = float(os.environ.get('SAMPLER_TIMEOUT', 300))
 
 # -- Output paths -------------------------------------------------------------
 OUTPUT_DIR = f'./output/embedding_lora_{BACKEND}'
@@ -206,9 +208,6 @@ _failure_lock: Optional[PosixFileLock] = None
 # Monotonic global sample id; per-batch index would alias across batches.
 _sample_counter = 0
 _sample_counter_lock = threading.Lock()
-
-# Serializes vLLM sample() across PREFETCH_WORKERS threads.
-_sampler_lock = threading.Lock()
 
 _api_throttle_lock = threading.Lock()
 _api_last_call = [0.0]
@@ -559,8 +558,9 @@ def train():
         dataset.dataset = concatenate_datasets(
             [dataset.dataset, ds_index.dataset]).shuffle(seed=MIX_SHUFFLE_SEED)
         logger.info(f'[mix] think={n_think} + index={n_index} → total={len(dataset.dataset)}')
-    dataloader = DataLoader(dataset=dataset, batch_size=BATCH_SIZE, shuffle=True)
-    total_forward_steps = len(dataloader) * NUM_EPOCHS
+    _mega_batch_size = BATCH_SIZE * PREFETCH_BATCH_MULTIPLIER
+    dataloader = DataLoader(dataset=dataset, batch_size=_mega_batch_size, shuffle=True)
+    total_forward_steps = len(dataloader) * PREFETCH_BATCH_MULTIPLIER * NUM_EPOCHS
     optimizer_steps = total_forward_steps // GRADIENT_ACCUMULATION_STEPS
 
     # -------- Embedding model (4 GPU) ----------------------------------------
@@ -572,9 +572,9 @@ def train():
     model.add_metric(EmbeddingMetric, is_training=True)
 
     # -------- Condenser sampler (4 GPU, vLLM) --------------------------------
-    emb_template = Template(model_id=MODEL_ID, max_length=EMB_MAX_LENGTH, enable_thinking=False)
+    emb_template = Qwen3_5Template(model_id=MODEL_ID, max_length=EMB_MAX_LENGTH, enable_thinking=False)
     # Special tokens come from the condenser tokenizer because the leak we strip is in its decoded output.
-    condenser_template = Template(model_id=CONDENSE_MODEL_ID, max_length=DATASET_MAX_TOKENS,
+    condenser_template = Qwen3_5Template(model_id=CONDENSE_MODEL_ID, max_length=DATASET_MAX_TOKENS,
                                   enable_thinking=False)
     _special_tokens = set(condenser_template.tokenizer.all_special_tokens)
     condenser_sampler = vLLMSampler(
@@ -595,6 +595,33 @@ def train():
         top_p=COMPRESS_TOP_P,
         num_samples=1,
     )
+
+    condenser_sampler._ray_get_timeout = SAMPLER_TIMEOUT
+    _sampler_epoch = 0
+    
+    def _rebuild_sampler():
+        """Kill stuck actors and recreate the vLLM sampler from scratch."""
+        nonlocal condenser_sampler, _sampler_epoch
+        import ray
+        for actor in getattr(condenser_sampler, '_actors', []):
+            try:
+                ray.kill(actor, no_restart=True)
+            except Exception:
+                pass
+        logger.warning('[sampler] killed stuck actors, recreating sampler \u2026')
+        new = vLLMSampler(
+            model_id=CONDENSE_MODEL_ID,
+            engine_args={'gpu_memory_utilization': 0.8, 'max_model_len': COMPRESS_MAX_MODEL_LEN},
+            device_mesh=condenser_sampler_mesh,
+            remote_group='condenser_sampler',
+        )
+        new.set_template(
+            TEMPLATE_NAME, model_id=CONDENSE_MODEL_ID, enable_thinking=False,
+            truncation_strategy='delete', max_length=DATASET_MAX_TOKENS)
+        new._ray_get_timeout = SAMPLER_TIMEOUT
+        condenser_sampler = new
+        _sampler_epoch += 1
+        logger.warning('[sampler] sampler rebuilt successfully')
 
     # -------- OpenAI API client for fallback ---------------------------------
     api_client = OpenAIClient(
@@ -625,8 +652,10 @@ def train():
     # -------- Train loop -----------------------------------------------------
     def _sample_batch(raw_batch):
         """Compress via vLLM sampler; fall back to API on truncation."""
+        _t_enter = time.monotonic()
         compress_prompts, valid_indices, raw_pairs, prompt_queries, passthrough, schemas = \
             _build_compress_prompts(raw_batch)
+        _t_build = time.monotonic()
         if len(compress_prompts) < 4:
             return None
 
@@ -635,22 +664,29 @@ def train():
         sampler_pos = [ri for ri, p in enumerate(compress_prompts) if p is not None]
         if sampler_input:
             try:
-                with _sampler_lock:
-                    sampler_responses = condenser_sampler.sample(sampler_input, compress_params)
+                sampler_responses = condenser_sampler.sample(sampler_input, compress_params)
             except Exception as exc:
-                logger.warning(f'[sampler] encode overflow in batch, falling back to API: {exc}')
+                logger.warning(f'[sampler] error \u2192 API fallback: {exc}')
                 sampler_responses = [None] * len(sampler_input)
+                if 'Timeout' in type(exc).__name__:
+                    try:
+                        _rebuild_sampler()
+                    except Exception as re_exc:
+                        logger.error(f'[sampler] rebuild failed: {re_exc}')
         else:
             sampler_responses = []
+        _t_sample = time.monotonic()
+
         responses = [None] * len(compress_prompts)
         for resp, pos in zip(sampler_responses, sampler_pos):
             responses[pos] = resp
 
         # Extract decoded texts; detect truncations and fall back to API
-        decoded_texts: List[str] = []
+        decoded_texts: List[Optional[str]] = [None] * len(compress_prompts)
+        fallback_indices: List[int] = []
         for ri in range(len(compress_prompts)):
             if passthrough[ri] is not None:
-                decoded_texts.append(passthrough[ri])
+                decoded_texts[ri] = passthrough[ri]
                 continue
             resp = responses[ri]
             seq = resp.sequences[0] if resp and resp.sequences else None
@@ -661,26 +697,33 @@ def train():
                     text = text.replace(tok, '')
                 text = text.rstrip()
 
-            # Premature-EOS: model emits chat-template token mid-skeleton, vLLM reports
-            # stop_reason='stop' but the stripped text is structurally incomplete.
             needs_fallback = (not seq or seq.stop_reason == 'length'
                               or _is_truncated_compression(text, schemas[ri]))
             if not needs_fallback:
-                decoded_texts.append(text)
-                continue
-
-            api_result = _api_compress(api_client, compress_prompts[ri])
-            # Skip logging when the API itself produced truncated output: an incomplete
-            # gold answer would teach the condenser to imitate broken outputs.
-            if api_result and not _is_truncated_compression(api_result, schemas[ri]):
-                decoded_texts.append(api_result)
-                pair_idx = ri // 2
-                q_raw, c_raw = raw_pairs[pair_idx]
-                source_text = q_raw if ri % 2 == 0 else c_raw
-                _log_failure(source_text, prompt_queries[ri], api_result,
-                             valid_indices[pair_idx])
+                decoded_texts[ri] = text
             else:
-                decoded_texts.append('')
+                fallback_indices.append(ri)
+
+        _api_calls = len(fallback_indices)
+        if fallback_indices:
+            from concurrent.futures import as_completed
+            api_futures = {}
+            with ThreadPoolExecutor(max_workers=API_CONCURRENCY) as api_pool:
+                for ri in fallback_indices:
+                    api_futures[api_pool.submit(_api_compress, api_client, compress_prompts[ri])] = ri
+                for fut in as_completed(api_futures):
+                    ri = api_futures[fut]
+                    api_result = fut.result()
+                    if api_result and not _is_truncated_compression(api_result, schemas[ri]):
+                        decoded_texts[ri] = api_result
+                        pair_idx = ri // 2
+                        q_raw, c_raw = raw_pairs[pair_idx]
+                        source_text = q_raw if ri % 2 == 0 else c_raw
+                        _log_failure(source_text, prompt_queries[ri], api_result,
+                                     valid_indices[pair_idx])
+                    else:
+                        decoded_texts[ri] = ''
+        _t_api = time.monotonic()
 
         # Build embedding features from decoded texts
         emb_features: List[Dict[str, Any]] = []
@@ -695,68 +738,94 @@ def train():
             if feat_q and feat_c:
                 emb_features.append(feat_q)
                 emb_features.append(feat_c)
+        _t_feat = time.monotonic()
 
-        if len(emb_features) < 4:
-            return None
-        return emb_features
+        logger.info(
+            f'[prefetch] prompts={len(sampler_input)} api={_api_calls} feats={len(emb_features)} | '
+            f'build={_t_build - _t_enter:.1f}s '
+            f'vllm={_t_sample - _t_build:.1f}s '
+            f'api={_t_api - _t_sample:.1f}s feat={_t_feat - _t_api:.1f}s '
+            f'total={_t_feat - _t_enter:.1f}s')
+
+        _target = BATCH_SIZE * 2
+        minibatches = [emb_features[i:i + _target] for i in range(0, len(emb_features), _target)]
+        minibatches = [mb for mb in minibatches if len(mb) >= 4]
+        return minibatches if minibatches else None
 
     cur_step = RESUME_STEP
-    # Compute which epoch and how many batches to skip within that epoch
     _batches_per_epoch = len(dataloader)
-    _start_epoch = cur_step // _batches_per_epoch if cur_step > 0 else 0
-    _skip_batches_in_epoch = cur_step - _start_epoch * _batches_per_epoch if cur_step > 0 else 0
+    _steps_per_mega = PREFETCH_BATCH_MULTIPLIER
+    _start_epoch = cur_step // (_batches_per_epoch * _steps_per_mega) if cur_step > 0 else 0
+    _skip_batches_in_epoch = max(0, cur_step // _steps_per_mega - _start_epoch * _batches_per_epoch)
 
-    prefetch_executor = ThreadPoolExecutor(max_workers=PREFETCH_WORKERS)
+    _ema_prefetch = 0.0
+    _ema_train = 0.0
+    _ema_alpha = 0.1
+
+    prefetch_executor = ThreadPoolExecutor(max_workers=1)
     for epoch in range(_start_epoch, NUM_EPOCHS):
-        # Skip consumed samples for the resume epoch (shuffle order won't match
-        # exactly, but the correct number of samples is skipped).
         if _skip_batches_in_epoch > 0:
-            dataloader.skip_consumed_samples(_skip_batches_in_epoch * BATCH_SIZE)
+            dataloader.skip_consumed_samples(_skip_batches_in_epoch * _mega_batch_size)
         batch_iter = iter(dataloader)
-        # Reset skip after first resumed epoch
         _skip_batches_in_epoch = 0
-        prefetch_pool: deque = deque()
-        for _ in range(PREFETCH_WORKERS):
-            nb = next(batch_iter, None)
-            if nb is None:
-                break
-            prefetch_pool.append(prefetch_executor.submit(_sample_batch, nb))
 
-        for raw_batch in batch_iter:
-            emb_features = prefetch_pool.popleft().result() if prefetch_pool else None
-            prefetch_pool.append(prefetch_executor.submit(_sample_batch, raw_batch))
+        first = next(batch_iter, None)
+        future = prefetch_executor.submit(_sample_batch, first) if first else None
 
-            if emb_features is None:
+        for raw_mega_batch in batch_iter:
+            t0 = time.monotonic()
+            minibatches = future.result() if future else None
+            t_prefetch = time.monotonic() - t0
+            future = prefetch_executor.submit(_sample_batch, raw_mega_batch)
+
+            if not minibatches:
                 continue
 
-            model.forward_backward(inputs=emb_features, task='embedding')
-            model.clip_grad_and_step(gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS)
-            cur_step += 1
+            for mb in minibatches:
+                t1 = time.monotonic()
+                model.forward_backward(inputs=mb, task='embedding')
+                model.clip_grad_and_step(gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS)
+                t_train = time.monotonic() - t1
+                cur_step += 1
 
-            if cur_step % LOG_INTERVAL == 0:
-                metric = model.calculate_metric(is_training=True)
-                logger.info(
-                    f'Epoch {epoch} Step {cur_step}/{total_forward_steps}, metric: {metric}')
-                log_dict = {}
-                for k, v in metric.items():
-                    if not v:
-                        continue
-                    try:
-                        log_dict[k] = float(v)
-                    except (ValueError, TypeError):
-                        pass
-                log_dict['epoch'] = epoch
-                swanlab.log(log_dict, step=cur_step)
-            if cur_step % SAVE_INTERVAL == 0:
-                save_checkpoint(model, f'step_{cur_step}')
+                _ema_prefetch = _ema_alpha * t_prefetch + (1 - _ema_alpha) * _ema_prefetch if cur_step > RESUME_STEP + 1 else t_prefetch
+                _ema_train = _ema_alpha * t_train + (1 - _ema_alpha) * _ema_train if cur_step > RESUME_STEP + 1 else t_train
 
-        # # Drain remaining prefetched batches
-        # while prefetch_pool:
-        #     emb_features = prefetch_pool.popleft().result()
-        #     if emb_features is not None:
-        #         model.forward_backward(inputs=emb_features, task='embedding')
-        #         model.clip_grad_and_step()
-        #         cur_step += 1
+                if cur_step % LOG_INTERVAL == 0:
+                    metric = model.calculate_metric(is_training=True)
+                    _bottleneck = 'PREFETCH' if _ema_prefetch > _ema_train else 'TRAIN'
+                    logger.info(
+                        f'Epoch {epoch} Step {cur_step}/{total_forward_steps}, metric: {metric} | '
+                        f'prefetch={t_prefetch:.1f}s(ema {_ema_prefetch:.1f}) '
+                        f'train={t_train:.1f}s(ema {_ema_train:.1f}) '
+                        f'bottleneck={_bottleneck}')
+                    log_dict = {}
+                    for k, v in metric.items():
+                        if not v:
+                            continue
+                        try:
+                            log_dict[k] = float(v)
+                        except (ValueError, TypeError):
+                            pass
+                    log_dict['epoch'] = epoch
+                    log_dict['prefetch_sec'] = round(t_prefetch, 2)
+                    log_dict['train_sec'] = round(t_train, 2)
+                    swanlab.log(log_dict, step=cur_step)
+                if cur_step % SAVE_INTERVAL == 0:
+                    save_checkpoint(model, f'step_{cur_step}')
+                t_prefetch = 0.0
+
+        # Drain final mega-batch
+        if future:
+            minibatches = future.result()
+            future = None
+            if minibatches:
+                for mb in minibatches:
+                    model.forward_backward(inputs=mb, task='embedding')
+                    model.clip_grad_and_step(gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS)
+                    cur_step += 1
+                    if cur_step % SAVE_INTERVAL == 0:
+                        save_checkpoint(model, f'step_{cur_step}')
 
     prefetch_executor.shutdown(wait=False)
     save_checkpoint(model, 'last-checkpoint')

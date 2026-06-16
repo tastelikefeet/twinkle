@@ -48,15 +48,95 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 # ---------------------------------------------------------------------------
-# Reuse condenser prompts (single source of truth)
+# Compress prompts — MUST match train_embedding_full_ddp.py exactly.
 # ---------------------------------------------------------------------------
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE.parent / 'condenser'))
 sys.path.insert(0, str(_HERE))
-from make_condenser_dataset import (  # noqa: E402  (after sys.path tweak)
-    COMPRESS_SYSTEM,
-    COMPRESS_USER,
-)
+
+COMPRESS_SYSTEM = """\
+You are a compression and summary assistant. For the (query, source) pair, emit a Markdown \
+answer with TWO sections, designed to pair with the `extract_compressed` tool: \
+the reader absorbs `## Summary` directly, then calls `extract_compressed` \
+on any topic-key listed under `## More` to recover its \
+fuller content.
+
+  `## Summary`               \u2014 extreme-density text the reader reads directly.
+  `## More` \u2014 a topic index whose keys are valid arguments \
+to `extract_compressed` for recovering material not captured inline.
+
+Together the two sections must form a COMPLETE, NON-DISTORTING inventory of the \
+source for the query \u2014 nothing essential lost, nothing implied that the source \
+does not support. NO preamble, NO meta-commentary, NO code fences wrapping the \
+whole output.
+
+Output skeleton:
+
+## Summary
+Topic: <what the source is about + scope, one line>
+<dense body answering the query>
+
+## More
+- <topic-key>: <one-line hint of what is revealed when expanded>
+- ...
+
+Format selection for the inline body (pick the MOST COMPACT form per query, mix \
+when helpful):
+- Interface / signature \u2192 code notation directly: `func(a:int)->str`
+- Factual / entity \u2192 telegraphic prose; drop function words; \":\" for \"is\", \",\" \
+for \"has\"
+- Skill / how-to / usage \u2192 lead with `Use when: <trigger>`; numbered telegraphic \
+steps `1.do X 2.then Y`; close with `Output: <result>` when relevant
+- Procedural \u2192 numbered short steps
+- Analytical / design \u2192 hierarchical bullets with abbreviations
+
+`## Summary` rules:
+1. TOPIC LINE \u2014 line 1 is ALWAYS `Topic: <subject \u2014 scope>`, even when the \
+query is narrow. Anchors both the reader and the tool.
+2. DENSITY \u2014 every token in the body carries query-relevant signal; cut filler.
+3. PRIMARY-COMPLETE \u2014 never silently drop a fact essential to answering the \
+query. Anything cut for length MUST appear as a key under \
+`## More`.
+4. NON-MISLEADING \u2014 phrasing must not let the reader infer anything the source \
+does not support; partial truths that mislead are worse than honest omissions \
+flagged in the index.
+5. SELF-CONTAINED \u2014 the reader can act on the answer without re-opening the source.
+6. FAITHFUL \u2014 only content the source supports; no fabrication, no extrapolation.
+7. LANGUAGE \u2014 match the source language.
+8. NO outer code fences around the whole answer; no meta-commentary.
+
+`## More` rules (MANDATORY \u2014 this section is never omitted):
+1. FORMAT \u2014 each bullet is `- <topic-key>: <one-line hint>`:
+   \u2022 topic-key \u2014 short, unambiguous, grounded in source vocabulary so the \
+`extract_compressed` tool can locate the aspect (e.g. `decorators`, \
+`error handling`, `pitfalls`).
+   \u2022 hint \u2014 tells WHAT the reader gains by expanding (concrete numbers, code \
+listings, secondary cases, edge details, related context, \u2026); do NOT restate \
+the inline answer.
+2. CRITERION \u2014 each bullet names an aspect that EXISTS in the source but is \
+NOT fully captured inline. Material that genuinely fits inline without \
+distortion MUST NOT be duplicated here.
+3. FAITHFUL \u2014 hints must be grounded in the source; never speculate or invent.
+4. ORDER \u2014 by relevance to the query, then by importance.
+5. EMPTY CASE \u2014 if the source is so short / single-purpose that everything \
+fits inline, write a single line `- (none)`.
+
+Now begin.\
+"""
+
+COMPRESS_USER = (
+    'Downstream model will read your compressed block to decide whether to '
+    'expand it. Compress faithfully: preserve the passage topic + core facts. '
+    'Do NOT invent facts. Do NOT drop major facts. Do NOT write meta-commentary '
+    'about the Query (never write "Query info: absent", "no X mention", etc.); '
+    'if the passage does not address the Query, still summarize the passage. '
+    'CRITICAL LANGUAGE RULE: detect the dominant language of the Passage '
+    '(NOT the Query, NOT this instruction) and write the ENTIRE output in that '
+    'same language; English passage \u2192 English output, Chinese passage \u2192 '
+    'Chinese output, Japanese passage \u2192 Japanese output. NEVER translate, '
+    'NEVER mix languages, NEVER copy these instructions into the output.\n\n'
+    '## Query (ordering hint only \u2014 still summarize the whole passage)\n{query}\n\n'
+    '## Passage\n{text}')
+
 # Default dataset loader is the index-time corpus (broader retrieval profile);
 # pass --dataset-module dataset_think to fall back to the training mix.
 from dataset_index import get_dataset as _default_get_dataset  # noqa: E402
@@ -83,7 +163,7 @@ logger = get_logger()
 
 EMBED_MODEL_ID = os.environ.get(
     'EMBED_MODEL_ID',
-    '/mnt/workspace/yzhao/tastelikefeet/Qwen3.5-4B-QA-emb-v2',
+    'output/embedding_lora_transformers/step_4000',
 )
 CONDENSE_MODEL_ID = os.environ.get('CONDENSE_MODEL_ID', 'ms://twinkle-kit/Qwen3.5-4B-CM-v2')
 
@@ -531,8 +611,17 @@ def build_index(args: argparse.Namespace,
         if not rows:
             return
         # Phase 1 — compress query (RAG_QUERY_HINT) and cot (RAG_THINKING_HINT).
-        q_compressed = _resolve_compressed(
-            sampler, api, [r['query_raw'] for r in rows], RAG_QUERY_HINT)
+        # Short queries bypass condenser (passthrough) — matches training behaviour.
+        long_q_indices = [i for i, r in enumerate(rows) if len(r['query_raw']) >= MIN_TEXT_CHARS]
+        q_compressed: List[Optional[str]] = [None] * len(rows)
+        for i, r in enumerate(rows):
+            if len(r['query_raw']) < MIN_TEXT_CHARS:
+                q_compressed[i] = r['query_raw']
+        if long_q_indices:
+            long_results = _resolve_compressed(
+                sampler, api, [rows[i]['query_raw'] for i in long_q_indices], RAG_QUERY_HINT)
+            for idx, res in zip(long_q_indices, long_results):
+                q_compressed[idx] = res
         c_compressed = _resolve_compressed(
             sampler, api, [r['cot_raw'] for r in rows], RAG_THINKING_HINT)
         kept_rows: List[Dict[str, Any]] = []

@@ -700,7 +700,8 @@ def remote_function(dispatch: Union[Literal['slice', 'all', 'slice_dp'], Callabl
                     execute: Literal['first', 'peer', 'all'] = 'all',
                     collect: Union[Literal['none', 'flatten', 'mean', 'sum', 'first', 'last_pp'], Callable] = 'none',
                     sync: bool = False,
-                    lazy_collect: Optional[bool] = None):
+                    lazy_collect: Optional[bool] = None,
+                    timeout: Optional[float] = None):
     """Patch each method called from remote(which class should be decorated with `remote_class`) with this decorator.
 
     Args:
@@ -726,6 +727,7 @@ def remote_function(dispatch: Union[Literal['slice', 'all', 'slice_dp'], Callabl
         sync: If True, use synchronous execution (execute_all_sync) instead of async.
             Required for methods with NCCL collective operations (e.g., Megatron forward_backward).
         lazy_collect: Do lazy collect, this boolean value decides whether this function needs lazy collect. If setting to None, it will follow the global setting.
+        timeout: Timeout in seconds for ray.get() when collecting results. Instance attribute ``_ray_get_timeout`` overrides this.
     """ # noqa
 
     def decorator(func: Callable[..., T1]) -> Callable[..., T1]:
@@ -773,7 +775,9 @@ def remote_function(dispatch: Union[Literal['slice', 'all', 'slice_dp'], Callabl
 
                         result = execute_method(func.__name__, _workers_and_args)
                         # This is a result future, call it to get the actual result
-                        result_func = RayHelper.do_get_and_collect_func(_collect_func, collect, result, device_mesh)
+                        _rgt = getattr(self, '_ray_get_timeout', None) or timeout
+                        result_func = RayHelper.do_get_and_collect_func(
+                            _collect_func, collect, result, device_mesh, timeout=_rgt)
                         _local_lazy_collect = _lazy_collect
                         if func.__name__ == '__iter__':
                             # return self
