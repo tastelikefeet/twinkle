@@ -51,6 +51,7 @@ from peft import LoraConfig
 import twinkle
 from twinkle import DeviceMesh, DeviceGroup, get_device_placement, get_logger
 from twinkle.checkpoint_engine import CheckpointEngineManager
+from twinkle.cli import CLI
 from twinkle.data_format import SamplingParams
 from twinkle.dataloader import DataLoader
 from twinkle.dataset import DatasetMeta, LazyDataset
@@ -60,26 +61,27 @@ from twinkle.preprocessor.olympiad_bench import OlympiadBenchProcessor
 from twinkle.sampler import vLLMSampler
 
 logger = get_logger()
+args = CLI.from_args()
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-STUDENT_MODEL_ID = os.environ.get('STUDENT_MODEL_ID', 'ms://Qwen/Qwen3.5-4B')
-TEACHER_MODEL_ID = os.environ.get('TEACHER_MODEL_ID', 'ms://Qwen/Qwen3.5-9B')
-USE_MEGATRON = bool(int(os.environ.get('USE_MEGATRON', '1')))
+STUDENT_MODEL_ID = args.rl.student_model_id or 'ms://Qwen/Qwen3.5-4B'
+TEACHER_MODEL_ID = args.rl.teacher_model_id or 'ms://Qwen/Qwen3.5-9B'
+USE_MEGATRON = args.model.strategy != 'native_fsdp'
 
-MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 4))
-SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS', 2))
+MODEL_GPUS = args.infra.model_gpus or 4
+SAMPLER_GPUS = args.infra.sampler_gpus or 2
 NUM_GPUS = MODEL_GPUS + 2*SAMPLER_GPUS
 
-MAX_NEW_TOKENS = int(os.environ.get('MAX_NEW_TOKENS', 2048))
-BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 4))
-MAX_STEPS = int(os.environ.get('MAX_STEPS', 1000))
-LEARNING_RATE = float(os.environ.get('LR', 5e-5))
-N_SAMPLES = int(os.environ.get('N_SAMPLES', 1))
+MAX_NEW_TOKENS = args.sampling.max_tokens or 2048
+BATCH_SIZE = args.training.batch_size or 4
+MAX_STEPS = args.training.max_steps or 1000
+LEARNING_RATE = args.optimizer.learning_rate or 5e-5
+N_SAMPLES = args.sampling.num_samples
 
-GKD_BETA = float(os.environ.get('GKD_BETA', 0.5))
-GKD_TEMPERATURE = float(os.environ.get('GKD_TEMPERATURE', 1.0))
-GKD_TOPK = int(os.environ.get('GKD_TOPK', 64))
-ADAPTER_NAME = 'default'
+GKD_BETA = args.rl.gkd_beta
+GKD_TEMPERATURE = args.rl.gkd_temperature
+GKD_TOPK = args.rl.gkd_topk
+ADAPTER_NAME = args.lora.adapter_name or 'default'
 
 # OlympiadBench subsets
 SUBSETS = [

@@ -48,6 +48,7 @@ from peft import LoraConfig
 
 import twinkle
 from twinkle import DeviceGroup, DeviceMesh, get_device_placement, get_logger
+from twinkle.cli import CLI
 from twinkle.data_format import Trajectory
 from twinkle.dataloader import DataLoader
 from twinkle.dataset import Dataset, DatasetMeta
@@ -57,23 +58,24 @@ from twinkle.preprocessor import EmojiDPOProcessor
 from twinkle.processor import InputProcessor
 
 logger = get_logger()
+args = CLI.from_args()
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-MODEL_ID = os.environ.get('MODEL_ID', 'ms://Qwen/Qwen3.5-4B')
-DATASET_ID = os.environ.get('DATASET_ID', 'ms://hjh0119/shareAI-Llama3-DPO-zh-en-emoji')
+MODEL_ID = args.model.model_id or 'ms://Qwen/Qwen3.5-4B'
+DATASET_ID = args.dataset.dataset_id or 'ms://hjh0119/shareAI-Llama3-DPO-zh-en-emoji'
 
-MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 2))
+MODEL_GPUS = args.infra.model_gpus or 2
 
-BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 8))  # Number of preference pairs
-GRADIENT_ACCUMULATION_STEPS = int(os.environ.get('GRADIENT_ACCUMULATION_STEPS', 2))
-LEARNING_RATE = float(os.environ.get('LR', 1e-4))  # LoRA DPO requires higher LR (1e-4 to 3e-4)
-DPO_BETA = float(os.environ.get('DPO_BETA', 0.1))
-SFT_WEIGHT = float(os.environ.get('SFT_WEIGHT', 1.0))  # SFT loss weight for regularization
-LOSS_TYPE = os.environ.get('LOSS_TYPE', 'sigmoid')  # sigmoid, hinge, ipo
-SAVE_STEPS = int(os.environ.get('SAVE_STEPS', 100))
-MAX_LENGTH = int(os.environ.get('MAX_LENGTH', 2048))
-ADAPTER_NAME = 'default_0'
-SYSTEM_PROMPT = os.environ.get('SYSTEM_PROMPT', 'You are a helpful assistant.')
+BATCH_SIZE = args.training.batch_size or 8
+GRADIENT_ACCUMULATION_STEPS = args.training.gradient_accumulation_steps or 2
+LEARNING_RATE = args.optimizer.learning_rate or 1e-4
+DPO_BETA = args.loss.beta
+SFT_WEIGHT = args.loss.sft_weight
+LOSS_TYPE = args.loss.loss_type
+SAVE_STEPS = args.training.save_steps or 100
+MAX_LENGTH = args.template.max_length
+ADAPTER_NAME = args.lora.adapter_name or 'default_0'
+SYSTEM_PROMPT = args.template.default_system or 'You are a helpful assistant.'
 
 
 def create_dpo_dataset():

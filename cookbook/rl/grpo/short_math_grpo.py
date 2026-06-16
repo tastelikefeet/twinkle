@@ -14,6 +14,7 @@ import twinkle
 from twinkle import DeviceMesh, DeviceGroup, get_device_placement, get_logger
 from twinkle.advantage import GRPOAdvantage
 from twinkle.checkpoint_engine import CheckpointEngineManager
+from twinkle.cli import CLI
 from twinkle.data_format import SamplingParams
 from twinkle.dataloader import DataLoader
 from twinkle.dataset import Dataset, DatasetMeta
@@ -26,26 +27,27 @@ from twinkle.sampler import vLLMSampler
 from twinkle.preprocessor.llm import GSM8KProcessor
 
 logger = get_logger()
+args = CLI.from_args()
 
 # ========== Configuration ==========
-MODEL_ID = os.environ.get('MODEL_ID', 'ms://Qwen/Qwen3.5-4B')
-USE_MEGATRON = bool(int(os.environ.get('USE_MEGATRON', '1')))
+MODEL_ID = args.model.model_id or 'ms://Qwen/Qwen3.5-4B'
+USE_MEGATRON = args.model.strategy != 'native_fsdp'
 
-MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 4))
-SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS', 4))
+MODEL_GPUS = args.infra.model_gpus or 4
+SAMPLER_GPUS = args.infra.sampler_gpus or 4
 NUM_GPUS = MODEL_GPUS + SAMPLER_GPUS
 
-NUM_GENERATIONS = int(os.environ.get('NUM_GENERATIONS', 8))
-MAX_NEW_TOKENS = int(os.environ.get('MAX_NEW_TOKENS', 4096))
-LEARNING_RATE = float(os.environ.get('LR', 1e-5))
-MAX_STEPS = int(os.environ.get('MAX_STEPS', 1000))
-BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 8))
-MINI_BATCH_SIZE = int(os.environ.get('MINI_BATCH_SIZE', 8))
-MICRO_BATCH_SIZE = int(os.environ.get('MICRO_BATCH_SIZE', 2))
-GRADIENT_ACCUMULATION_STEPS = int(os.environ.get('GRADIENT_ACCUMULATION_STEPS', 1))
-ADAPTER_NAME = 'default'
-SAVE_STEPS = int(os.environ.get('SAVE_STEPS', 1000))
-LORA_RANK = int(os.environ.get('LORA_RANK', 16))
+NUM_GENERATIONS = args.rl.num_generations or 8
+MAX_NEW_TOKENS = args.sampling.max_tokens or 4096
+LEARNING_RATE = args.optimizer.learning_rate or 1e-5
+MAX_STEPS = args.training.max_steps or 1000
+BATCH_SIZE = args.training.batch_size or 8
+MINI_BATCH_SIZE = args.training.mini_batch_size or 8
+MICRO_BATCH_SIZE = args.training.micro_batch_size or 2
+GRADIENT_ACCUMULATION_STEPS = args.training.gradient_accumulation_steps or 1
+ADAPTER_NAME = args.lora.adapter_name or 'default'
+SAVE_STEPS = args.training.save_steps or 1000
+LORA_RANK = args.lora.lora_r or 16
 
 SYSTEM_PROMPT = ('You are a helpful math assistant. Solve the problem with minimal but correct reasoning '
                  'and put your final answer within \\boxed{}.')

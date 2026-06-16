@@ -14,6 +14,7 @@ import twinkle
 from twinkle import DeviceMesh, DeviceGroup, get_device_placement, get_logger
 from twinkle.advantage import GRPOAdvantage
 from twinkle.checkpoint_engine import CheckpointEngineManager
+from twinkle.cli import CLI
 from twinkle.data_format import SamplingParams
 from twinkle.dataloader import DataLoader
 from twinkle.dataset import DatasetMeta, LazyDataset
@@ -28,27 +29,28 @@ from twinkle.reward.olympiad_bench import (
 from twinkle.sampler import vLLMSampler
 
 logger = get_logger()
+args = CLI.from_args()
 
 # Model configuration
-MODEL_ID = os.environ.get('MODEL_ID', 'ms://Qwen/Qwen3.5-4B')
-USE_MEGATRON = bool(int(os.environ.get('USE_MEGATRON', '1')))
+MODEL_ID = args.model.model_id or 'ms://Qwen/Qwen3.5-4B'
+USE_MEGATRON = args.model.strategy != 'native_fsdp'
 
 # GPU configuration
-MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 4))
-SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS', 4))
+MODEL_GPUS = args.infra.model_gpus or 4
+SAMPLER_GPUS = args.infra.sampler_gpus or 4
 NUM_GPUS = MODEL_GPUS + SAMPLER_GPUS
 
 # Training hyperparameters
-NUM_GENERATIONS = int(os.environ.get('NUM_GENERATIONS', 8))
-MAX_NEW_TOKENS = int(os.environ.get('MAX_NEW_TOKENS', 4096))
-LEARNING_RATE = float(os.environ.get('LR', 1e-5))
-MAX_STEPS = int(os.environ.get('MAX_STEPS', 1000))
-BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 4))
-MINI_BATCH_SIZE = int(os.environ.get('MINI_BATCH_SIZE', 4))
-MICRO_BATCH_SIZE = int(os.environ.get('MICRO_BATCH_SIZE', 1))
-GRADIENT_ACCUMULATION_STEPS = int(os.environ.get('GRADIENT_ACCUMULATION_STEPS', 1))
-ADAPTER_NAME = 'default'
-SAVE_STEPS = int(os.environ.get('SAVE_STEPS', 50))
+NUM_GENERATIONS = args.rl.num_generations or 8
+MAX_NEW_TOKENS = args.sampling.max_tokens or 4096
+LEARNING_RATE = args.optimizer.learning_rate or 1e-5
+MAX_STEPS = args.training.max_steps or 1000
+BATCH_SIZE = args.training.batch_size or 4
+MINI_BATCH_SIZE = args.training.mini_batch_size or 4
+MICRO_BATCH_SIZE = args.training.micro_batch_size or 1
+GRADIENT_ACCUMULATION_STEPS = args.training.gradient_accumulation_steps or 1
+ADAPTER_NAME = args.lora.adapter_name or 'default'
+SAVE_STEPS = args.training.save_steps or 50
 
 # Dataset configuration
 SUBSETS = [

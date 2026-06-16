@@ -52,7 +52,7 @@ def evaluate(model):
 
 
 def train():
-    train_samples = int(args.extra.get('train_samples', 1000))
+    train_samples = args.training.train_samples or 1000
     dataset = build_dataset(train_samples)
     dataloader = DataLoader(dataset=dataset, batch_size=args.training.batch_size)
     model = TransformersModel(model_id=args.model.model_id)

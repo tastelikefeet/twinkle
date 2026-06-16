@@ -7,6 +7,7 @@ import twinkle
 from twinkle import DeviceMesh, DeviceGroup, get_device_placement, get_logger
 from twinkle.advantage import GRPOAdvantage
 from twinkle.checkpoint_engine import CheckpointEngineManager
+from twinkle.cli import CLI
 from twinkle.data_format import SamplingParams
 from twinkle.dataloader import DataLoader
 from twinkle.dataset import Dataset, DatasetMeta
@@ -19,24 +20,25 @@ from twinkle.metric import CompletionRewardMetric
 from twinkle.preprocessor.llm import GSM8KProcessor
 
 logger = get_logger()
+args = CLI.from_args()
 
-MODEL_ID = os.environ.get('MODEL_ID', 'ms://Qwen/Qwen3.5-4B')
-USE_MEGATRON = bool(int(os.environ.get('USE_MEGATRON', '0')))
+MODEL_ID = args.model.model_id or 'ms://Qwen/Qwen3.5-4B'
+USE_MEGATRON = args.model.strategy != 'native_fsdp'
 
-MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 4))
-SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS',4))
+MODEL_GPUS = args.infra.model_gpus or 4
+SAMPLER_GPUS = args.infra.sampler_gpus or 4
 NUM_GPUS = MODEL_GPUS + SAMPLER_GPUS
 
-NUM_GENERATIONS = int(os.environ.get('NUM_GENERATIONS', 8))
-MAX_NEW_TOKENS = int(os.environ.get('MAX_NEW_TOKENS', 4096))
-LEARNING_RATE = float(os.environ.get('LR', 1e-5))
-MAX_STEPS = int(os.environ.get('MAX_STEPS', 200))
-BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 8)) # global prompt-level, global completion-level batch size = BATCH_SIZE * num_generations * dp_size
-MINI_BATCH_SIZE = int(os.environ.get('MINI_BATCH_SIZE', 8)) # global completion-level mini-batch-size
-MICRO_BATCH_SIZE = int(os.environ.get('MICRO_BATCH_SIZE', 2)) # per-device-micro-batch-size (completion-level), batch_size in forward_backward
-GRADIENT_ACCUMULATION_STEPS = int(os.environ.get('GRADIENT_ACCUMULATION_STEPS', 1))
-ADAPTER_NAME = 'default'
-SAVE_STEPS = int(os.environ.get('SAVE_STEPS', 50))
+NUM_GENERATIONS = args.rl.num_generations or 8
+MAX_NEW_TOKENS = args.sampling.max_tokens or 4096
+LEARNING_RATE = args.optimizer.learning_rate or 1e-5
+MAX_STEPS = args.training.max_steps or 200
+BATCH_SIZE = args.training.batch_size or 8
+MINI_BATCH_SIZE = args.training.mini_batch_size or 8
+MICRO_BATCH_SIZE = args.training.micro_batch_size or 2
+GRADIENT_ACCUMULATION_STEPS = args.training.gradient_accumulation_steps or 1
+ADAPTER_NAME = args.lora.adapter_name or 'default'
+SAVE_STEPS = args.training.save_steps or 50
 
 def create_gsm8k_dataset():
     dataset = Dataset(DatasetMeta('ms://modelscope/gsm8k', subset_name='main', split='train'))

@@ -45,6 +45,7 @@ class LoraArgs:
     lora_dropout: float = 0.05
     lora_target_modules: list[str] | None = None
     adapter_name: str = 'default'
+    lora_path: str | None = None
 
 
 @dataclass
@@ -83,6 +84,7 @@ class TrainingArgs:
     log_interval: int = 10
     eval_interval: int | None = None
     eval_samples: int | None = None
+    train_samples: int | None = None
     resume_from_checkpoint: str | None = None
     resume_only_model: bool = False
     ignore_data_skip: bool = False
@@ -116,9 +118,11 @@ class SchedulerArgs:
 @dataclass
 class LossArgs:
     loss_cls: str = 'CrossEntropyLoss'
+    loss_type: str = 'sigmoid'
     epsilon: float = 0.2
     epsilon_high: float | None = None
-    beta: float = 0.0
+    beta: float = 0.1
+    sft_weight: float = 1.0
     entropy_coef: float = 0.0
     ignore_index: int = -100
 
@@ -154,6 +158,7 @@ class InfraArgs:
     ncpu_proc_per_node: int = 8
     model_gpus: int | None = None
     sampler_gpus: int | None = None
+    ref_model_gpus: int | None = None
     world_size: int | None = None
     dp_size: int | None = None
     fsdp_size: int | None = None
@@ -184,6 +189,11 @@ class RLArgs:
     advantage_type: str = 'GRPOAdvantage'
     advantage_scale: Literal['group', 'batch', 'none'] = 'group'
     reward_fns: list[str] | None = None
+    student_model_id: str | None = None
+    teacher_model_id: str | None = None
+    gkd_beta: float = 0.5
+    gkd_temperature: float = 1.0
+    gkd_topk: int = 64
 
 
 @dataclass
@@ -191,6 +201,7 @@ class CheckpointArgs:
     save_optimizer: bool = True
     merge_and_sync: bool = True
     platform: str = 'GPU'
+    lora_sync_dir: str | None = None
 
 
 # ────────────────────────────────────────────────────────────────────────────────
