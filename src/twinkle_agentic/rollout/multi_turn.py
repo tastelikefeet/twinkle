@@ -491,8 +491,10 @@ class MultiTurnRollout(Rollout):
             mm = result['mm_token_type_ids']
             if not isinstance(mm, torch.Tensor):
                 mm = torch.as_tensor(mm)
-            pad = torch.zeros((mm.shape[0], len(bridge_ids)), dtype=mm.dtype, device=mm.device)
-            result['mm_token_type_ids'] = torch.cat([mm, pad], dim=1)
+            # Pad along the last (sequence) dim — handles 1D [T] and 2D [1, T] uniformly.
+            leading_shape = mm.shape[:-1]
+            pad = torch.zeros((*leading_shape, len(bridge_ids)), dtype=mm.dtype, device=mm.device)
+            result['mm_token_type_ids'] = torch.cat([mm, pad], dim=-1)
 
         # Replay the post pipeline: refresh attention_mask / position_ids /
         # length and re-roll labels back into output/shifted order.

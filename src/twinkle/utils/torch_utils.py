@@ -96,7 +96,7 @@ def selective_log_softmax(logits, index, return_entropy: bool = False):
                                           'under vocab tensor parallelism (TP>1).')
             # clone to avoid modifying the original logits
             return _vocab_parallel_selective_log_softmax(logits.clone(), index)
-    except (ImportError, AssertionError, OSError):
+    except (ImportError, AssertionError, OSError, RuntimeError):
         pass
 
     if logits.dtype in [torch.float32, torch.float64]:
@@ -352,8 +352,8 @@ def split_cp_inputs(inputs: 'torch.Tensor', cu_seqlens: Optional['torch.Tensor']
             val = inputs[tuple(slices)]
         view_shape = (*inputs.shape[:dim], 2 * cp_size, val.shape[dim] // (2 * cp_size), *inputs.shape[dim + 1:])
         val = val.view(view_shape)
-        index = torch.tensor([cp_rank, (2 * cp_size - cp_rank - 1)], device='cpu',
-                             pin_memory=True).cuda(non_blocking=True)
+        index = torch.tensor([cp_rank, (2 * cp_size - cp_rank - 1)],
+                             device=inputs.device, dtype=torch.long)
         val = val.index_select(dim, index)
         view_shape = (*inputs.shape[:dim], -1, *inputs.shape[dim + 1:])
         new_inputs.append(val.view(view_shape))
