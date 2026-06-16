@@ -77,7 +77,7 @@ class MultiTurnRollout(Rollout):
         self,
         sampler,
         template: Template,
-        tool_manager: ToolManager,
+        tool_manager: Optional[ToolManager] = None,
         sampling_params: Optional[SamplingParams] = None,
         max_turns: int = 6,
         max_trajectory_tokens: Optional[int] = None,
@@ -88,8 +88,6 @@ class MultiTurnRollout(Rollout):
         super().__init__()
         if template is None:
             raise ValueError('MultiTurnRollout requires a local Template instance')
-        if tool_manager is None:
-            raise ValueError('MultiTurnRollout requires a ToolManager')
         if max_turns < 1:
             raise ValueError(f'max_turns must be >= 1, got {max_turns}')
         if max_trajectory_tokens is not None and max_trajectory_tokens < 1:
@@ -257,6 +255,10 @@ class MultiTurnRollout(Rollout):
     @staticmethod
     def _resolve_tool_managers(arg, n: int) -> List[ToolManager]:
         """Broadcast a single ``ToolManager`` or validate a per-trajectory list."""
+        if arg is None:
+            raise ValueError(
+                'tool_manager is required but was not provided. '
+                'Pass it at construction time or as a per-call kwarg.')
         if isinstance(arg, list):
             if len(arg) != n:
                 raise ValueError(f'per-call tool_manager list length ({len(arg)}) does '
