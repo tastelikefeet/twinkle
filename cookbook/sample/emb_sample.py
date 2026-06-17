@@ -32,7 +32,7 @@ logger = get_logger()
 
 # -- Config -------------------------------------------------------------------
 CONDENSE_MODEL_ID = os.environ.get('CONDENSE_MODEL_ID', 'ms://twinkle-kit/Qwen3.5-4B-CM-v2')
-EMB_MODEL_ID = os.environ.get('EMB_MODEL', 'ms://twinkle-kit/Qwen3.5-4B-QA-emb')
+EMB_MODEL_ID = os.environ.get('EMB_MODEL', 'output/embedding_lora_transformers/step_8000')
 SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS', 1))
 EMB_GPUS = int(os.environ.get('EMB_GPUS', 1))
 EMB_MAX_LENGTH = 8192
