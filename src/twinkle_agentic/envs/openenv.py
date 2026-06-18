@@ -3,7 +3,7 @@ import importlib
 import json
 import importlib.util
 import os
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Callable, Dict, List, Optional, Type
 from twinkle.utils import get_logger
 from twinkle.data_format import Trajectory
 from twinkle.data_format.message import Tool as ToolInfo
@@ -97,6 +97,7 @@ class OpenEnv(Env):
         env_cls: Any = None,
         env_kwargs: Optional[Dict[str, Any]] = None,
         tool_schema: Optional[List[ToolInfo]] = None,
+        action_mapper: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None,
     ):
         # Resolve env_cls
         if env_cls is None:
@@ -109,6 +110,7 @@ class OpenEnv(Env):
         self._base_url = base_url
         self._env_kwargs = env_kwargs or {}
         self._tool_schema = tool_schema
+        self._action_mapper = action_mapper
         self._sync_client = None
         self._episode_reward: float = 0.0
 
@@ -160,7 +162,10 @@ class OpenEnv(Env):
         """
         self._ensure_client()
         try:
-            action = {'tool_name': tool_name, 'arguments': arguments}
+            if self._action_mapper is not None:
+                action = self._action_mapper(tool_name, arguments)
+            else:
+                action = {'tool_name': tool_name, 'arguments': arguments}
             result = self._sync_client.step(action)
 
             obs = self._format_observation(result)

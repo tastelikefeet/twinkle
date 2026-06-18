@@ -46,7 +46,7 @@ args = CLI.from_args()
 
 # ========== Configuration ==========
 MODEL_ID = args.model.model_id or 'ms://Qwen/Qwen3.5-4B'
-USE_MEGATRON = args.model.strategy != 'native_fsdp'
+USE_MEGATRON = False
 
 MODEL_GPUS = args.infra.model_gpus or 4
 SAMPLER_GPUS = args.infra.sampler_gpus or 4
@@ -95,6 +95,21 @@ BLACKJACK_TOOL_SCHEMA = [
 
 TOOL_SCHEMA = BLACKJACK_TOOL_SCHEMA
 
+# Action name → OpenSpiel action_id mapping for blackjack.
+# OpenSpiel blackjack: 0 = HIT, 1 = STAND
+BLACKJACK_ACTION_MAP = {'hit': 0, 'stand': 1}
+
+
+def blackjack_action_mapper(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """Map tool calls to OpenSpielAction format.
+
+    Converts  play(action='hit')  →  {action_id: 0, game_name: 'blackjack'}
+    """
+    action_str = str(arguments.get('action', 'stand')).lower().strip()
+    action_id = BLACKJACK_ACTION_MAP.get(action_str, 1)  # default STAND
+    return {'action_id': action_id, 'game_name': 'blackjack'}
+
+
 SYSTEM_PROMPT = """You are a skilled blackjack player. You will be told your current hand and the dealer's visible card.
 
 Your goal is to win the game by getting as close to 21 as possible without going over.
@@ -109,13 +124,25 @@ Use the `play` tool to take actions. Always reason briefly before acting."""
 
 
 # ========== Environment Setup ==========
-def create_env_and_tools(env_url: str, tool_schema: List[Dict]) -> Tuple[OpenEnv, List[EnvTool], ToolManager]:
+def create_env_and_tools(
+    env_url: str,
+    tool_schema: List[Dict],
+    action_mapper=None,
+) -> Tuple[OpenEnv, List[EnvTool], ToolManager]:
     """Create an OpenEnv instance with associated tools and manager.
+
+    Args:
+        env_url: OpenEnv server URL.
+        tool_schema: Tool definitions for the environment.
+        action_mapper: Optional callable that maps (tool_name, arguments)
+            to the server-specific action dict. Required when the env
+            server uses a different action schema than the generic
+            {tool_name, arguments} format (e.g. OpenSpiel).
 
     Returns:
         Tuple of (env, env_tools, tool_manager).
     """
-    env = OpenEnv(base_url=env_url, tool_schema=tool_schema)
+    env = OpenEnv(base_url=env_url, tool_schema=tool_schema, action_mapper=action_mapper)
     env_tools = EnvTool.from_env(env)
     tool_manager = ToolManager(env_tools)
     return env, env_tools, tool_manager
@@ -126,6 +153,7 @@ def prepare_trajectories(
     env_url: str,
     tool_schema: List[Dict],
     system_prompt: str,
+    action_mapper=None,
 ) -> Tuple[List[Dict[str, Any]], List[ToolManager], List[List[EnvTool]]]:
     """Create and reset environments, build initial trajectories.
 
@@ -148,7 +176,7 @@ def prepare_trajectories(
     env_tools_list = []
 
     for _ in range(n_trajectories):
-        env, env_tools, tm = create_env_and_tools(env_url, tool_schema)
+        env, env_tools, tm = create_env_and_tools(env_url, tool_schema, action_mapper=action_mapper)
         # Reset env to start a new episode
         initial_result = env.reset()
         initial_obs = initial_result.observation
@@ -256,6 +284,7 @@ def main():
 
     # Local template for MultiTurnRollout bridge computation
     rollout_template = Qwen3_5Template(MODEL_ID, max_length=8192, enable_thinking=False)
+    rollout_template.truncation_strategy = 'delete'
 
     ckpt_manager = CheckpointEngineManager(model=model, sampler=sampler)
 
@@ -294,6 +323,7 @@ def main():
             env_url=ENV_URL,
             tool_schema=TOOL_SCHEMA,
             system_prompt=SYSTEM_PROMPT,
+            action_mapper=blackjack_action_mapper,
         )
 
         # 2. Sync model weights to sampler
@@ -340,14 +370,47 @@ def main():
         logger.info(f'[Step {optim_step}] avg_reward={avg_reward:.3f}, avg_turns={avg_turns:.1f}')
 
         # 7. Forward-backward with mini-batches
-        all_input_data: List[Dict[str, Any]] = list(all_trajectories)
+        # Filter out oversized/truncated trajectories (strategy='delete'),
+        # keep only those with valid completions and ensure >= MODEL_GPUS inputs.
+        all_input_data: List[Dict[str, Any]] = []
+        filtered_old_logps: List[List[float]] = []
+        filtered_advantages: List[float] = []
+        max_len = rollout_template.max_length or float('inf')
+        for i, traj in enumerate(all_trajectories):
+            traj_len = len(traj.get('input_ids') or traj.get('labels') or [])
+            comp_len = sum(1 for l in (traj.get('labels') or []) if l != -100)
+            if traj_len > max_len or comp_len == 0:
+                continue
+            all_input_data.append(traj)
+            filtered_old_logps.append(all_old_logps[i])
+            filtered_advantages.append(advantages[i])
+
+        if len(all_input_data) < MODEL_GPUS:
+            logger.warning(f'[Step {optim_step}] Only {len(all_input_data)} valid trajectories '
+                           f'after filtering (need >= {MODEL_GPUS}), skipping this batch.')
+            cleanup_envs(env_tools_list)
+            continue
+
+        all_old_logps = filtered_old_logps
+        advantages = filtered_advantages
         total_completions = len(all_input_data)
+        logger.info(f'[Step {optim_step}] {total_completions}/{n_trajectories} trajectories '
+                    f'passed length filter (max_len={max_len})')
 
         for mb_start in range(0, total_completions, MINI_BATCH_SIZE):
             mb_end = min(mb_start + MINI_BATCH_SIZE, total_completions)
             mb_inputs = all_input_data[mb_start:mb_end]
             mb_old_logps = all_old_logps[mb_start:mb_end]
             mb_advantages = advantages[mb_start:mb_end]
+
+            # Print trajectory lengths before forward_backward
+            traj_lengths = []
+            for idx, traj in enumerate(mb_inputs):
+                labels = traj.get('labels') or traj.get('input_ids') or []
+                traj_lengths.append(len(labels))
+            logger.info(f'[Step {optim_step}] mini-batch [{mb_start}:{mb_end}] '
+                        f'n_inputs={len(mb_inputs)}, dp_world={MODEL_GPUS}, '
+                        f'traj_lengths={traj_lengths}')
 
             model.forward_backward(
                 inputs=mb_inputs,
