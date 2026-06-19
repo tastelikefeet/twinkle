@@ -31,14 +31,14 @@ BACKEND: Literal['transformers', 'megatron'] = 'transformers'
 MODEL_ID = os.environ.get('MODEL_ID', 'ms://Qwen/Qwen3.5-4B')
 
 # -- GPU placement ------------------------------------------------------------
-MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 4))
+MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 8))
 
 # -- Embedding training hyper-params ------------------------------------------
 EMB_MAX_LENGTH = 8192
 HARD_NEGATIVES = None
 TEMPERATURE = 0.07
 
-BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 16))
+BATCH_SIZE = int(os.environ.get('BATCH_SIZE', 64))
 LEARNING_RATE = 1e-5
 GRADIENT_ACCUMULATION_STEPS = 1
 LOG_INTERVAL = 2
@@ -46,7 +46,7 @@ SAVE_INTERVAL = 2000
 NUM_EPOCHS = 1
 
 # -- Dataset path (output of make_embedding_dataset.py) -----------------------
-DATASET_PATH = os.environ.get('EMB_DATASET_PATH', './output/embedding_dataset/dataset')
+DATASET_PATH = os.environ.get('EMB_DATASET_PATH', 'ms://twinkle-kit/qth-embedding')
 MIX_SHUFFLE_SEED = 42
 
 # -- Resume from checkpoint ---------------------------------------------------
@@ -173,15 +173,13 @@ def train():
     twinkle.initialize(mode='ray', nproc_per_node=MODEL_GPUS, groups=device_groups)
 
     # -- Load pre-compressed dataset ------------------------------------------
-    from datasets import Dataset as HFDataset
+    from twinkle.dataset import Dataset as TwinkleDataset, DatasetMeta
     logger.info(f'[data] loading pre-compressed dataset from {DATASET_PATH}')
-    dataset = HFDataset.load_from_disk(DATASET_PATH)
-    dataset = dataset.shuffle(seed=MIX_SHUFFLE_SEED)
+    dataset = TwinkleDataset(DatasetMeta(dataset_id=DATASET_PATH), download_mode='force_redownload')
+    dataset = dataset.dataset.shuffle(seed=MIX_SHUFFLE_SEED)
     logger.info(f'[data] {len(dataset)} rows loaded')
 
     # -- Compute steps --------------------------------------------------------
-    _target = BATCH_SIZE * 2  # features per minibatch (anchor + positive pairs)
-    # Estimate: each row produces ~2 features (+ negatives); conservative estimate
     rows_per_step = BATCH_SIZE
     total_steps = (len(dataset) // rows_per_step) * NUM_EPOCHS
     optimizer_steps = total_steps // GRADIENT_ACCUMULATION_STEPS
@@ -234,48 +232,33 @@ def train():
             if len(features) < 4:
                 continue
 
-            # Split into minibatches at group boundaries
-            group_starts = [i for i, f in enumerate(features) if f.get('labels') == [1]]
-            minibatches = []
-            mb_start_idx = 0
-            for gi in range(len(group_starts)):
-                pos = group_starts[gi]
-                if pos - group_starts[mb_start_idx] >= _target:
-                    minibatches.append(features[group_starts[mb_start_idx]:pos])
-                    mb_start_idx = gi
-            if mb_start_idx < len(group_starts):
-                minibatches.append(features[group_starts[mb_start_idx]:])
-            minibatches = [mb for mb in minibatches if len(mb) >= 4]
+            t1 = time.monotonic()
+            model.forward_backward(inputs=features, task='embedding')
+            model.clip_grad_and_step(
+                gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS)
+            t_train = time.monotonic() - t1
+            cur_step += 1
 
-            for mb in minibatches:
-                t1 = time.monotonic()
-                model.forward_backward(inputs=mb, task='embedding')
-                model.clip_grad_and_step(
-                    gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS)
-                t_train = time.monotonic() - t1
-                cur_step += 1
-
-                if cur_step % LOG_INTERVAL == 0:
-                    metric = model.calculate_metric(is_training=True)
-                    logger.info(
-                        f'Epoch {epoch} Step {cur_step}/{total_steps}, '
-                        f'metric: {metric} | '
-                        f'encode={t_encode:.2f}s train={t_train:.2f}s')
-                    log_dict = {}
-                    for k, v in metric.items():
-                        if not v:
-                            continue
-                        try:
-                            log_dict[k] = float(v)
-                        except (ValueError, TypeError):
-                            pass
-                    log_dict['epoch'] = epoch
-                    log_dict['encode_sec'] = round(t_encode, 3)
-                    log_dict['train_sec'] = round(t_train, 3)
-                    swanlab.log(log_dict, step=cur_step)
-                if cur_step % SAVE_INTERVAL == 0:
-                    save_checkpoint(model, f'step_{cur_step}')
-                t_encode = 0.0
+            if cur_step % LOG_INTERVAL == 0:
+                metric = model.calculate_metric(is_training=True)
+                logger.info(
+                    f'Epoch {epoch} Step {cur_step}/{total_steps}, '
+                    f'metric: {metric} | '
+                    f'encode={t_encode:.2f}s train={t_train:.2f}s')
+                log_dict = {}
+                for k, v in metric.items():
+                    if not v:
+                        continue
+                    try:
+                        log_dict[k] = float(v)
+                    except (ValueError, TypeError):
+                        pass
+                log_dict['epoch'] = epoch
+                log_dict['encode_sec'] = round(t_encode, 3)
+                log_dict['train_sec'] = round(t_train, 3)
+                swanlab.log(log_dict, step=cur_step)
+            if cur_step % SAVE_INTERVAL == 0:
+                save_checkpoint(model, f'step_{cur_step}')
 
     save_checkpoint(model, 'last-checkpoint')
     logger.info(f'Training complete. Final step: {cur_step}')

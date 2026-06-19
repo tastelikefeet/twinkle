@@ -60,7 +60,7 @@ COMPRESS_API_KEY = os.environ.get('COMPRESS_API_KEY', '')
 COMPRESS_BASE_URL = os.environ.get('COMPRESS_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1')
 COMPRESS_MODEL = os.environ.get('COMPRESS_MODEL', 'qwen3.7-max')
 API_MIN_INTERVAL = float(os.environ.get('API_MIN_INTERVAL', 0.1))
-API_CONCURRENCY = int(os.environ.get('API_CONCURRENCY', 32))
+API_CONCURRENCY = int(os.environ.get('API_CONCURRENCY', 24))
 SAMPLER_TIMEOUT = float(os.environ.get('SAMPLER_TIMEOUT', 300))
 
 # -- Output -------------------------------------------------------------------
