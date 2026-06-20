@@ -20,6 +20,7 @@ dependencies = [
 
 [project.scripts]
 twinkle-server = "twinkle.server.cli:main"
+twinkle-tui = "twinkle_tui:main"
 
 [project.optional-dependencies]
 transformers = [
@@ -54,12 +55,19 @@ docs = [
   "sphinx_markdown_tables",
   "sphinxcontrib-mermaid",
 ]
+tui = [
+  "textual>=1.0.0",
+  "plotext>=5.2.0",
+  "openai>=1.0.0",
+  "httpx>=0.25.0",
+]
 
 [tool.poetry]
 packages = [
   { include = "twinkle", from = "src" },
   { include = "twinkle_client", from = "src" },
   { include = "twinkle_agentic", from = "src" },
+  { include = "twinkle_tui", from = "src" },
 ]
 
 [build-system]
