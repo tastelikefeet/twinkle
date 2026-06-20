@@ -193,6 +193,14 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'get_cluster_info',
+            'description': 'Get Ray cluster resource info: total GPUs, GPU types, available resources, and number of nodes. Call this before planning training to determine parallelism.',
+            'parameters': {'type': 'object', 'properties': {}, 'required': []},
+        },
+    },
 ]
 
 
@@ -332,3 +340,39 @@ class ToolExecutor:
             else:
                 self.metrics_callback('zoom', x_start=x_start, x_end=x_end, y_min=y_min, y_max=y_max)
         return {'action': action, 'status': 'applied'}
+
+    # ── Cluster info ──
+
+    async def _tool_get_cluster_info(self) -> dict:
+        """Query Ray cluster for available resources."""
+
+        def _query():
+            import ray
+            if not ray.is_initialized():
+                ray.init(ignore_reinit_error=True)
+            resources = ray.cluster_resources()
+            available = ray.available_resources()
+            nodes = ray.nodes()
+            gpu_total = resources.get('GPU', 0)
+            gpu_available = available.get('GPU', 0)
+            # Detect GPU types from node resources
+            gpu_types = set()
+            for node in nodes:
+                for key in node.get('Resources', {}):
+                    if key.startswith('accelerator_type:'):
+                        gpu_types.add(key.split(':', 1)[1])
+            return {
+                'num_nodes': len([n for n in nodes if n.get('Alive')]),
+                'gpu_total': int(gpu_total),
+                'gpu_available': int(gpu_available),
+                'gpu_types': sorted(gpu_types) if gpu_types else ['unknown'],
+                'cpu_total': resources.get('CPU', 0),
+                'memory_bytes': resources.get('memory', 0),
+            }
+
+        try:
+            return await asyncio.get_event_loop().run_in_executor(None, _query)
+        except ImportError:
+            return {'error': 'ray not installed. Run: pip install ray'}
+        except Exception as e:
+            return {'error': f'Failed to query Ray cluster: {e}'}
