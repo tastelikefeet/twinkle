@@ -37,7 +37,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         'type': 'function',
         'function': {
             'name': 'pause_training',
-            'description': 'Pause a running training job. Training will pause after the current step completes.',
+            'description': 'Pause training by killing the client process. In Server Mode, the server retains all state (LoRA weights, optimizer, LR scheduler) in GPU memory. Restart the script to continue.',
             'parameters': {
                 'type': 'object',
                 'properties': {
@@ -51,7 +51,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         'type': 'function',
         'function': {
             'name': 'resume_training',
-            'description': 'Resume a paused training job.',
+            'description': 'Resume a paused training job by restarting the client script with the same adapter_name. Server state is preserved.',
             'parameters': {
                 'type': 'object',
                 'properties': {
@@ -65,13 +65,34 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         'type': 'function',
         'function': {
             'name': 'stop_training',
-            'description': 'Stop a training job permanently. The training script will exit after the current step.',
+            'description': 'Stop training permanently. Kills the client process and marks the run as stopped. The adapter will be cleaned up after adapter_timeout on the server.',
             'parameters': {
                 'type': 'object',
                 'properties': {
                     'run_id': {'type': 'string', 'description': 'Training run ID to stop.'},
                 },
                 'required': ['run_id'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'list_supported_models',
+            'description': 'Query the Twinkle server for its list of supported base models. Use this to discover which models are available for training before writing scripts.',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'base_url': {
+                        'type': 'string',
+                        'description': 'Server base URL. Defaults to http://localhost:8000. Use http://www.modelscope.cn/twinkle for cloud.',
+                    },
+                    'api_key': {
+                        'type': 'string',
+                        'description': 'API key for authentication. Defaults to MODELSCOPE_TOKEN env var or EMPTY_API_KEY.',
+                    },
+                },
+                'required': [],
             },
         },
     },
@@ -127,6 +148,21 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'update_script',
+            'description': 'Update the training script for a run. Archives the current train.py as train_v{N}.py and writes the new version. Use this after diagnosing a script error to deploy a fixed version, then call resume_training to re-execute.',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'run_id': {'type': 'string', 'description': 'Training run ID.'},
+                    'script_content': {'type': 'string', 'description': 'Full Python source code of the new training script.'},
+                },
+                'required': ['run_id', 'script_content'],
+            },
+        },
+    },
 ]
 
 
@@ -166,6 +202,36 @@ class ToolExecutor:
 
     async def _tool_stop_training(self, run_id: str) -> dict:
         return self.connection.stop_training(run_id)
+
+    async def _tool_update_script(self, run_id: str, script_content: str) -> dict:
+        """Update the training script for a run with version archiving."""
+        return self.connection.update_script(run_id, script_content)
+
+    async def _tool_list_supported_models(
+        self, base_url: str | None = None, api_key: str | None = None
+    ) -> dict:
+        """Query the Twinkle server for supported models via /get_server_capabilities."""
+        import asyncio
+        import os
+
+        url = base_url or os.environ.get('TWINKLE_SERVER_URL', 'http://localhost:8000')
+        key = api_key or os.environ.get('MODELSCOPE_TOKEN') or os.environ.get('TWINKLE_SERVER_TOKEN') or 'EMPTY_API_KEY'
+
+        def _query():
+            from twinkle_client import init_twinkle_client
+            client = init_twinkle_client(base_url=url, api_key=key)
+            caps = client.get_server_capabilities()
+            return {
+                'base_url': url,
+                'supported_models': [m.model_name for m in caps.supported_models],
+            }
+
+        try:
+            return await asyncio.get_event_loop().run_in_executor(None, _query)
+        except ImportError:
+            return {'error': 'twinkle_client not installed. Install with: pip install twinkle-kit'}
+        except Exception as e:
+            return {'error': f'Failed to query server at {url}: {e}'}
 
     async def _tool_search_datasets(self, query: str, limit: int = 5) -> list[dict]:
         """Search ModelScope for datasets (requires modelscope SDK)."""

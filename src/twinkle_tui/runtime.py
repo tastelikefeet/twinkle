@@ -3,8 +3,11 @@
 
 This module provides helpers that training scripts import to:
 1. Write structured metrics and logs to local JSONL files
-2. Check for pause/stop signals from TUI
-3. Manage run lifecycle (start/end)
+2. Manage run lifecycle (start/end)
+
+In Server Mode, the client is stateless - killing the client process is
+equivalent to "pause" (server retains all optimizer/model state in GPU memory).
+Restarting the script with the same adapter_name seamlessly continues training.
 
 Usage in training scripts:
     from twinkle_tui.runtime import TrainingRuntime
@@ -13,11 +16,9 @@ Usage in training scripts:
     rt.start(model_id='Qwen/Qwen3.5-4B', config={...})
 
     for step, batch in enumerate(dataloader):
-        rt.check_signals()  # blocks if paused, raises if stopped
-
         # ... training logic ...
         rt.log_metrics(step=step, loss=loss, reward=reward, grad_norm=gn, lr=lr)
-        rt.log('Completed step {step}, loss={loss:.4f}')
+        rt.log(f'Completed step {step}, loss={loss:.4f}')
 
     rt.finish()
 """
@@ -26,9 +27,15 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from twinkle_client.model import MultiLoraTransformersModel
+    from twinkle.dataloader import DataLoader
 
 
 DEFAULT_BASE_DIR = Path.home() / '.cache' / 'twinkle'
@@ -66,12 +73,44 @@ class TrainingRuntime:
         self._logs_file: Any = None
         self._started = False
 
-    def start(self, model_id: str = '', config: dict[str, Any] | None = None) -> None:
+    def start(
+        self,
+        model_id: str = '',
+        config: dict[str, Any] | None = None,
+        script_path: str | Path | None = None,
+    ) -> None:
         """Initialize the run directory and write metadata.
 
         Call this once at the beginning of training.
+
+        Args:
+            model_id: Model identifier (e.g. 'Qwen/Qwen3.5-4B').
+            config: Training configuration dict (hyperparameters, etc.).
+            script_path: Path to the training script. If provided, the script
+                will be copied into the run directory as ``train.py`` so that
+                resume/restart can re-execute it automatically.
         """
         self.run_dir.mkdir(parents=True, exist_ok=True)
+
+        # Copy training script into run directory for reproducibility & restart.
+        # If train.py already exists (e.g. from a previous failed run), archive it
+        # as train_v{N}.py before overwriting.
+        stored_script: str | None = None
+        script_version = 1
+        if script_path is not None:
+            import shutil
+            src = Path(script_path).resolve()
+            dst = self.run_dir / 'train.py'
+            if src.exists():
+                # Archive existing train.py if present
+                if dst.exists():
+                    # Find next available version number
+                    existing_versions = list(self.run_dir.glob('train_v*.py'))
+                    script_version = len(existing_versions) + 2  # +2: v1 is the archive, new is v2+
+                    archive_name = f'train_v{script_version - 1}.py'
+                    shutil.copy2(dst, self.run_dir / archive_name)
+                shutil.copy2(src, dst)
+                stored_script = str(dst)
 
         # Write run metadata
         meta = {
@@ -80,18 +119,15 @@ class TrainingRuntime:
             'config': config or {},
             'start_time': time.time(),
             'status': 'running',
+            'pid': os.getpid(),
+            'script_path': stored_script,
+            'script_version': script_version,
         }
         (self.run_dir / 'meta.json').write_text(json.dumps(meta, indent=2))
 
         # Open files for append
         self._metrics_file = open(self.run_dir / 'metrics.jsonl', 'a', buffering=1)
         self._logs_file = open(self.run_dir / 'logs.jsonl', 'a', buffering=1)
-
-        # Clear any stale signals
-        for sig in ('pause', 'stop'):
-            sig_file = self.run_dir / sig
-            if sig_file.exists():
-                sig_file.unlink()
 
         self._started = True
         self.log('Training started')
@@ -122,7 +158,11 @@ class TrainingRuntime:
         self._logs_file.write(json.dumps(entry) + '\n')
 
     def check_signals(self) -> None:
-        """Check for pause/stop signals. Call between training steps.
+        """Legacy signal check (optional in Server Mode).
+
+        In Server Mode, training control is done by killing/restarting the client
+        process. The server retains all state. This method is kept for backward
+        compatibility but is NOT required in typical Server Mode usage.
 
         - If stop signal exists: raises TrainingStoppedError
         - If pause signal exists: blocks until signal is removed
@@ -184,3 +224,51 @@ class TrainingRuntime:
     def is_stopped(self) -> bool:
         """Check if stop signal exists (non-blocking)."""
         return (self.run_dir / 'stop').exists()
+
+    def register_graceful_shutdown(
+        self,
+        model: 'MultiLoraTransformersModel',
+        dataloader: 'DataLoader | None' = None,
+        checkpoint_name: str = 'interrupted',
+    ) -> None:
+        """Register SIGTERM handler for graceful shutdown with checkpoint.
+
+        When SIGTERM is received (e.g., from TUI stop command), the handler will:
+        1. Save model checkpoint (LoRA weights + optimizer state)
+        2. Save dataloader position (consumed_train_samples) for exact resume
+        3. Log the checkpoint path
+        4. Mark training as 'stopped' and exit
+
+        Args:
+            model: The MultiLoraTransformersModel instance.
+            dataloader: Optional DataLoader with .get_state() support.
+            checkpoint_name: Name for the saved checkpoint.
+
+        Usage:
+            rt = TrainingRuntime(run_id='my-run')
+            rt.start(...)
+            rt.register_graceful_shutdown(model, dataloader)
+            # ... training loop ...
+        """
+        def _shutdown_handler(signum, frame):
+            self.log('SIGTERM received, saving checkpoint before exit...')
+            try:
+                save_kwargs = {
+                    'name': checkpoint_name,
+                    'save_optimizer': True,
+                }
+                if dataloader is not None:
+                    state = dataloader.get_state()
+                    save_kwargs['consumed_train_samples'] = state.get('consumed_train_samples', 0)
+                    self.log(f'Dataloader state: consumed_train_samples={save_kwargs["consumed_train_samples"]}')
+
+                result = model.save(**save_kwargs)
+                self.log(f'Checkpoint saved: {result}')
+            except Exception as e:
+                self.log(f'Error saving checkpoint during shutdown: {e}')
+
+            self.finish(status='stopped')
+            sys.exit(0)
+
+        signal.signal(signal.SIGTERM, _shutdown_handler)
+        self.log('Graceful shutdown handler registered (SIGTERM)')
