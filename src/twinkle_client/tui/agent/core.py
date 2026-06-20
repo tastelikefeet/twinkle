@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Callable
 
@@ -45,8 +46,13 @@ class AgentLoop:
             {'role': 'system', 'content': full_prompt},
         ]
 
-    async def send(self, user_input: str) -> str:
+    async def send(self, user_input: str, on_token: Callable[[str], None] | None = None) -> str:
         """Process user input through LLM with tool calling.
+
+        Args:
+            user_input: The user's message text.
+            on_token: Optional callback invoked with each text chunk during
+                      the final (non-tool-call) streaming response.
 
         Returns the final assistant text response.
         """
@@ -54,39 +60,28 @@ class AgentLoop:
         self._prune_history()
 
         for _ in range(self.MAX_TOOL_ROUNDS):
-            response = await self._call_llm()
+            content, tool_calls = await self._call_llm_stream(
+                on_token=on_token,
+            )
 
-            message = response.choices[0].message
-
-            # If no tool calls, return the text response
-            if not message.tool_calls:
-                content = message.content or ''
+            # If no tool calls, we're done
+            if not tool_calls:
                 self.history.append({'role': 'assistant', 'content': content})
                 return content
 
-            # Process tool calls
+            # Process tool calls (don't stream these intermediate rounds)
             self.history.append({
                 'role': 'assistant',
-                'content': message.content or '',
-                'tool_calls': [
-                    {
-                        'id': tc.id,
-                        'type': 'function',
-                        'function': {
-                            'name': tc.function.name,
-                            'arguments': tc.function.arguments,
-                        },
-                    }
-                    for tc in message.tool_calls
-                ],
+                'content': content,
+                'tool_calls': tool_calls,
             })
 
-            for tc in message.tool_calls:
-                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-                result = await self._tool_executor.execute(tc.function.name, args)
+            for tc in tool_calls:
+                args = json.loads(tc['function']['arguments']) if tc['function']['arguments'] else {}
+                result = await self._tool_executor.execute(tc['function']['name'], args)
                 self.history.append({
                     'role': 'tool',
-                    'tool_call_id': tc.id,
+                    'tool_call_id': tc['id'],
                     'content': result,
                 })
 
@@ -95,14 +90,68 @@ class AgentLoop:
         self.history.append({'role': 'assistant', 'content': fallback})
         return fallback
 
-    async def _call_llm(self):
-        """Make a single LLM API call with tools."""
-        return await self._client.chat.completions.create(
+    async def _call_llm_stream(
+        self,
+        on_token: Callable[[str], None] | None = None,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Make a streaming LLM API call. Accumulates content and tool_calls.
+
+        Streams text tokens via on_token only if the response has no tool calls.
+        Returns (full_content, tool_calls_list).
+        """
+        stream = await self._client.chat.completions.create(
             model=self.llm_model,
             messages=self.history,
             tools=TOOL_SCHEMAS,
             tool_choice='auto',
+            stream=True,
         )
+
+        content_parts: list[str] = []
+        tool_calls_map: dict[int, dict[str, Any]] = {}
+        has_tool_calls = False
+        chunk_count = 0
+
+        async for chunk in stream:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta is None:
+                continue
+
+            # Accumulate content
+            if delta.content:
+                content_parts.append(delta.content)
+                # Only stream tokens if no tool calls detected yet
+                if not has_tool_calls and on_token:
+                    on_token(delta.content)
+
+            # Accumulate tool calls
+            if delta.tool_calls:
+                has_tool_calls = True
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in tool_calls_map:
+                        tool_calls_map[idx] = {
+                            'id': '',
+                            'type': 'function',
+                            'function': {'name': '', 'arguments': ''},
+                        }
+                    tc = tool_calls_map[idx]
+                    if tc_delta.id:
+                        tc['id'] = tc_delta.id
+                    if tc_delta.function:
+                        if tc_delta.function.name:
+                            tc['function']['name'] += tc_delta.function.name
+                        if tc_delta.function.arguments:
+                            tc['function']['arguments'] += tc_delta.function.arguments
+
+            # Yield to event loop periodically to allow UI rendering
+            chunk_count += 1
+            if chunk_count % 5 == 0:
+                await asyncio.sleep(0)
+
+        content = ''.join(content_parts)
+        tool_calls = [tool_calls_map[i] for i in sorted(tool_calls_map)] if tool_calls_map else []
+        return content, tool_calls
 
     def set_metrics_callback(self, callback: Callable) -> None:
         """Set the callback for metrics zoom control."""

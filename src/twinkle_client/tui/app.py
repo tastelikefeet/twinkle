@@ -259,14 +259,16 @@ class TwinkleTUI(App):
         if not self._agent:
             return
         chat = self.query_one('#chat', ChatPanel)
-        chat.set_thinking(True)
+        chat.start_streaming()
         try:
-            response = await self._agent.send(event.text)
-            chat.add_assistant_message(response)
+            response = await self._agent.send(event.text, on_token=chat.append_stream)
         except Exception as e:
+            chat.finish_streaming()
             chat.add_assistant_message(f'[Error] {e}')
-        finally:
-            chat.set_thinking(False)
+            return
+        chat.finish_streaming()
+        # Yield once more to let Textual render the final state
+        await asyncio.sleep(0)
 
     def action_toggle_metrics(self) -> None:
         self.query_one('#metrics', MetricsPanel).toggle_class('hidden')
