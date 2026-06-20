@@ -1,5 +1,5 @@
 # Copyright (c) Twinkle Contributors. All rights reserved.
-"""Local skill provider - loads skill markdown files from the project's skills/ directory."""
+"""Local skill provider - loads skill markdown files from user's local skills directory."""
 
 from __future__ import annotations
 
@@ -7,16 +7,16 @@ from pathlib import Path
 
 from twinkle_client.tui.skills.base import SkillProvider
 
-# Default: project root's skills/ directory (auto-detected relative to this file)
-_DEFAULT_SKILLS_DIR = Path(__file__).resolve().parents[3] / 'skills'
+# Default: user-local skills directory (user drops .md files here)
+_DEFAULT_SKILLS_DIR = Path.home() / '.cache' / 'twinkle' / 'tui' / 'skills' / 'local'
 
 
 class LocalSkillProvider(SkillProvider):
     """Loads skill markdown files from a local directory.
 
-    By default, reads from the project's `skills/` folder which contains
-    twinkle-training.md and autoresearch.md — the core domain knowledge
-    that the agent needs to write correct training scripts.
+    By default, reads from ~/.cache/twinkle/tui/skills/local/.
+    Users can place custom .md skill files there to extend the agent's
+    domain knowledge without modifying the codebase.
     """
 
     def __init__(self, skills_dir: Path | str | None = None):
@@ -28,8 +28,8 @@ class LocalSkillProvider(SkillProvider):
         return 'local'
 
     async def fetch(self) -> None:
-        """No-op for local provider (files are already on disk)."""
-        pass
+        """Ensure the local skills directory exists."""
+        self._skills_dir.mkdir(parents=True, exist_ok=True)
 
     def _skills_root(self) -> Path:
         return self._skills_dir

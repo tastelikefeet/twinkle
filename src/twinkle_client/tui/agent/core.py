@@ -27,14 +27,12 @@ class AgentLoop:
     def __init__(
         self,
         connection: LocalConnection,
-        on_message: Callable[[str], None],
         llm_base_url: str,
         llm_model: str,
         llm_api_key: str,
         skills_prompt: str = '',
     ):
         self.connection = connection
-        self.on_message = on_message
         self.llm_model = llm_model
         self._client = AsyncOpenAI(base_url=llm_base_url, api_key=llm_api_key)
         self._tool_executor = ToolExecutor(connection)
@@ -46,13 +44,19 @@ class AgentLoop:
             {'role': 'system', 'content': full_prompt},
         ]
 
-    async def send(self, user_input: str, on_token: Callable[[str], None] | None = None) -> str:
+    async def send(
+        self,
+        user_input: str,
+        on_token: Callable[[str], None] | None = None,
+        on_stream_reset: Callable[[], None] | None = None,
+    ) -> str:
         """Process user input through LLM with tool calling.
 
         Args:
             user_input: The user's message text.
-            on_token: Optional callback invoked with each text chunk during
-                      the final (non-tool-call) streaming response.
+            on_token: Callback for each streamed text chunk.
+            on_stream_reset: Called when a tool-call is detected mid-stream,
+                signalling the UI to discard any partially-displayed tokens.
 
         Returns the final assistant text response.
         """
@@ -60,16 +64,17 @@ class AgentLoop:
         self._prune_history()
 
         for _ in range(self.MAX_TOOL_ROUNDS):
-            content, tool_calls = await self._call_llm_stream(
-                on_token=on_token,
-            )
+            content, tool_calls = await self._call_llm_stream(on_token=on_token)
 
-            # If no tool calls, we're done
+            # If no tool calls, we're done — content was correctly streamed
             if not tool_calls:
                 self.history.append({'role': 'assistant', 'content': content})
                 return content
 
-            # Process tool calls (don't stream these intermediate rounds)
+            # Tool calls detected — discard any leaked intermediate tokens
+            if on_stream_reset:
+                on_stream_reset()
+
             self.history.append({
                 'role': 'assistant',
                 'content': content,
@@ -156,6 +161,10 @@ class AgentLoop:
     def set_metrics_callback(self, callback: Callable) -> None:
         """Set the callback for metrics zoom control."""
         self._tool_executor.metrics_callback = callback
+
+    def set_select_metrics_callback(self, callback: Callable[[list[str]], dict]) -> None:
+        """Set the callback for selecting which metrics to display."""
+        self._tool_executor.select_metrics_callback = callback
 
     def set_run_selected_callback(self, callback: Callable[[str], None]) -> None:
         """Set the callback invoked when the agent switches to a different run."""

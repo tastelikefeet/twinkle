@@ -102,7 +102,6 @@ class TwinkleTUI(App):
         # Create agent immediately (usable before skills are loaded)
         self._agent = AgentLoop(
             connection=self._connection,
-            on_message=self._on_agent_message,
             llm_base_url=self.llm_base_url,
             llm_model=self.llm_model,
             llm_api_key=self.llm_api_key,
@@ -110,6 +109,7 @@ class TwinkleTUI(App):
         )
         self._agent.set_run_selected_callback(self._on_run_selected)
         self._agent.set_metrics_callback(self._handle_metrics_zoom)
+        self._agent.set_select_metrics_callback(self._handle_select_metrics)
 
         self._monitor = TrainingMonitor(
             connection=self._connection,
@@ -210,6 +210,11 @@ class TwinkleTUI(App):
         else:
             metrics_panel.zoom(**kwargs)
 
+    def _handle_select_metrics(self, keys: list[str]) -> dict:
+        """Handle select_metrics tool call from agent."""
+        metrics_panel = self.query_one('#metrics', MetricsPanel)
+        return metrics_panel.select_keys(keys)
+
     def _on_run_selected(self, run_id: str) -> None:
         """Handle run switch: reset offsets, clear metrics, update status."""
         if self._connection:
@@ -261,13 +266,16 @@ class TwinkleTUI(App):
         chat = self.query_one('#chat', ChatPanel)
         chat.start_streaming()
         try:
-            response = await self._agent.send(event.text, on_token=chat.append_stream)
+            await self._agent.send(
+                event.text,
+                on_token=chat.append_stream,
+                on_stream_reset=chat.reset_stream,
+            )
         except Exception as e:
             chat.finish_streaming()
             chat.add_assistant_message(f'[Error] {e}')
             return
         chat.finish_streaming()
-        # Yield once more to let Textual render the final state
         await asyncio.sleep(0)
 
     def action_toggle_metrics(self) -> None:

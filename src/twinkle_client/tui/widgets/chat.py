@@ -40,14 +40,6 @@ class ChatPanel(Widget):
         margin: 0 1;
     }
 
-    ChatPanel > #thinking-indicator {
-        dock: bottom;
-        height: 1;
-        color: $text-muted;
-        text-style: italic;
-        padding: 0 1;
-    }
-
     ChatPanel > #streaming-text {
         dock: bottom;
         max-height: 6;
@@ -78,7 +70,6 @@ class ChatPanel(Widget):
         yield Static('Chat', id='chat-title')
         yield RichLog(id='chat-log', wrap=True, markup=True, max_lines=200)
         yield Static('', id='streaming-text')
-        yield Static('', id='thinking-indicator')
         yield Input(placeholder='Ask the agent anything...', id='chat-input')
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -107,6 +98,16 @@ class ChatPanel(Widget):
         self._streaming_widget.update('[bold cyan]Agent:[/] █')
         self._streaming_widget.styles.display = 'block'
 
+    def reset_stream(self) -> None:
+        """Discard buffered streaming content (called when tool-calls detected).
+
+        Resets to the initial streaming state so the next round starts fresh.
+        """
+        self._streaming_buffer = ''
+        self._dirty = False
+        if self._streaming_widget is not None:
+            self._streaming_widget.update('[bold cyan]Agent:[/] [dim]calling tools...[/]')
+
     def append_stream(self, chunk: str) -> None:
         """Append a chunk to the streaming display (throttled)."""
         self._streaming_buffer += chunk
@@ -129,7 +130,6 @@ class ChatPanel(Widget):
 
         Returns the full accumulated text.
         """
-        # Flush any remaining content
         self._flush_stream()
         if self._streaming_widget is not None:
             self._streaming_widget.update('')
@@ -140,8 +140,3 @@ class ChatPanel(Widget):
             self.add_assistant_message(full_text)
         self._streaming_buffer = ''
         return full_text
-
-    def set_thinking(self, thinking: bool) -> None:
-        """Show/hide thinking indicator."""
-        indicator = self.query_one('#thinking-indicator', Static)
-        indicator.update('Agent is thinking...' if thinking else '')

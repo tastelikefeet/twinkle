@@ -196,6 +196,24 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         'type': 'function',
         'function': {
+            'name': 'select_metrics',
+            'description': 'Choose which metric keys to display on the chart. The chart shows at most 4 metrics at once. Use this when the user asks to see specific metrics (e.g. "show reward-related metrics"). Pass an empty keys array to list all available metrics without changing the selection.',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'keys': {
+                        'type': 'array',
+                        'items': {'type': 'string'},
+                        'description': 'Metric key names to display. Match against available keys (supports partial: pick keys containing the keyword). Pass [] to query available keys only.',
+                    },
+                },
+                'required': ['keys'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
             'name': 'get_cluster_info',
             'description': 'Get Ray cluster resource info: total GPUs, GPU types, available resources, and number of nodes. Call this before planning training to determine parallelism.',
             'parameters': {'type': 'object', 'properties': {}, 'required': []},
@@ -215,6 +233,7 @@ class ToolExecutor:
     def __init__(self, connection: LocalConnection):
         self.connection = connection
         self.metrics_callback: Callable | None = None
+        self.select_metrics_callback: Callable[[list[str]], dict] | None = None
         self.on_run_selected: Callable[[str], None] | None = None
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
@@ -288,41 +307,35 @@ class ToolExecutor:
 
     async def _tool_search_datasets(self, query: str, limit: int = 5) -> dict:
         """Search ModelScope for datasets."""
-
-        def _search():
-            from modelscope.hub.api import HubApi
-            api = HubApi()
-            results = api.list_datasets(dataset_name=query, limit=limit)
-            return [
-                {'id': getattr(d, 'dataset_id', getattr(d, 'id', str(d))),
-                 'name': getattr(d, 'dataset_name', getattr(d, 'name', str(d)))}
-                for d in results
-            ]
-
-        try:
-            items = await asyncio.get_event_loop().run_in_executor(None, _search)
-            return {'query': query, 'results': items}
-        except Exception as e:
-            return {'error': f'Dataset search failed: {e}'}
+        return await self._search_hub('datasets', query, limit)
 
     async def _tool_search_models(self, query: str, limit: int = 5) -> dict:
         """Search ModelScope for models."""
+        return await self._search_hub('models', query, limit)
+
+    async def _search_hub(self, resource_type: str, query: str, limit: int) -> dict:
+        """Unified ModelScope Hub search for models or datasets."""
 
         def _search():
             from modelscope.hub.api import HubApi
             api = HubApi()
-            results = api.list_models(model_name=query, limit=limit)
+            if resource_type == 'datasets':
+                results = api.list_datasets(dataset_name=query, limit=limit)
+                id_field, name_field = 'dataset_id', 'dataset_name'
+            else:
+                results = api.list_models(model_name=query, limit=limit)
+                id_field, name_field = 'model_id', 'model_name'
             return [
-                {'id': getattr(m, 'model_id', getattr(m, 'id', str(m))),
-                 'name': getattr(m, 'model_name', getattr(m, 'name', str(m)))}
-                for m in results
+                {'id': getattr(r, id_field, getattr(r, 'id', str(r))),
+                 'name': getattr(r, name_field, getattr(r, 'name', str(r)))}
+                for r in results
             ]
 
         try:
             items = await asyncio.get_event_loop().run_in_executor(None, _search)
             return {'query': query, 'results': items}
         except Exception as e:
-            return {'error': f'Model search failed: {e}'}
+            return {'error': f'{resource_type.title()} search failed: {e}'}
 
     # ── Metrics chart ──
 
@@ -340,6 +353,12 @@ class ToolExecutor:
             else:
                 self.metrics_callback('zoom', x_start=x_start, x_end=x_end, y_min=y_min, y_max=y_max)
         return {'action': action, 'status': 'applied'}
+
+    async def _tool_select_metrics(self, keys: list[str]) -> dict:
+        """Select which metrics to display on the chart."""
+        if self.select_metrics_callback:
+            return self.select_metrics_callback(keys)
+        return {'error': 'Metrics panel not available'}
 
     # ── Cluster info ──
 

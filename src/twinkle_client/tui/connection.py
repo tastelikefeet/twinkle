@@ -159,7 +159,7 @@ class LocalConnection:
     def _launch_script(self, run_id: str) -> dict[str, Any]:
         """Launch the run's train.py as a background subprocess.
 
-        Captures stderr to logs.jsonl so script errors are diagnosable.
+        Captures stderr to stderr.log so script errors are diagnosable.
         Returns a dict with launch result (pid or error).
         """
         meta = self.get_meta(run_id)
@@ -170,20 +170,27 @@ class LocalConnection:
         if not script_path or not Path(script_path).exists():
             return {'status': 'error', 'run_id': run_id, 'error': f'Script not found: {script_path}'}
 
-        # Capture stderr to a file so errors are diagnosable
         run_dir = self.base_dir / run_id
         stderr_file = run_dir / 'stderr.log'
-        stderr_fh = open(stderr_file, 'w')
 
-        proc = subprocess.Popen(
-            ['python', script_path],
-            cwd=str(run_dir),
-            stdout=subprocess.DEVNULL,
-            stderr=stderr_fh,
-            start_new_session=True,
-        )
-        # Child inherits fd via fork; close parent's copy immediately
-        stderr_fh.close()
+        try:
+            stderr_fh = open(stderr_file, 'w')
+        except OSError as e:
+            return {'status': 'error', 'run_id': run_id, 'error': f'Cannot open stderr log: {e}'}
+
+        try:
+            proc = subprocess.Popen(
+                ['python', script_path],
+                cwd=str(run_dir),
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_fh,
+                start_new_session=True,
+            )
+        except OSError as e:
+            stderr_fh.close()
+            return {'status': 'error', 'run_id': run_id, 'error': f'Failed to launch script: {e}'}
+        finally:
+            stderr_fh.close()
 
         # Non-blocking check: if process already exited (e.g., syntax error)
         retcode = proc.poll()
