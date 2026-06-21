@@ -330,6 +330,7 @@ class ToolExecutor:
         self.metrics_callback: Callable | None = None
         self.select_metrics_callback: Callable[[list[str]], dict] | None = None
         self.on_run_selected: Callable[[str], None] | None = None
+        self._server_url: str | None = None  # Set after successful start_server
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         """Execute a tool by name and return the result as a JSON string."""
@@ -344,6 +345,14 @@ class ToolExecutor:
 
     # ── Training lifecycle ──
 
+    def _resolve_server_url(self) -> str:
+        """Resolve server URL: instance state > env var > default."""
+        return (
+            self._server_url
+            or os.environ.get('TWINKLE_SERVER_URL')
+            or 'http://localhost:8000'
+        )
+
     async def _tool_list_training_runs(self) -> list[dict]:
         return self.connection.list_training_runs()
 
@@ -355,7 +364,7 @@ class ToolExecutor:
 
     async def _tool_start_training(self, run_id: str, script_content: str, model_id: str = '') -> dict:
         # Pre-check: Twinkle Server must be reachable
-        server_url = os.environ.get('TWINKLE_SERVER_URL', 'http://localhost:8000')
+        server_url = self._resolve_server_url()
         if not await self._check_server_health(server_url):
             return {
                 'status': 'error',
@@ -422,10 +431,11 @@ class ToolExecutor:
         """Start Ray cluster + Twinkle Server. Idempotent. Supports multi-model."""
         import subprocess as _sp
 
-        server_url = os.environ.get('TWINKLE_SERVER_URL', f'http://localhost:{port}')
+        server_url = self._server_url or os.environ.get('TWINKLE_SERVER_URL') or f'http://localhost:{port}'
 
         # 1. Check if server is already running
         if await self._check_server_health(server_url):
+            self._server_url = server_url
             return {'status': 'already_running', 'server_url': server_url}
 
         def _start():
@@ -544,7 +554,11 @@ class ToolExecutor:
                 'log_path': log_path,
             }
 
-        return await asyncio.get_event_loop().run_in_executor(None, _start)
+        result = await asyncio.get_event_loop().run_in_executor(None, _start)
+        # Persist server URL on success so subsequent tools use the correct address
+        if result.get('status') in ('started', 'already_running'):
+            self._server_url = server_url
+        return result
 
     @staticmethod
     def _generate_server_config(
@@ -792,7 +806,7 @@ class ToolExecutor:
 
     async def _tool_list_supported_models(self, base_url: str | None = None) -> dict:
         """Query the Twinkle server for supported models."""
-        url = base_url or os.environ.get('TWINKLE_SERVER_URL', 'http://localhost:8000')
+        url = base_url or self._resolve_server_url()
         key = os.environ.get('MODELSCOPE_TOKEN') or os.environ.get('TWINKLE_SERVER_TOKEN') or 'EMPTY_API_KEY'
 
         def _query():
