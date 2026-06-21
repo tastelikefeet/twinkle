@@ -496,7 +496,7 @@ class ToolExecutor:
                 return {'status': 'error', 'error': f'Ray start failed: {ray_result.stderr.strip()}'}
 
             # 4. Start Twinkle Server as background process
-            cmd = ['python', '-m', 'twinkle.server', '--config', config_path]
+            cmd = ['python', '-m', 'twinkle.server', 'launch', '--config', config_path]
 
             # Log server output for debugging startup failures
             from pathlib import Path as _Path
