@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-        <a href="https://twinkle-kit.readthedocs.io/en/latest/">English Documentation</a> &nbsp ｜ &nbsp <a href="https://twinkle-kit.readthedocs.io/zh-cn/latest/">中文文档</a> &nbsp ｜ &nbsp <a href="https://modelscope.github.io/twinkle-web/">Twinkle Web</a> &nbsp
+        <a href="https://modelscope.github.io/twinkle-web/docs/">English Documentation</a> &nbsp ｜ &nbsp <a href="https://modelscope.github.io/twinkle-web/zh/docs/">中文文档</a> &nbsp ｜ &nbsp <a href="https://modelscope.github.io/twinkle-web/">Twinkle Web</a> &nbsp
 </p>
 
 ## ✨ What is Twinkle?
@@ -122,7 +122,7 @@ sh INSTALL_MEGATRON.sh
 
 We are rolling out training service built atop Twinkle✨ on ModelScope. You may
 train via API endpoint  `base_url=https://www.modelscope.cn/twinkle`. For more details, please refer to
-our [documentation](docs/source_en/Usage%20Guide/Train-as-a-Service.md).
+our [documentation](https://modelscope.github.io/twinkle-web/docs/usage-guide/train-as-a-service/).
 
 ## Supported Hardware
 
@@ -177,7 +177,7 @@ supported on Twinkle✨ framework.
 ## Sample Code
 
 Below are some of the capabilities demonstrated in the example code. For a complete introduction to training capabilities,
-please refer to [Quick Start](docs/source_en/Usage%20Guide/Quick-Start.md) and [cookbook](cookbook).
+please refer to [Quick Start](https://modelscope.github.io/twinkle-web/docs/usage-guide/quick-start/) and [cookbook](cookbook).
 
 ### Train with Ray
 

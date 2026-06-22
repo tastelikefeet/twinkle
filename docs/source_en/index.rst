@@ -41,6 +41,8 @@ Twinkle DOCUMENTATION
    Components/Plugin/index.rst
    Components/Kernel/index.rst
    Components/Training Middleware/index.rst
+   Components/CLI/index.rst
+   Components/Notifier/index.rst
 
 Indices and tables
 ==================
