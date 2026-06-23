@@ -48,5 +48,5 @@ Qwen3.5 使用混合架构，融合了标准注意力和 GatedDeltaNet 线性注
 | 注意力后端 | Padding-Free 支持 |
 |-----------|-------------------|
 | FlashAttention2 | 完全支持 |
-| SDPA | 不支持序列并行场景 |
+| SDPA | 支持（不兼容序列并行） |
 | Eager | 不支持 |

@@ -48,5 +48,5 @@ The patch is applied automatically when padding-free is detected on Qwen3.5 mode
 | Attention Backend | Padding-Free Support |
 |-------------------|---------------------|
 | FlashAttention2 | Fully supported |
-| SDPA | Not supported with sequence parallel |
+| SDPA | Supported (incompatible with sequence parallel) |
 | Eager | Not supported |

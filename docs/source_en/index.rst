@@ -31,7 +31,6 @@ Twinkle DOCUMENTATION
    Components/Sampler/index.rst
    Components/Reward/index.rst
    Components/Advantage/index.rst
-   Components/Gym/index.rst
    Components/Hub/index.rst
    Components/Checkpoint Engine/index.rst
    Components/Metrics/index.rst
