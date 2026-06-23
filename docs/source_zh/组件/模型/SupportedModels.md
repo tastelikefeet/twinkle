@@ -55,6 +55,15 @@ model = TransformersModel(model_id='/path/to/model')
 | Megatron-LM | `MegatronModel` | 大规模分布式预训练 |
 | Megatron + Multi-LoRA | `MultiLoraMegatronModel` | 大规模多租户 |
 
+## 精度支持
+
+| 模式 | 说明 |
+|:-----|:-----|
+| `bf16` | BFloat16 混合精度（推荐 A100/H100）|
+| `fp16` | Float16 混合精度（适用于旧 GPU）|
+| `fp8` | FP8 精度（H100 + Transformer Engine）|
+| `no` | 全精度（仅用于调试）|
+
 ## 并行策略
 
 | 策略 | 配置键 | 说明 |

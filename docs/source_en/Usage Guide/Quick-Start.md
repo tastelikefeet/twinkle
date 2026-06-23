@@ -156,6 +156,8 @@ if __name__ == '__main__':
 
 In this training code, we constructed a dataset and loaded the Qwen/Qwen3.5-4B model, used LoRA with the all-linear approach, and completed one training run. In the logs, you can observe the process of loss gradually converging.
 
+> **Tip — Full-Parameter Training**: The example above uses LoRA for efficiency. To switch to full-parameter training, simply remove the `add_adapter_to_model` call (and the `from peft import LoraConfig` import). Everything else stays the same.
+
 ### torchrun
 
 Twinkle supports running training in torchrun mode. In this scenario, Ray-related dependencies do not need to be installed.
@@ -492,6 +494,8 @@ Next, start the server:
 ```shell
 twinkle-server launch -c cookbook/client/server/transformer/server_config.yaml
 ```
+
+> For details on how to write `server_config.yaml`, see [Server Configuration](../Server%20and%20Client/Server.md).
 
 The server will start three services: a sampler cluster, a model cluster, and a utility cluster.
 

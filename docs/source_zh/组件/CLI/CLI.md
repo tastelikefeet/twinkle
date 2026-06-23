@@ -111,3 +111,24 @@ export MODEL_ID=ms://Qwen/Qwen3.5-4B
 - `nproc_per_node` ↔ `num_gpus`
 - `max_tokens` ↔ `max_new_tokens`
 - `use_megatron=true` → `strategy=native_fsdp`
+
+## 自定义配置源
+
+你可以通过自定义配置源扩展 CLI：
+
+```python
+from twinkle.cli.cli import ConfigSource, Args, ConfigResolver
+
+class RemoteConfigSource(ConfigSource):
+    def __init__(self, url: str):
+        self.url = url
+
+    def load(self) -> dict:
+        import requests
+        return requests.get(self.url).json()
+
+# 应用自定义配置源
+args = Args()
+resolver = ConfigResolver(args)
+resolver.apply(RemoteConfigSource('http://config-server/my-config').load())
+```
