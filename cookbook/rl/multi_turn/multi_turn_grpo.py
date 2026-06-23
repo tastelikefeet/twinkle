@@ -1,21 +1,26 @@
-"""Multi-turn GRPO training with OpenEnv environments.
+"""Multi-turn GRPO training with EnvPool (integrated environment pool).
 
 Demonstrates how to train an LLM agent via GRPO on interactive environments
-(e.g. Blackjack) using the OpenEnv protocol and Twinkle's MultiTurnRollout.
+(e.g. Blackjack) using EnvPool and Twinkle's MultiTurnRollout.
 
-The agent interacts with an environment server through tool calls:
-  1. Each trajectory resets an independent env instance (new game).
+EnvPool is deployed as a @remote_class component — either:
+  - With remote_group='env': runs on a dedicated CPU DeviceGroup (isolated)
+  - Without remote_group: runs locally in the driver (zero RPC overhead)
+
+The agent interacts with environments through tool calls:
+  1. EnvPool manages N env instances; each trajectory maps to one slot.
   2. MultiTurnRollout drives the multi-turn loop: model generates tool calls,
      EnvTool dispatches them to env.step(), observations are fed back.
   3. Episode reward is extracted after rollout completes.
   4. GRPO advantages are computed across the batch and used for policy update.
 
 Usage:
-  # Start the OpenEnv server first (e.g. blackjack):
-  #   openenv serve blackjack_env:BlackjackEnv --port 8000
-  #
-  # Then run training:
+  # No need to start a separate server — environments are instantiated
+  # directly inside the EnvPool worker:
   #   python multi_turn_grpo.py
+  #
+  # To run envs on a dedicated CPU worker (isolated):
+  #   ENV_REMOTE=1 python multi_turn_grpo.py
 
 References:
   - OpenEnv GRPO Blackjack: https://github.com/huggingface/OpenEnv/tree/main/examples/grpo_blackjack
@@ -37,7 +42,7 @@ from twinkle.model import TransformersModel
 from twinkle.processor import InputProcessor
 from twinkle.sampler import vLLMSampler
 from twinkle.template import Qwen3_5Template
-from twinkle_agentic.envs import OpenEnv, EnvTool
+from twinkle_agentic.envs import EnvPool, EnvPoolAdapter, EnvTool
 from twinkle_agentic.rollout.multi_turn import MultiTurnRollout
 from twinkle_agentic.tools.tool_manager import ToolManager
 
@@ -65,8 +70,13 @@ SAVE_STEPS = args.training.save_steps or 500
 LORA_RANK = args.lora.lora_r or 16
 MAX_TURNS = int(os.environ.get('MAX_TURNS', '6'))
 
-# OpenEnv server configuration
-ENV_URL = os.environ.get('ENV_URL', 'http://localhost:8000')
+# Environment configuration
+# ENV_CLS: import path to the environment class (no server needed)
+ENV_CLS = os.environ.get('ENV_CLS', 'blackjack_env:BlackjackEnv')
+# ENV_REMOTE: set to '1' to deploy envs on a dedicated CPU DeviceGroup
+ENV_REMOTE = os.environ.get('ENV_REMOTE', '0') == '1'
+# Pool size = total trajectories per batch
+ENV_POOL_SIZE = int(os.environ.get('ENV_POOL_SIZE', '0'))  # 0 = auto
 
 # ========== Tool Schema (Blackjack example) ==========
 # Define tools the model can use in the environment.
@@ -124,62 +134,49 @@ Use the `play` tool to take actions. Always reason briefly before acting."""
 
 
 # ========== Environment Setup ==========
-def create_env_and_tools(
-    env_url: str,
-    tool_schema: List[Dict],
-    action_mapper=None,
-) -> Tuple[OpenEnv, List[EnvTool], ToolManager]:
-    """Create an OpenEnv instance with associated tools and manager.
-
-    Args:
-        env_url: OpenEnv server URL.
-        tool_schema: Tool definitions for the environment.
-        action_mapper: Optional callable that maps (tool_name, arguments)
-            to the server-specific action dict. Required when the env
-            server uses a different action schema than the generic
-            {tool_name, arguments} format (e.g. OpenSpiel).
-
-    Returns:
-        Tuple of (env, env_tools, tool_manager).
-    """
-    env = OpenEnv(base_url=env_url, tool_schema=tool_schema, action_mapper=action_mapper)
-    env_tools = EnvTool.from_env(env)
-    tool_manager = ToolManager(env_tools)
-    return env, env_tools, tool_manager
-
-
 def prepare_trajectories(
+    env_pool: EnvPool,
     n_trajectories: int,
-    env_url: str,
     tool_schema: List[Dict],
     system_prompt: str,
     action_mapper=None,
 ) -> Tuple[List[Dict[str, Any]], List[ToolManager], List[List[EnvTool]]]:
-    """Create and reset environments, build initial trajectories.
+    """Reset environments via EnvPool and build initial trajectories.
 
     For each trajectory:
-      1. Create a fresh OpenEnv connection
-      2. Reset the env to get initial observation
+      1. Get an EnvPoolAdapter (standard Env interface) from the pool
+      2. Reset the env slot to get initial observation
       3. Build a trajectory dict with system + user messages and tools
 
     Args:
+        env_pool: The EnvPool instance managing all environments.
         n_trajectories: Total number of trajectories to create.
-        env_url: OpenEnv server URL.
         tool_schema: Tool definitions for the environment.
         system_prompt: System prompt for the agent.
+        action_mapper: Optional callable to transform actions.
 
     Returns:
         Tuple of (trajectories, tool_managers, env_tools_list).
     """
+    # Get per-trajectory adapters from the pool
+    adapters = env_pool.get_adapters(
+        n=n_trajectories,
+        tool_schema=tool_schema,
+        action_mapper=action_mapper,
+    )
+
     trajectories = []
     tool_managers = []
     env_tools_list = []
 
-    for _ in range(n_trajectories):
-        env, env_tools, tm = create_env_and_tools(env_url, tool_schema, action_mapper=action_mapper)
-        # Reset env to start a new episode
-        initial_result = env.reset()
+    for adapter in adapters:
+        # Reset env slot to start a new episode
+        initial_result = adapter.reset()
         initial_obs = initial_result.observation
+
+        # Create EnvTool and ToolManager for this trajectory
+        env_tools = EnvTool.from_env(adapter)
+        tm = ToolManager(env_tools)
 
         # Build trajectory with initial observation as user message
         traj = {
@@ -212,22 +209,23 @@ def extract_rewards(env_tools_list: List[List[EnvTool]]) -> List[float]:
     return rewards
 
 
-def cleanup_envs(env_tools_list: List[List[EnvTool]]):
-    """Close all environment connections."""
-    for env_tools in env_tools_list:
-        if env_tools:
-            try:
-                env_tools[0]._env.close()
-            except Exception:
-                pass
-
-
 # ========== Main ==========
 def main():
+    # Determine pool size
+    n_trajectories = BATCH_SIZE * NUM_GENERATIONS
+    pool_size = ENV_POOL_SIZE if ENV_POOL_SIZE > 0 else n_trajectories
+
+    # Device groups: model + sampler + (optionally) env
     device_groups = [
         DeviceGroup(name='model', ranks=list(range(MODEL_GPUS)), device_type='GPU'),
         DeviceGroup(name='sampler', ranks=list(range(MODEL_GPUS, NUM_GPUS)), device_type='GPU'),
     ]
+
+    if ENV_REMOTE:
+        # Add a CPU-only DeviceGroup for env pool (1 CPU process, colocated on same node)
+        device_groups.append(
+            DeviceGroup(name='env', ranks=1, device_type='CPU'),
+        )
 
     model_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, dp_size=MODEL_GPUS)
     sampler_mesh = DeviceMesh.from_sizes(world_size=SAMPLER_GPUS, dp_size=SAMPLER_GPUS)
@@ -282,6 +280,22 @@ def main():
     )
     sampler.set_template('Qwen3_5Template', model_id=MODEL_ID, enable_thinking=False)
 
+    # ========== EnvPool: environment instances managed by Twinkle ==========
+    env_pool_kwargs = dict(
+        env_cls=ENV_CLS,
+        pool_size=pool_size,
+    )
+    if ENV_REMOTE:
+        # Deploy on dedicated CPU DeviceGroup
+        env_mesh = DeviceMesh.from_sizes(world_size=1, dp_size=1)
+        env_pool_kwargs['remote_group'] = 'env'
+        env_pool_kwargs['device_mesh'] = env_mesh
+    # else: runs locally in driver (zero RPC overhead)
+
+    env_pool = EnvPool(**env_pool_kwargs)
+    logger.info(f'EnvPool created: env_cls={ENV_CLS}, pool_size={pool_size}, '
+                f'remote={ENV_REMOTE}')
+
     # Local template for MultiTurnRollout bridge computation
     rollout_template = Qwen3_5Template(MODEL_ID, max_length=8192, enable_thinking=False)
     rollout_template.truncation_strategy = 'delete'
@@ -305,8 +319,8 @@ def main():
     metrics = CompletionRewardMetric()
 
     optim_step = 0
-    logger.info('Starting multi-turn GRPO training with OpenEnv')
-    logger.info(f'ENV_URL={ENV_URL}, MAX_TURNS={MAX_TURNS}, NUM_GENERATIONS={NUM_GENERATIONS}')
+    logger.info('Starting multi-turn GRPO training with EnvPool')
+    logger.info(f'ENV_CLS={ENV_CLS}, MAX_TURNS={MAX_TURNS}, NUM_GENERATIONS={NUM_GENERATIONS}')
     logger.info(get_device_placement())
 
     while optim_step < MAX_STEPS:
@@ -314,13 +328,13 @@ def main():
 
         # Total trajectories per batch: BATCH_SIZE * NUM_GENERATIONS
         # Each trajectory is an independent game episode.
-        n_trajectories = BATCH_SIZE * NUM_GENERATIONS
+        n_traj = BATCH_SIZE * NUM_GENERATIONS
 
         # 1. Prepare environments and initial trajectories
-        logger.info(f'[Step {optim_step}] Resetting {n_trajectories} environments...')
+        logger.info(f'[Step {optim_step}] Resetting {n_traj} environments...')
         expand_prompts, tool_managers, env_tools_list = prepare_trajectories(
-            n_trajectories=n_trajectories,
-            env_url=ENV_URL,
+            env_pool=env_pool,
+            n_trajectories=n_traj,
             tool_schema=TOOL_SCHEMA,
             system_prompt=SYSTEM_PROMPT,
             action_mapper=blackjack_action_mapper,
@@ -388,13 +402,12 @@ def main():
         if len(all_input_data) < MODEL_GPUS:
             logger.warning(f'[Step {optim_step}] Only {len(all_input_data)} valid trajectories '
                            f'after filtering (need >= {MODEL_GPUS}), skipping this batch.')
-            cleanup_envs(env_tools_list)
             continue
 
         all_old_logps = filtered_old_logps
         advantages = filtered_advantages
         total_completions = len(all_input_data)
-        logger.info(f'[Step {optim_step}] {total_completions}/{n_trajectories} trajectories '
+        logger.info(f'[Step {optim_step}] {total_completions}/{n_traj} trajectories '
                     f'passed length filter (max_len={max_len})')
 
         for mb_start in range(0, total_completions, MINI_BATCH_SIZE):
@@ -426,10 +439,7 @@ def main():
             if optim_step % SAVE_STEPS == 0:
                 model.save(f'multi-turn-grpo-checkpoint-{optim_step}')
 
-        # 8. Cleanup env connections
-        cleanup_envs(env_tools_list)
-
-        # 9. Log step summary
+        # 8. Log step summary
         log_dict = metrics.calculate()
         log_dict.update(model.calculate_metric(is_training=True))
         log_dict['avg_turns'] = avg_turns
@@ -437,6 +447,8 @@ def main():
         metrics.reset()
         logger.info(f'[Step {optim_step}/{MAX_STEPS}] {log_dict}')
 
+    # Cleanup
+    env_pool.close()
     logger.info(f'Training completed. optim_steps={optim_step}')
     model.save('multi-turn-grpo-final')
 
