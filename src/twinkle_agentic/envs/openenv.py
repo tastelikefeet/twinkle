@@ -37,12 +37,12 @@ def _import_env_class(path: str):
     except ModuleNotFoundError as e:
         missing = getattr(e, 'name', None) or ''
         if missing == module_path or missing == module_path.split('.')[0]:
-            raise ModuleNotFoundError(f"Cannot import module {module_path!r}. "
-                                      f"Make sure it is installed or on PYTHONPATH.") from e
+            raise ModuleNotFoundError(f'Cannot import module {module_path!r}. '
+                                      f'Make sure it is installed or on PYTHONPATH.') from e
         raise
     cls = getattr(module, class_name, None)
     if cls is None:
-        raise ImportError(f"Cannot find class {class_name!r} in module {module_path!r}")
+        raise ImportError(f'Cannot find class {class_name!r} in module {module_path!r}')
     return cls
 
 
@@ -118,8 +118,8 @@ def _discover_openenv_classes(env_name: str):
     except ModuleNotFoundError:
         raise ModuleNotFoundError(f"Cannot import '{env_name}'. Install the environment package:\n"
                                   f"  pip install openenv-{env_name.replace('_', '-')}\n"
-                                  f"Or from source:\n"
-                                  f"  pip install -e /path/to/OpenEnv/envs/{env_name}")
+                                  f'Or from source:\n'
+                                  f'  pip install -e /path/to/OpenEnv/envs/{env_name}')
 
     action_cls = None
     for name in getattr(pkg, '__all__', dir(pkg)):
@@ -133,7 +133,7 @@ def _discover_openenv_classes(env_name: str):
         server_pkg = importlib.import_module(f'{env_name}.server')
     except ImportError:
         raise ImportError(f"Cannot import '{env_name}.server'. "
-                          f"Make sure the package is correctly installed.")
+                          f'Make sure the package is correctly installed.')
     for _importer, modname, _ispkg in pkgutil.iter_modules(server_pkg.__path__):
         if modname.endswith('_environment') or modname.endswith('_env'):
             mod = importlib.import_module(f'{env_name}.server.{modname}')
