@@ -1,10 +1,10 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # DPO Full-Parameter Training via Ray.
 # Uses separate policy and reference model GPU groups.
 # All training config passed as CLI flags. Override at invocation, e.g.:
-#   bash dpo_full.sh --model-id ms://Qwen/Qwen3-8B --beta 0.05
+#   sh dpo_full.sh --model-id ms://Qwen/Qwen3-8B --beta 0.05
 
 python dpo_full.py \
     --model-id ms://Qwen/Qwen3-4B \

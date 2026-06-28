@@ -1,7 +1,7 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Native baseline: full original context, single-turn QA, no compression, no tools.
 # Compare against eval_condensed_compressed.sh on identical --dataset / --limit / --model_id.
-set -euo pipefail
+set -eu
 
 DATASET="/mnt/data/yzhao/datasets/musique_ans_v1.0_dev.jsonl"
 MODEL_ID="ms://Qwen/Qwen3.5-4B"

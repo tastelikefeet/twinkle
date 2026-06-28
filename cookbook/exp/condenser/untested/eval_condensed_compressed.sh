@@ -1,7 +1,7 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Compressed run: chunk → condense via Qwen3.5-4B-Condenser LoRA → extract_condensed tool loop.
 # Identical --dataset / --limit / --model_id as eval_condensed_native.sh for an A/B comparison.
-set -euo pipefail
+set -eu
 
 DATASET="/mnt/data/yzhao/datasets/musique_ans_v1.0_dev.jsonl"
 MODEL_ID="ms://Qwen/Qwen3.5-4B"

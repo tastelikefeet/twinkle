@@ -1,10 +1,10 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # DPO MultiLoRA Training via Ray (Megatron backend).
 # Uses base model (disable_lora=True) as reference model.
 # All training config passed as CLI flags. Override at invocation, e.g.:
-#   bash dpo_multi_lora.sh --model-id ms://Qwen/Qwen3.5-4B --lr 5e-5
+#   sh dpo_multi_lora.sh --model-id ms://Qwen/Qwen3.5-4B --lr 5e-5
 
 python dpo_multi_lora.py \
     --model-id ms://Qwen/Qwen3.5-4B \

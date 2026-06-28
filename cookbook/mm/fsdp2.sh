@@ -1,9 +1,9 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # Multi-modal FSDP2 + LoRA training (LaTeX OCR).
 # All training config passed as CLI flags. Override at invocation, e.g.:
-#   bash fsdp2.sh --model-id ms://Qwen/Qwen2.5-VL-3B-Instruct --batch-size 4
+#   sh fsdp2.sh --model-id ms://Qwen/Qwen2.5-VL-3B-Instruct --batch-size 4
 
 CUDA_VISIBLE_DEVICES=0,1 \
   torchrun --nproc_per_node=2 fsdp2.py \

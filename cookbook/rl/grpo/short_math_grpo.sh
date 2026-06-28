@@ -1,10 +1,10 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # GRPO Short Math Reasoning on GSM8K via Ray.
 # Uses short reasoning format: shorter thinking gets higher brevity reward.
 # All training config passed as CLI flags. Override at invocation, e.g.:
-#   bash short_math_grpo.sh --model-id ms://Qwen/Qwen3.5-4B --max-steps 500
+#   sh short_math_grpo.sh --model-id ms://Qwen/Qwen3.5-4B --max-steps 500
 
 python short_math_grpo.py \
     --model-id ms://Qwen/Qwen3.5-4B \

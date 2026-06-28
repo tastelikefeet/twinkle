@@ -1,9 +1,9 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # Multi-modal FSDP2 + LoRA training for Gemma4 (LaTeX OCR).
 # All training config passed as CLI flags. Override at invocation, e.g.:
-#   bash fsdp2_gemma4_mm.sh --model-id ms://google/gemma-4-4b-it --batch-size 4
+#   sh fsdp2_gemma4_mm.sh --model-id ms://google/gemma-4-4b-it --batch-size 4
 
 CUDA_VISIBLE_DEVICES=0,1 \
   torchrun --nnodes=1 --nproc_per_node=2 fsdp2_gemma4_mm.py \

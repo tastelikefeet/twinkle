@@ -1,11 +1,11 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # GRPO Short Math MultiLoRA on GSM8K via Ray.
 # Uses MultiLoraMegatronModel with filesystem-based LoRA sync to vLLM.
 # Model: Qwen3.6-35B-A3B (MoE) with tp=2, ep=2, pp=2.
 # All training config passed as CLI flags. Override at invocation, e.g.:
-#   bash short_math_grpo_multi_lora.sh --model-id ms://Qwen/Qwen3.6-35B-A3B --max-steps 500
+#   sh short_math_grpo_multi_lora.sh --model-id ms://Qwen/Qwen3.6-35B-A3B --max-steps 500
 
 python short_math_grpo_multi_lora.py \
     --model-id ms://Qwen/Qwen3.6-35B-A3B \

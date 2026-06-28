@@ -1,10 +1,10 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # FSDP + Sequence Parallelism training.
 # To enable Transformers sequence parallelism, set ulysses-size > 1.
 # All training config passed as CLI flags. Override at invocation, e.g.:
-#   bash sp_fsdp_dense.sh --model-id ms://Qwen/Qwen3.5-4B --ulysses-size 4
+#   sh sp_fsdp_dense.sh --model-id ms://Qwen/Qwen3.5-4B --ulysses-size 4
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
   torchrun --nproc_per_node=4 sp_fsdp_dense.py \

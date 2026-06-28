@@ -1,10 +1,10 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # GRPO Short Math MoE on GSM8K via Ray.
 # Uses Megatron MoE model with TP+EP+PP parallelism.
 # All training config passed as CLI flags. Override at invocation, e.g.:
-#   bash short_math_grpo_moe.sh --model-id ms://Qwen/Qwen3.6-35B-A3B --max-steps 500
+#   sh short_math_grpo_moe.sh --model-id ms://Qwen/Qwen3.6-35B-A3B --max-steps 500
 
 python short_math_grpo_moe.py \
     --model-id ms://Qwen/Qwen3.6-35B-A3B \

@@ -1,10 +1,10 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # GRPO Multimodal training on OlympiadBench via Ray.
 # Supports multimodal math/physics problems (Chinese CEE).
 # All training config passed as CLI flags. Override at invocation, e.g.:
-#   bash grpo_mm.sh --model-id ms://Qwen/Qwen3.5-4B --max-steps 500
+#   sh grpo_mm.sh --model-id ms://Qwen/Qwen3.5-4B --max-steps 500
 
 python grpo_mm.py \
     --model-id ms://Qwen/Qwen3.5-4B \

@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # `deepseek-ai/DeepSeek-V4-Flash` uses mixed FP4/FP8 weights.
 # Convert the checkpoint before training by following:
@@ -33,7 +33,7 @@ torchrun --nnodes=$NNODES --node_rank=${NODE_RANK:?"NODE_RANK must be set"} \
     --enable-ep 1 \
     "$@"
 
-#  NODE_RANK=0 bash ep_fsdp2_lora_deepseek_v4_multinode.sh
-#  NODE_RANK=1 bash ep_fsdp2_lora_deepseek_v4_multinode.sh
-#  NODE_RANK=2 bash ep_fsdp2_lora_deepseek_v4_multinode.sh
-#  NODE_RANK=3 bash ep_fsdp2_lora_deepseek_v4_multinode.sh
+#  NODE_RANK=0 sh ep_fsdp2_lora_deepseek_v4_multinode.sh
+#  NODE_RANK=1 sh ep_fsdp2_lora_deepseek_v4_multinode.sh
+#  NODE_RANK=2 sh ep_fsdp2_lora_deepseek_v4_multinode.sh
+#  NODE_RANK=3 sh ep_fsdp2_lora_deepseek_v4_multinode.sh

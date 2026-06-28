@@ -1,11 +1,11 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # GKD Off-Policy Distillation via Ray.
 # Teacher vLLM computes prompt logprobs on existing dataset responses.
 # Student Megatron model learns to match teacher's token distribution.
 # All training config passed as CLI flags. Override at invocation, e.g.:
-#   bash gkd_off_policy.sh --student-model-id ms://Qwen/Qwen3-1.7B --gkd-beta 0.3
+#   sh gkd_off_policy.sh --student-model-id ms://Qwen/Qwen3-1.7B --gkd-beta 0.3
 
 python gkd_off_policy.py \
     --student-model-id ms://Qwen/Qwen3-0.6B \

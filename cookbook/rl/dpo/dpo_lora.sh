@@ -1,10 +1,10 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # DPO LoRA Training via Ray (single GPU group).
 # Uses base model (disable_lora=True) as reference model.
 # All training config passed as CLI flags. Override at invocation, e.g.:
-#   bash dpo_lora.sh --model-id ms://Qwen/Qwen3-8B --lr 5e-5
+#   sh dpo_lora.sh --model-id ms://Qwen/Qwen3-8B --lr 5e-5
 
 python dpo_lora.py \
     --model-id ms://Qwen/Qwen3-4B \

@@ -1,10 +1,10 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # GRPO training on GSM8K via Ray.
 # Model + vLLM sampler on separate GPU groups.
 # All training config passed as CLI flags. Override at invocation, e.g.:
-#   bash grpo.sh --model-id ms://Qwen/Qwen3.5-4B --max-steps 500
+#   sh grpo.sh --model-id ms://Qwen/Qwen3.5-4B --max-steps 500
 
 python grpo.py \
     --model-id ms://Qwen/Qwen3.5-4B \

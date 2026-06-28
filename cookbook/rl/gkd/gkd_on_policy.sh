@@ -1,11 +1,11 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # GKD On-Policy Multimodal Distillation via Ray.
 # Student generates on-policy, teacher provides top-k prompt logprobs,
 # student trains to match teacher's distribution.
 # All training config passed as CLI flags. Override at invocation, e.g.:
-#   bash gkd_on_policy.sh --student-model-id ms://Qwen/Qwen3.5-4B --max-steps 500
+#   sh gkd_on_policy.sh --student-model-id ms://Qwen/Qwen3.5-4B --max-steps 500
 
 python gkd_on_policy.py \
     --student-model-id ms://Qwen/Qwen3.5-4B \
