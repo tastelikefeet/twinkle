@@ -50,10 +50,10 @@ class SkillProvider(ABC):
 
         Args:
             cache_dir: Local directory to cache fetched skill files.
-                       If None, uses ~/.cache/twinkle/tui/skills/<provider_name>
+                       If None, uses ~/.cache/twinkle/auto/skills/<provider_name>
         """
         if cache_dir is None:
-            cache_dir = Path.home() / '.cache' / 'twinkle' / 'tui' / 'skills' / self.name
+            cache_dir = Path.home() / '.cache' / 'twinkle' / 'auto' / 'skills' / self.name
         self.cache_dir = cache_dir
 
     @property

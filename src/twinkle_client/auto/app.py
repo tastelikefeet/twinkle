@@ -68,17 +68,21 @@ class TwinkleAuto:
         from twinkle_client.auto.agent.monitor import TrainingMonitor
         from twinkle_client.auto.connection import LocalConnection
 
+        from openai import AsyncOpenAI
+
         # Connection
         self._connection = LocalConnection()
         if self.run_id:
             self._connection.current_run_id = self.run_id
 
+        # Shared LLM client
+        client = AsyncOpenAI(base_url=self.llm_base_url, api_key=self.llm_api_key)
+
         # Agent
         self._agent = AgentLoop(
             connection=self._connection,
-            llm_base_url=self.llm_base_url,
+            llm_client=client,
             llm_model=self.llm_model,
-            llm_api_key=self.llm_api_key,
             skills_prompt='',
         )
 
@@ -86,9 +90,8 @@ class TwinkleAuto:
         self._monitor = TrainingMonitor(
             connection=self._connection,
             on_message=self._on_monitor_message,
-            llm_base_url=self.llm_base_url,
+            llm_client=client,
             llm_model=self.llm_model,
-            llm_api_key=self.llm_api_key,
         )
 
         # Background tasks

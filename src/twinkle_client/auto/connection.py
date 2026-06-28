@@ -46,8 +46,6 @@ class LocalConnection:
     def __init__(self, base_dir: Path | str | None = None):
         self.base_dir = Path(base_dir) if base_dir else DEFAULT_BASE_DIR
         self.current_run_id: str | None = None
-        self._metrics_offsets: dict[str, int] = {}
-        self._logs_offsets: dict[str, int] = {}
 
     # ──────────────────────────────────────────────────────────────────────
     # Meta
@@ -112,60 +110,6 @@ class LocalConnection:
             return [json.loads(line) for line in recent if line.strip()]
         except Exception:
             return []
-
-    def get_new_metrics(self, run_id: str) -> list[dict[str, Any]]:
-        """Read only new metrics since last read (incremental, per-run)."""
-        metrics_file = self.base_dir / run_id / 'metrics.jsonl'
-        if not metrics_file.exists():
-            return []
-        try:
-            offset = self._metrics_offsets.get(run_id, 0)
-            with open(metrics_file, 'r') as f:
-                f.seek(offset)
-                new_data = f.read()
-                self._metrics_offsets[run_id] = f.tell()
-            if not new_data.strip():
-                return []
-            return [json.loads(line) for line in new_data.strip().splitlines() if line.strip()]
-        except Exception:
-            return []
-
-    def get_new_logs(self, run_id: str) -> list[dict[str, Any]]:
-        """Read new raw log lines from output.log (incremental, per-run).
-
-        Returns list of dicts with 'msg' key for each new line.
-        """
-        output_file = self.base_dir / run_id / 'output.log'
-        entries: list[dict[str, Any]] = []
-
-        if not output_file.exists():
-            return entries
-
-        try:
-            offset = self._logs_offsets.get(run_id, 0)
-            with open(output_file, 'r', errors='replace') as f:
-                f.seek(offset)
-                new_data = f.read()
-                self._logs_offsets[run_id] = f.tell()
-            if new_data:
-                for line in new_data.split('\n'):
-                    if not line:
-                        continue
-                    # For \r-separated content (progress bars), keep only the last segment
-                    # This simulates terminal behavior where \r overwrites the current line
-                    if '\r' in line:
-                        line = line.rsplit('\r', 1)[-1]
-                    if line.strip():
-                        entries.append({'msg': line})
-        except Exception:
-            pass
-
-        return entries
-
-    def reset_offsets(self, run_id: str) -> None:
-        """Reset incremental read offsets for a run (e.g., after switching runs)."""
-        self._metrics_offsets.pop(run_id, None)
-        self._logs_offsets.pop(run_id, None)
 
     # ──────────────────────────────────────────────────────────────────────
     # Process health helpers
@@ -305,8 +249,6 @@ class LocalConnection:
 
         Server state (LoRA weights, optimizer, LR scheduler) is preserved in GPU memory.
         """
-        # Reset log/metrics offsets since output.log will be truncated on re-launch
-        self.reset_offsets(run_id)
         return self._launch_script(run_id)
 
     def stop_training(self, run_id: str) -> dict[str, Any]:

@@ -8,13 +8,13 @@ from pathlib import Path
 from twinkle_client.skills.base import SkillProvider
 
 # Default: user-local skills directory (user drops .md files here)
-_DEFAULT_SKILLS_DIR = Path.home() / '.cache' / 'twinkle' / 'tui' / 'skills' / 'local'
+_DEFAULT_SKILLS_DIR = Path.home() / '.cache' / 'twinkle' / 'auto' / 'skills' / 'local'
 
 
 class LocalSkillProvider(SkillProvider):
     """Loads skill markdown files from a local directory.
 
-    By default, reads from ~/.cache/twinkle/tui/skills/local/.
+    By default, reads from ~/.cache/twinkle/auto/skills/local/.
     Users can place custom .md skill files there to extend the agent's
     domain knowledge without modifying the codebase.
     """

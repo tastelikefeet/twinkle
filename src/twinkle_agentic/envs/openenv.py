@@ -318,14 +318,14 @@ class EnvPool:
     def pool_size(self) -> int:
         return self._pool_size
 
-    def get_adapters(self, n: Optional[int] = None) -> List['EnvPoolAdapter']:
-        pool_size = getattr(self, '_pool_size', None)
-        if n is None:
-            if pool_size is None:
-                raise ValueError('n must be specified when calling get_adapters from driver')
-            n = pool_size
-        if pool_size is not None and n > pool_size:
-            raise ValueError(f'Requested {n} adapters but pool only has {pool_size} slots.')
+    def get_adapters(self, n: int) -> List['EnvPoolAdapter']:
+        """Create n EnvPoolAdapter instances wrapping pool slots [0, n).
+
+        Must be called from the driver side. Each adapter proxies
+        reset/step calls to the correct worker via remote_function dispatch.
+        """
+        if n > self._pool_size:
+            raise ValueError(f'Requested {n} adapters but pool only has {self._pool_size} slots.')
         return [EnvPoolAdapter(pool=self, idx=i) for i in range(n)]
 
 

@@ -8,8 +8,6 @@ import json
 from twinkle.utils.logger import get_logger
 from typing import Any, Callable
 
-from openai import AsyncOpenAI
-
 from twinkle_client.auto.agent.prompts import SYSTEM_PROMPT
 from twinkle_client.auto.agent.tools import TOOL_SCHEMAS, ToolExecutor
 from twinkle_client.auto.connection import LocalConnection
@@ -30,14 +28,13 @@ class AgentLoop:
     def __init__(
         self,
         connection: LocalConnection,
-        llm_base_url: str,
+        llm_client: 'AsyncOpenAI',
         llm_model: str,
-        llm_api_key: str,
         skills_prompt: str = '',
     ):
         self.connection = connection
         self.llm_model = llm_model
-        self._client = AsyncOpenAI(base_url=llm_base_url, api_key=llm_api_key)
+        self._client = llm_client
         self._tool_executor = ToolExecutor(connection)
         # Build system prompt with optional skills section
         full_prompt = SYSTEM_PROMPT

@@ -21,8 +21,6 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from openai import AsyncOpenAI
-
 from twinkle.utils.logger import get_logger
 from twinkle_client.auto.connection import LocalConnection
 
@@ -97,16 +95,15 @@ class TrainingMonitor:
         self,
         connection: LocalConnection,
         on_message: Callable[[str], None],
-        llm_base_url: str = 'http://localhost:11434/v1',
+        llm_client: 'AsyncOpenAI',
         llm_model: str = 'qwen3.5',
-        llm_api_key: str = 'not-needed',
         poll_interval: float = 30.0,
     ):
         self.connection = connection
         self.on_message = on_message
         self.llm_model = llm_model
         self.poll_interval = poll_interval
-        self._client = AsyncOpenAI(base_url=llm_base_url, api_key=llm_api_key)
+        self._client = llm_client
         self._running = True
         # Track state per run
         self._last_analyzed_run_id: str | None = None
