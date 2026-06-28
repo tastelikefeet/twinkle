@@ -612,11 +612,18 @@ class ToolExecutor:
         for _ in range(timeout_s):
             time.sleep(1)
             if proc.poll() is not None:
+                # Server died — read log tail to diagnose
+                log_tail = ToolExecutor._read_log_tail(log_path, max_chars=2000)
+                error_msg = (
+                    f'Server exited immediately (code={proc.returncode}). '
+                    f'Model: {model_id}, GPUs: {t_gpus}, Samplers: {len(sampler_list)}.\n'
+                    f'--- server.log tail ---\n{log_tail}'
+                )
                 return {
                     'status': 'error',
-                    'error': f'Server exited (code={proc.returncode}). '
-                             f'Model: {model_id}, GPUs: {t_gpus}, Samplers: {len(sampler_list)}.',
+                    'error': error_msg,
                     'log_path': log_path,
+                    'hint': 'Check if required packages are installed (pip install -e ".[all]").',
                 }
             try:
                 urllib.request.urlopen(f'{server_url}/api/v1/healthz', timeout=2)
@@ -647,6 +654,18 @@ class ToolExecutor:
             'error': 'Health check did not pass within timeout. Models may still be loading.',
             'server_pid': proc.pid, 'log_path': log_path,
         }
+
+    @staticmethod
+    def _read_log_tail(log_path: str, max_chars: int = 2000) -> str:
+        """Read the tail of a log file for error diagnosis."""
+        try:
+            with open(log_path, 'r', errors='replace') as f:
+                content = f.read()
+            if len(content) <= max_chars:
+                return content.strip()
+            return content[-max_chars:].strip()
+        except OSError:
+            return '(could not read log file)'
 
     @staticmethod
     def _probe_sampler_ready(server_url: str, sampler_list: list[dict], fallback_model_id: str) -> bool:

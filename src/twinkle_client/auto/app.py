@@ -154,8 +154,9 @@ class TwinkleAuto:
         print(token, end='', flush=True)
 
     @staticmethod
-    def _on_stream_reset() -> None:
-        print(f'\n  {_DIM}↳ calling tools...{_RESET}')
+    def _on_stream_reset(tool_names: list[str]) -> None:
+        names = ', '.join(tool_names)
+        print(f'\n  {_DIM}↳ calling {names}{_RESET}')
         print(f'{_CYAN}Agent:{_RESET} ', end='', flush=True)
 
     def _on_monitor_message(self, message: str) -> None:

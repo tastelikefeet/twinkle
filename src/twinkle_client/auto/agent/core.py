@@ -48,15 +48,15 @@ class AgentLoop:
         self,
         user_input: str,
         on_token: Callable[[str], None] | None = None,
-        on_stream_reset: Callable[[], None] | None = None,
+        on_stream_reset: Callable[[list[str]], None] | None = None,
     ) -> str:
         """Process user input through LLM with tool calling.
 
         Args:
             user_input: The user's message text.
             on_token: Callback for each streamed text chunk.
-            on_stream_reset: Called when a tool-call is detected mid-stream,
-                signalling the UI to discard any partially-displayed tokens.
+            on_stream_reset: Called when tool-calls are detected mid-stream,
+                receives a list of tool names being invoked.
 
         Returns the final assistant text response.
         """
@@ -75,10 +75,11 @@ class AgentLoop:
                 return content
 
             # Tool calls detected — discard any leaked intermediate tokens
+            tool_names = [tc['function']['name'] for tc in tool_calls]
             if on_stream_reset:
-                on_stream_reset()
+                on_stream_reset(tool_names)
 
-            logger.info(f'Tool calls detected: {[tc["function"]["name"] for tc in tool_calls]}')
+            logger.info(f'Tool calls detected: {tool_names}')
             self.history.append({
                 'role': 'assistant',
                 'content': content,
