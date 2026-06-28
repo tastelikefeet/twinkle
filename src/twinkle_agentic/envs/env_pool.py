@@ -1,34 +1,39 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
-"""EnvPool: environment pool with @remote_class integration.
+"""EnvPool: distributed environment pool with @remote_class integration.
 
-Follows the same pattern as :class:`twinkle.dataloader.DataLoader`:
-- Decorated with ``@remote_class(execute='first')``
-- When instantiated **without** ``remote_group``, runs locally in the
-  current process (driver or worker) with zero RPC overhead.
-- When instantiated **with** ``remote_group='env'``, gets deployed to a
-  dedicated Ray Worker for process-level isolation.
+Decorated with ``@remote_class(execute='all')``:
+- With ``ranks=1``: single worker manages all environments (same as before).
+- With ``ranks=N``: N workers each manage pool_size/N environments (sharded).
+- Without ``remote_group``: runs locally in the current process.
 
-The pool manages N environment instances internally. Each slot is accessed
-by index. :class:`EnvPoolAdapter` wraps a single slot as a standard
-:class:`Env` so it can be used with :class:`EnvTool` / :class:`ToolManager`.
+The pool manages N environment instances sharded across workers. Each slot is
+accessed by global index. :class:`EnvPoolAdapter` wraps a single slot as a
+standard :class:`Env` so it can be used with :class:`EnvTool` / :class:`ToolManager`.
 
-Usage (local, inside MultiTurnRollout worker)::
+Usage (local)::
 
     pool = EnvPool(env_cls='blackjack_env:BlackjackEnv', pool_size=32)
     adapters = pool.get_adapters(tool_schema=TOOL_SCHEMA)
-    # adapters[i] is a standard Env
 
-Usage (remote, on a dedicated DeviceGroup)::
+Usage (remote, single worker)::
 
     pool = EnvPool(
-        env_cls='coding_env:CodingEnv',
-        pool_size=8,
-        remote_group='env',
-        device_mesh=env_mesh,
+        env_cls='coding_env:CodingEnv', pool_size=8,
+        remote_group='env', device_mesh=DeviceMesh.from_sizes(world_size=1, dp_size=1),
     )
+
+Usage (remote, multi-worker distributed)::
+
+    pool = EnvPool(
+        env_cls='coding_env:CodingEnv', pool_size=32,
+        remote_group='env', device_mesh=DeviceMesh.from_sizes(world_size=4, dp_size=4),
+    )
+    # 4 workers, each manages 8 environments
 """
 import importlib
 import json
+import math
+import os
 from typing import Any, Callable, Dict, List, Optional, Type, Union
 
 from twinkle import DeviceMesh, remote_class, remote_function
@@ -36,6 +41,24 @@ from twinkle.utils import get_logger
 from .base import Env, StepResult
 
 logger = get_logger()
+
+
+def _collect_single(results, device_mesh=None):
+    """Collect single-item results: pick the non-None result from workers."""
+    for r in results:
+        if r is not None:
+            return r
+    return None
+
+
+def _collect_batch(results, device_mesh=None):
+    """Collect batch results: merge (idx, result) pairs, return sorted by idx."""
+    merged = []
+    for worker_results in results:
+        if worker_results:
+            merged.extend(worker_results)
+    merged.sort(key=lambda x: x[0])
+    return [r[1] for r in merged]
 
 
 def _import_env_class(path: str):
@@ -119,14 +142,17 @@ def _accepts_two_positional(method) -> bool:
         return False
 
 
-@remote_class(execute='first')
+@remote_class(execute='all')
 class EnvPool:
-    """Pool of environment instances managed as a Twinkle remote_class.
+    """Distributed pool of environment instances managed as a Twinkle remote_class.
+
+    When deployed with multiple workers (ranks > 1), environments are sharded
+    across workers. Each worker manages pool_size // num_workers environments.
 
     Args:
         env_cls: Import path to the environment class (e.g.
             ``'blackjack_env:BlackjackEnv'``), or the class itself.
-        pool_size: Number of environment instances to create.
+        pool_size: Total number of environment instances across all workers.
         device_mesh: Optional DeviceMesh for distributed deployment.
         env_kwargs: Extra keyword arguments for environment construction.
     """
@@ -139,7 +165,6 @@ class EnvPool:
         env_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs,
     ):
-        # Resolve env class
         if isinstance(env_cls, str):
             self._env_cls = _import_env_class(env_cls)
         else:
@@ -147,45 +172,39 @@ class EnvPool:
 
         self._pool_size = pool_size
         self._env_kwargs = env_kwargs or {}
-        self._episode_rewards: List[float] = [0.0] * pool_size
 
-        # Instantiate all environments
-        self._envs: List[Any] = []
-        for _ in range(pool_size):
-            self._envs.append(self._env_cls(**self._env_kwargs))
+        # Shard: each worker owns [_start, _end)
+        rank = int(os.environ.get('RANK', 0))
+        world_size = int(os.environ.get('WORLD_SIZE', 1))
+        shard_size = math.ceil(pool_size / world_size)
+        self._start = rank * shard_size
+        self._end = min(self._start + shard_size, pool_size)
+        local_size = self._end - self._start
 
-        logger.info(f'EnvPool initialized: env_cls={env_cls}, pool_size={pool_size}')
+        self._episode_rewards: List[float] = [0.0] * local_size
+        self._envs: List[Any] = [
+            self._env_cls(**self._env_kwargs) for _ in range(local_size)
+        ]
 
-    @remote_function()
-    def reset(self, idx: int) -> Dict[str, Any]:
-        """Reset environment instance at slot ``idx``.
+        logger.info(f'EnvPool initialized: env_cls={env_cls}, pool_size={pool_size}, '
+                    f'shard=[{self._start}, {self._end}), rank={rank}/{world_size}')
 
-        Returns:
-            Dict with keys: observation, reward, done.
-        """
-        env = self._envs[idx]
-        self._episode_rewards[idx] = 0.0
+    def _owns(self, idx: int) -> bool:
+        return self._start <= idx < self._end
+
+    def _do_reset(self, idx: int) -> Dict[str, Any]:
+        local_idx = idx - self._start
+        env = self._envs[local_idx]
+        self._episode_rewards[local_idx] = 0.0
         result = env.reset()
         normalized = _normalize_result(result)
         normalized['episode_reward'] = 0.0
         return normalized
 
-    @remote_function()
-    def step(self, idx: int, action: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute one step on environment at slot ``idx``.
+    def _do_step(self, idx: int, action: Dict[str, Any]) -> Dict[str, Any]:
+        local_idx = idx - self._start
+        env = self._envs[local_idx]
 
-        Args:
-            idx: Environment slot index.
-            action: Action dict. If it contains 'tool_name' and 'arguments',
-                dispatches as ``env.step(tool_name, arguments)`` for Twinkle
-                Env protocol. Otherwise passes the dict directly.
-
-        Returns:
-            Dict with keys: observation, reward, done, episode_reward.
-        """
-        env = self._envs[idx]
-
-        # Dispatch based on env interface
         if 'tool_name' in action and 'arguments' in action:
             if hasattr(env, 'step') and _accepts_two_positional(env.step):
                 result = env.step(action['tool_name'], action['arguments'])
@@ -195,37 +214,43 @@ class EnvPool:
             result = env.step(action)
 
         normalized = _normalize_result(result)
-        self._episode_rewards[idx] += normalized['reward']
-        normalized['episode_reward'] = self._episode_rewards[idx]
+        self._episode_rewards[local_idx] += normalized['reward']
+        normalized['episode_reward'] = self._episode_rewards[local_idx]
         return normalized
 
-    @remote_function()
-    def reset_batch(self, indices: List[int]) -> List[Dict[str, Any]]:
-        """Batch reset multiple environments.
+    @remote_function(dispatch='all', collect=_collect_single)
+    def reset(self, idx: int) -> Dict[str, Any]:
+        """Reset environment instance at global slot ``idx``."""
+        if not self._owns(idx):
+            return None
+        return self._do_reset(idx)
 
-        Args:
-            indices: List of slot indices to reset.
+    @remote_function(dispatch='all', collect=_collect_single)
+    def step(self, idx: int, action: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute one step on environment at global slot ``idx``."""
+        if not self._owns(idx):
+            return None
+        return self._do_step(idx, action)
 
-        Returns:
-            List of result dicts, one per index.
-        """
-        return [self.reset(i) for i in indices]
+    @remote_function(dispatch='all', collect=_collect_batch)
+    def reset_batch(self, indices: List[int]) -> List:
+        """Batch reset multiple environments (only processes owned slots)."""
+        results = []
+        for i in indices:
+            if self._owns(i):
+                results.append((i, self._do_reset(i)))
+        return results
 
-    @remote_function()
-    def step_batch(self, indices: List[int], actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Batch step multiple environments.
+    @remote_function(dispatch='all', collect=_collect_batch)
+    def step_batch(self, indices: List[int], actions: List[Dict[str, Any]]) -> List:
+        """Batch step multiple environments (only processes owned slots)."""
+        results = []
+        for i, a in zip(indices, actions):
+            if self._owns(i):
+                results.append((i, self._do_step(i, a)))
+        return results
 
-        Args:
-            indices: List of slot indices.
-            actions: List of action dicts, aligned with indices.
-
-        Returns:
-            List of result dicts, one per index.
-        """
-        assert len(indices) == len(actions)
-        return [self.step(i, a) for i, a in zip(indices, actions)]
-
-    @remote_function()
+    @remote_function(dispatch='all', collect='first')
     def close(self) -> None:
         """Release all environment resources."""
         for env in self._envs:
@@ -258,11 +283,14 @@ class EnvPool:
         Returns:
             List of EnvPoolAdapter instances (indices 0..n-1).
         """
+        pool_size = getattr(self, '_pool_size', None)
         if n is None:
-            n = self._pool_size
-        if n > self._pool_size:
+            if pool_size is None:
+                raise ValueError('n must be specified when calling get_adapters from driver')
+            n = pool_size
+        if pool_size is not None and n > pool_size:
             raise ValueError(
-                f'Requested {n} adapters but pool only has {self._pool_size} slots.'
+                f'Requested {n} adapters but pool only has {pool_size} slots.'
             )
         return [
             EnvPoolAdapter(pool=self, idx=i, tool_schema=tool_schema, action_mapper=action_mapper)

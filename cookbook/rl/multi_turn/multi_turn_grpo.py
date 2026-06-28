@@ -75,6 +75,8 @@ MAX_TURNS = int(os.environ.get('MAX_TURNS', '6'))
 ENV_CLS = os.environ.get('ENV_CLS', 'blackjack_env:BlackjackEnv')
 # ENV_REMOTE: set to '1' to deploy envs on a dedicated CPU DeviceGroup
 ENV_REMOTE = os.environ.get('ENV_REMOTE', '0') == '1'
+# ENV_NUM_WORKERS: number of CPU workers for distributed EnvPool (default 1)
+ENV_NUM_WORKERS = int(os.environ.get('ENV_NUM_WORKERS', '1'))
 # Pool size = total trajectories per batch
 ENV_POOL_SIZE = int(os.environ.get('ENV_POOL_SIZE', '0'))  # 0 = auto
 
@@ -222,9 +224,10 @@ def main():
     ]
 
     if ENV_REMOTE:
-        # Add a CPU-only DeviceGroup for env pool (1 CPU process, colocated on same node)
+        # Add a CPU-only DeviceGroup for env pool
+        # ranks=ENV_NUM_WORKERS: each rank becomes one EnvPool worker
         device_groups.append(
-            DeviceGroup(name='env', ranks=1, device_type='CPU'),
+            DeviceGroup(name='env', ranks=ENV_NUM_WORKERS, device_type='CPU'),
         )
 
     model_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, dp_size=MODEL_GPUS)
@@ -286,8 +289,8 @@ def main():
         pool_size=pool_size,
     )
     if ENV_REMOTE:
-        # Deploy on dedicated CPU DeviceGroup
-        env_mesh = DeviceMesh.from_sizes(world_size=1, dp_size=1)
+        # Deploy on dedicated CPU DeviceGroup with ENV_NUM_WORKERS workers
+        env_mesh = DeviceMesh.from_sizes(world_size=ENV_NUM_WORKERS, dp_size=ENV_NUM_WORKERS)
         env_pool_kwargs['remote_group'] = 'env'
         env_pool_kwargs['device_mesh'] = env_mesh
     # else: runs locally in driver (zero RPC overhead)

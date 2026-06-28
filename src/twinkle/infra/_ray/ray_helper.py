@@ -341,6 +341,9 @@ class RayHelper:
                 worker_name = key + '-' + str(rank)
                 env_vars = os.environ.copy()
                 env_vars.update({
+                    'WORLD_SIZE': str(world_size),
+                    'RANK': str(rank),
+                    'LOCAL_RANK': str(0),
                     'CLUSTER_NAME': cluster_name,
                     'WORKER_NAME': worker_name,
                     'TWINKLE_MODE': 'ray',
