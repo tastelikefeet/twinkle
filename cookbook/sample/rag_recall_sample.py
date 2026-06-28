@@ -37,7 +37,7 @@ logger = get_logger()
 # ---------------------------------------------------------------------------
 CONDENSE_MODEL_ID = os.environ.get('CONDENSE_MODEL_ID', 'ms://twinkle-kit/Qwen3.5-4B-CM-v2')
 EMBED_MODEL_ID = os.environ.get(
-    'EMBED_MODEL_ID', 'output/embedding_lora_transformers/step_8000')
+    'EMBED_MODEL_ID', 'output/embedding_lora_transformers/last-checkpoint')
 SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS', 4))
 EMB_GPUS = int(os.environ.get('EMB_GPUS', 4))
 NUM_GPUS = SAMPLER_GPUS + EMB_GPUS

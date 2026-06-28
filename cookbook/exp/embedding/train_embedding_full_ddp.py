@@ -261,6 +261,8 @@ def train():
                 save_checkpoint(model, f'step_{cur_step}')
 
     save_checkpoint(model, 'last-checkpoint')
+    # Force sync: resolve any pending lazy remote calls (save) before exit
+    model.calculate_metric(is_training=True)
     logger.info(f'Training complete. Final step: {cur_step}')
 
 

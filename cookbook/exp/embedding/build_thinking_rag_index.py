@@ -165,7 +165,7 @@ logger = get_logger()
 
 EMBED_MODEL_ID = os.environ.get(
     'EMBED_MODEL_ID',
-    'output/embedding_lora_transformers/step_8000',
+    'output/embedding_full_transformers/last-checkpoint',
 )
 CONDENSE_MODEL_ID = os.environ.get('CONDENSE_MODEL_ID', 'ms://twinkle-kit/Qwen3.5-4B-CM-v2')
 
@@ -202,25 +202,27 @@ PREFETCH_WORKERS = int(os.environ.get('PREFETCH_WORKERS', 2))
 # exact 4-line body template + explicit negative constraints is the only way to
 # override it deterministically across query and cot sides.
 RAG_QUERY_HINT = (
-    'Summarize this query for retrieval. '
-    'The body of ## Summary MUST follow this EXACT 4-line template — '
-    'do NOT emit "Use when:", numbered procedure steps, or "Output:":\n'
-    'Topic: <specific pattern name — scope>\n'
-    'Problem: <what concrete problem is being asked>\n'
-    'Skill: <which specific method/technique/pattern is required to solve it>\n'
-    'Knowledge: <which domains/concepts/facts must be invoked>\n'
+    'Extract the abstract PROBLEM TYPE from this query. '
+    'IGNORE all specific numbers, values, variable names, and parameters — '
+    'focus ONLY on the CLASS of problem and the METHODOLOGY required. '
+    'The body of ## Summary MUST follow this EXACT 4-line template:\n'
+    'Topic: <problem class — mathematical/logical domain>\n'
+    'Problem: <what abstract TYPE of problem needs solving, no specific values>\n'
+    'Skill: <which general method/technique is required>\n'
+    'Knowledge: <which theoretical concepts/formulas must be invoked>\n'
     'Then emit the mandatory ## More section as usual. '
-    'Topic must name the specific pattern, never generic labels.')
+    'Topic must name the method class, never mention specific numbers.')
 RAG_THINKING_HINT = (
-    'Summarize this reasoning trace for retrieval. '
-    'The body of ## Summary MUST follow this EXACT 4-line template — '
-    'do NOT emit "Use when:", numbered procedure steps, or "Output:":\n'
-    'Topic: <specific pattern name — scope>\n'
-    'Problem: <what concrete problem this trace tackled>\n'
-    'Skill: <which specific method/technique/pattern was applied>\n'
-    'Knowledge: <which domains/concepts/facts were used>\n'
+    'Extract the abstract METHODOLOGY demonstrated in this solution. '
+    'IGNORE all specific numbers, values, and computed results — '
+    'focus ONLY on the general TECHNIQUE and key reasoning STEPS. '
+    'The body of ## Summary MUST follow this EXACT 4-line template:\n'
+    'Topic: <method/technique name — scope>\n'
+    'Problem: <what abstract type of problem this method solves>\n'
+    'Skill: <key steps of the methodology in abstract terms>\n'
+    'Knowledge: <theoretical basis and prerequisites>\n'
     'Then emit the mandatory ## More section as usual. '
-    'Topic must name the specific pattern, never generic labels.')
+    'Topic must name the method class, never mention specific numbers.')
 
 # OpenAI API fallback (used when vLLM truncates).
 COMPRESS_API_KEY = os.environ.get('COMPRESS_API_KEY', '')
@@ -501,8 +503,14 @@ def _resolve_compressed_multi(sampler: vLLMSampler, api: Optional[OpenAIClient],
     if not texts:
         return []
 
+    # Skip texts that would exceed the condenser's context window.
+    _max_input_chars = (CONDENSE_MAX_MODEL_LEN - CONDENSE_MAX_TOKENS) * 3
+    skip_mask = [len(t) > _max_input_chars for t in texts]
+
     # Build prompts per-item (each text gets its own hint as the query parameter).
-    prompts = [{'messages': _build_compress_messages(t, h)} for t, h in zip(texts, hints)]
+    prompts = [{'messages': _build_compress_messages(t, h)}
+               for t, h, skip in zip(texts, hints, skip_mask) if not skip]
+    active_indices = [i for i, skip in enumerate(skip_mask) if not skip]
     params = TwinkleSamplingParams(
         max_tokens=CONDENSE_MAX_TOKENS,
         temperature=COMPRESS_TEMPERATURE,
@@ -511,22 +519,23 @@ def _resolve_compressed_multi(sampler: vLLMSampler, api: Optional[OpenAIClient],
     )
 
     # Single vLLM batch call — the key throughput win.
-    responses = sampler.sample(prompts, params)
+    responses = sampler.sample(prompts, params) if prompts else []
 
     results: List[Optional[str]] = [None] * len(texts)
     fallback_indices: List[int] = []
-    for i, resp in enumerate(responses):
+    for resp_idx, orig_idx in enumerate(active_indices):
+        resp = responses[resp_idx]
         seq = resp.sequences[0] if resp and resp.sequences else None
         if seq is None:
-            fallback_indices.append(i)
+            fallback_indices.append(orig_idx)
             continue
         text = seq.decoded or ''
         text = re.sub(r'<\|[^|]+\|>', '', text).rstrip()
         text = _strip_outer_codefence(text)
         if seq.stop_reason != 'length' and not _is_truncated_compression(text):
-            results[i] = text
+            results[orig_idx] = text
         else:
-            fallback_indices.append(i)
+            fallback_indices.append(orig_idx)
 
     # Concurrent API fallback for failed items.
     if fallback_indices and api is not None:
@@ -1064,7 +1073,7 @@ def parse_args() -> argparse.Namespace:
                         'dataset_think (training mix), or both (50/50 mix).')
     p.add_argument('--limit', type=int, default=0,
                    help='Stop building once this many rows are kept (0 = no cap).')
-    p.add_argument('--max-rows', type=int, default=5000,
+    p.add_argument('--max-rows', type=int, default=0,
                    help='Truncate corpus to this many rows AFTER get_dataset (0 = no cap). '
                         'Use this instead of --total to avoid invalidating the dataset cache.')
     p.add_argument('--batch-size', type=int, default=128,
