@@ -73,7 +73,7 @@ ADV_CLIP = float(os.environ.get('ADV_CLIP', 2.0))
 DB_PATH = os.environ.get('DB_PATH', './output.oldemb/thinking_rag/lance.db')
 DB_TABLE = os.environ.get('DB_TABLE', 'thinking_traces')
 TOP_K = int(os.environ.get('TOP_K', 2))
-SIM_THRESHOLD = float(os.environ.get('SIM_THRESHOLD', 0.65))
+SIM_THRESHOLD = float(os.environ.get('SIM_THRESHOLD', 0.75))
 MAX_TRACE_LEN = int(os.environ.get('MAX_TRACE_LEN', 8192))
 EMBED_MODEL_ID = os.environ.get(
     'EMBED_MODEL_ID', 'output.oldemb/embedding_full_transformers/last-checkpoint')
@@ -218,6 +218,48 @@ def _wrap_anchor(text: str) -> List[Dict[str, str]]:
     ]
 
 
+_DECONTAM_JUDGE_PROMPT = (
+    'Are these two math problems essentially the SAME problem '
+    '(same mathematical question, possibly different notation/language)?\n'
+    'Problem A: {prob_a}\n'
+    'Problem B: {prob_b}\n'
+    'Answer only YES or NO.'
+)
+
+
+def _llm_judge_same_problem(
+    api_client, pairs: List[tuple],
+) -> List[bool]:
+    """Batch LLM judge: are (problem_a, problem_b) the same problem?
+
+    Each pair text is truncated to 200 chars to keep latency low.
+    Returns list of bools (True = same problem = should filter).
+    """
+    if not pairs or not api_client:
+        return [False] * len(pairs)
+
+    results = [False] * len(pairs)
+
+    def _judge_one(idx, pa, pb):
+        prompt = _DECONTAM_JUDGE_PROMPT.format(prob_a=pa, prob_b=pb)
+        msgs = [{'role': 'user', 'content': prompt}]
+        try:
+            trajectory = {'messages': msgs}
+            sp = SamplingParams(temperature=0.1, max_tokens=8)
+            reply = api_client(trajectory, sp, extra_body={'enable_thinking': False})
+            answer = (reply.get('content') or '').strip().upper()
+            return idx, 'YES' in answer
+        except Exception:
+            return idx, False
+
+    with ThreadPoolExecutor(max_workers=min(len(pairs), CONDENSE_API_CONCURRENCY)) as pool:
+        futs = [pool.submit(_judge_one, i, pa, pb) for i, (pa, pb) in enumerate(pairs)]
+        for fut in as_completed(futs):
+            idx, is_same = fut.result()
+            results[idx] = is_same
+    return results
+
+
 def get_embeddings(model: TransformersModel, template: Qwen3_5Template,
                    texts: List[str], dp_size: int) -> np.ndarray:
     if not texts:
@@ -310,10 +352,11 @@ class AoPSAccuracyReward(Reward):
     _MCQ_GT_RE = re.compile(
         r'^\\?(?:textbf|mathbf|text|mathrm)\{?\(?([A-E])[)}\s\\]*(.*)',
         re.DOTALL)
-    _MCQ_PAREN_RE = re.compile(r'^\(?([A-E])\)?[\s\\]+(.*)', re.DOTALL)
+    _MCQ_PAREN_RE = re.compile(r'^\(?([A-E])\)?[.:\s\\]+(.*)', re.DOTALL)
     _MCQ_SINGLE_LETTER_RE = re.compile(r'^[A-E]$')
-    # variable prefix: f(x)=..., m=..., N=..., P(n+1)=...
-    _VAR_PREFIX_RE = re.compile(r'^[a-zA-Z](?:\([^)]*\))?\s*=\s*(.+)', re.DOTALL)
+    # variable prefix: f(x)=..., m=..., N=..., P(n+1)=..., (x,y)=...
+    _VAR_PREFIX_RE = re.compile(
+        r'^(?:[a-zA-Z](?:\([^)]*\))?|\([^)]*\))\s*=\s*(.+)', re.DOTALL)
     # GT with derivation: "18×1+999×2=2016" → extract RHS
     _EQ_RHS_RE = re.compile(r'^.+=\s*(.+)$')
 
@@ -336,6 +379,8 @@ class AoPSAccuracyReward(Reward):
         s = re.sub(r'\\(?:left|right)[.()\[\]|]', '', s)
         s = s.replace(r'\dfrac', r'\frac')
         s = s.replace(r'\tfrac', r'\frac')
+        # \frac shorthand without braces: \frac ab → \frac{a}{b}
+        s = re.sub(r'\\frac([^{\\])([^{\\])', r'\\frac{\1}{\2}', s)
         s = s.strip('$').strip()
         # Remove trailing unit braces: {cm}, {kg}, etc.
         s = re.sub(r'\{[a-zA-Z]+\}$', '', s)
@@ -441,9 +486,36 @@ class AoPSAccuracyReward(Reward):
         return False
 
     @classmethod
+    def _strip_quantifiers(cls, s: str) -> str:
+        """Strip universal/existential quantifier wrappers."""
+        s = re.sub(r'^\\forall\s*\w+\s*\\in\s*\\mathbb\s*\{?[A-Z]\}?\s*[:,]\s*', '', s)
+        s = re.sub(r'\s*\(\\forall[^)]*\)\s*$', '', s)
+        s = re.sub(r'\s*\(for\s+all[^)]*\)\s*$', '', s, flags=re.IGNORECASE)
+        return s.strip()
+
+    @classmethod
+    def _try_param_rename(cls, a: str, b: str) -> bool:
+        """Check if a == b up to consistent single free-parameter rename (ax vs cx)."""
+        if not a or not b or len(a) != len(b) or len(a) > 80:
+            return False
+        diffs = [(i, a[i], b[i]) for i in range(len(a)) if a[i] != b[i]]
+        if not diffs:
+            return False
+        src_chars = set(d[1] for d in diffs)
+        dst_chars = set(d[2] for d in diffs)
+        if len(src_chars) == 1 and len(dst_chars) == 1:
+            src, dst = src_chars.pop(), dst_chars.pop()
+            if src.isalpha() and dst.isalpha():
+                return a.replace(src, dst) == b
+        return False
+
+    @classmethod
     def _normalize_tuple(cls, s: str) -> str:
         """Normalize tuple formatting: (2, 5, 609) → 2,5,609."""
-        return re.sub(r'[\s()\[\]]', '', s)
+        # Strip set-builder conditions: \mid ... or | ...
+        s = re.sub(r'\\mid.*$', '', s)
+        s = re.sub(r'\|[^,]*$', '', s)
+        return re.sub(r'[\s()\[\]{}\\]', '', s)
 
     @classmethod
     def _try_sympy_equal(cls, a: str, b: str) -> bool:
@@ -519,6 +591,11 @@ class AoPSAccuracyReward(Reward):
         tuple_r = cls._normalize_tuple(norm_r)
         if ',' in tuple_p and tuple_p == tuple_r:
             return True
+        if stripped_p and stripped_r:
+            tuple_sp = cls._normalize_tuple(stripped_p)
+            tuple_sr = cls._normalize_tuple(stripped_r)
+            if ',' in tuple_sp and tuple_sp == tuple_sr:
+                return True
 
         # --- Strategy 7: equation reorder (a+b=c vs c=a+b, or lhs=rhs swapped) ---
         if '=' in norm_r and '=' not in norm_p:
@@ -550,6 +627,22 @@ class AoPSAccuracyReward(Reward):
 
         # --- Strategy 9: sympy algebraic equivalence (optional, slow) ---
         if cls._try_sympy_equal(predicted, reference):
+            return True
+
+        # --- Strategy 9b: quantifier stripping + param rename ---
+        q_stripped_r = cls._strip_quantifiers(reference)
+        q_stripped_p = cls._strip_quantifiers(predicted)
+        if q_stripped_r != reference or q_stripped_p != predicted:
+            norm_qr = cls.normalize_answer(cls._strip_var_prefix(q_stripped_r))
+            norm_qp = cls.normalize_answer(cls._strip_var_prefix(q_stripped_p))
+            if norm_qr and norm_qp:
+                if norm_qr == norm_qp:
+                    return True
+                if cls._try_param_rename(norm_qr, norm_qp):
+                    return True
+
+        # --- Strategy 10: param rename on var-prefix-stripped forms ---
+        if stripped_p and stripped_r and cls._try_param_rename(stripped_p, stripped_r):
             return True
 
         return False
@@ -830,6 +923,28 @@ def main():
         # Embed & retrieve
         query_vecs = get_embeddings(emb_model, emb_template, problems, EMB_GPUS)
         retrieved = retrieve_topk(tbl, query_vecs, problems, SIM_THRESHOLD)
+
+        # LLM-based decontamination: judge ALL retrievals via API
+        if api_client:
+            judge_pairs = []  # (qi, ret_idx, prob_a, prob_b)
+            for qi, rets in enumerate(retrieved):
+                for ri, ret in enumerate(rets):
+                    judge_pairs.append((qi, ri, problems[qi], ret['query']))
+
+            if judge_pairs:
+                pairs_input = [(pa, pb) for _, _, pa, pb in judge_pairs]
+                verdicts = _llm_judge_same_problem(api_client, pairs_input)
+                to_remove = set()
+                for vi, (qi, ri, _, _) in enumerate(judge_pairs):
+                    if verdicts[vi]:
+                        to_remove.add((qi, ri))
+                if to_remove:
+                    logger.info(f'[decontam-llm] filtered {len(to_remove)} same-problem retrievals')
+                    for qi in range(len(retrieved)):
+                        retrieved[qi] = [
+                            ret for ri, ret in enumerate(retrieved[qi])
+                            if (qi, ri) not in to_remove
+                        ]
 
         # Condense (batch local vLLM + API fallback)
         condensed_examples: List[List[Dict[str, str]]] = [[] for _ in range(len(problems))]

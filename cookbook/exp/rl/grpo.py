@@ -101,9 +101,10 @@ class AoPSAccuracyReward(Reward):
     _MCQ_GT_RE = re.compile(
         r'^\\?(?:textbf|mathbf|text|mathrm)\{?\(?([A-E])[)}\s\\]*(.*)',
         re.DOTALL)
-    _MCQ_PAREN_RE = re.compile(r'^\(?([A-E])\)?[\s\\]+(.*)', re.DOTALL)
+    _MCQ_PAREN_RE = re.compile(r'^\(?([A-E])\)?[.:\s\\]+(.*)', re.DOTALL)
     _MCQ_SINGLE_LETTER_RE = re.compile(r'^[A-E]$')
-    _VAR_PREFIX_RE = re.compile(r'^[a-zA-Z](?:\([^)]*\))?\s*=\s*(.+)', re.DOTALL)
+    _VAR_PREFIX_RE = re.compile(
+        r'^(?:[a-zA-Z](?:\([^)]*\))?|\([^)]*\))\s*=\s*(.+)', re.DOTALL)
     _EQ_RHS_RE = re.compile(r'^.+=\s*(.+)$')
 
     @staticmethod
@@ -123,6 +124,8 @@ class AoPSAccuracyReward(Reward):
         s = re.sub(r'\\(?:left|right)[.()\[\]|]', '', s)
         s = s.replace(r'\dfrac', r'\frac')
         s = s.replace(r'\tfrac', r'\frac')
+        # \frac shorthand without braces: \frac ab → \frac{a}{b}
+        s = re.sub(r'\\frac([^{\\])([^{\\])', r'\\frac{\1}{\2}', s)
         s = s.strip('$').strip()
         s = re.sub(r'\{[a-zA-Z]+\}$', '', s)
         s = re.sub(r'\^\{\\circ\}|\^\\circ|°|\\circ', '', s)
@@ -216,8 +219,35 @@ class AoPSAccuracyReward(Reward):
         return False
 
     @classmethod
+    def _strip_quantifiers(cls, s: str) -> str:
+        """Strip universal/existential quantifier wrappers."""
+        s = re.sub(r'^\\forall\s*\w+\s*\\in\s*\\mathbb\s*\{?[A-Z]\}?\s*[:,]\s*', '', s)
+        s = re.sub(r'\s*\(\\forall[^)]*\)\s*$', '', s)
+        s = re.sub(r'\s*\(for\s+all[^)]*\)\s*$', '', s, flags=re.IGNORECASE)
+        return s.strip()
+
+    @classmethod
+    def _try_param_rename(cls, a: str, b: str) -> bool:
+        """Check if a == b up to consistent single free-parameter rename (ax vs cx)."""
+        if not a or not b or len(a) != len(b) or len(a) > 80:
+            return False
+        diffs = [(i, a[i], b[i]) for i in range(len(a)) if a[i] != b[i]]
+        if not diffs:
+            return False
+        src_chars = set(d[1] for d in diffs)
+        dst_chars = set(d[2] for d in diffs)
+        if len(src_chars) == 1 and len(dst_chars) == 1:
+            src, dst = src_chars.pop(), dst_chars.pop()
+            if src.isalpha() and dst.isalpha():
+                return a.replace(src, dst) == b
+        return False
+
+    @classmethod
     def _normalize_tuple(cls, s: str) -> str:
-        return re.sub(r'[\s()\[\]]', '', s)
+        # Strip set-builder conditions: \mid ... or | ...
+        s = re.sub(r'\\mid.*$', '', s)
+        s = re.sub(r'\|[^,]*$', '', s)
+        return re.sub(r'[\s()\[\]{}\\]', '', s)
 
     @classmethod
     def _try_sympy_equal(cls, a: str, b: str) -> bool:
@@ -277,6 +307,11 @@ class AoPSAccuracyReward(Reward):
         tuple_r = cls._normalize_tuple(norm_r)
         if ',' in tuple_p and tuple_p == tuple_r:
             return True
+        if stripped_p and stripped_r:
+            tuple_sp = cls._normalize_tuple(stripped_p)
+            tuple_sr = cls._normalize_tuple(stripped_r)
+            if ',' in tuple_sp and tuple_sp == tuple_sr:
+                return True
 
         if '=' in norm_r and '=' not in norm_p:
             parts = norm_r.split('=')
@@ -303,6 +338,22 @@ class AoPSAccuracyReward(Reward):
             return True
 
         if cls._try_sympy_equal(predicted, reference):
+            return True
+
+        # --- Strategy 9b: quantifier stripping + param rename ---
+        q_stripped_r = cls._strip_quantifiers(reference)
+        q_stripped_p = cls._strip_quantifiers(predicted)
+        if q_stripped_r != reference or q_stripped_p != predicted:
+            norm_qr = cls.normalize_answer(cls._strip_var_prefix(q_stripped_r))
+            norm_qp = cls.normalize_answer(cls._strip_var_prefix(q_stripped_p))
+            if norm_qr and norm_qp:
+                if norm_qr == norm_qp:
+                    return True
+                if cls._try_param_rename(norm_qr, norm_qp):
+                    return True
+
+        # --- Strategy 10: param rename on var-prefix-stripped forms ---
+        if stripped_p and stripped_r and cls._try_param_rename(stripped_p, stripped_r):
             return True
 
         return False
