@@ -43,8 +43,8 @@ logger = get_logger()
 MODEL_ID = os.environ.get('MODEL_ID', 'ms://Qwen/Qwen3.5-4B')
 
 # GPU layout: 4 rollout + 4 train = 8
-SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS', 4))
-MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 4))
+SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS', 2))
+MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 6))
 NUM_GPUS = SAMPLER_GPUS + MODEL_GPUS
 
 # Training hyperparams
@@ -445,7 +445,7 @@ def main():
                     device_type='GPU'),
     ]
 
-    model_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, fsdp_size=MODEL_GPUS, ulysses_size=2)
+    model_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, fsdp_size=MODEL_GPUS, ulysses_size=MODEL_GPUS)
     sampler_mesh = DeviceMesh.from_sizes(world_size=SAMPLER_GPUS, tp_size=SAMPLER_GPUS)
 
     twinkle.initialize(mode='ray', nproc_per_node=NUM_GPUS,
@@ -456,7 +456,7 @@ def main():
         model_id=MODEL_ID, device_mesh=model_mesh, remote_group='model')
     model.set_optimizer('AdamW', lr=LEARNING_RATE)
     model.set_lr_scheduler('CosineAnnealingLR', T_max=MAX_STEPS, eta_min=0)
-    model.set_loss('GRPOLoss', epsilon=0.2, beta=0.04)
+    model.set_loss('GSPOLoss', epsilon=0.2, epsilon_high=0.28, beta=0.0)
     model.set_processor(InputProcessor)
     model.set_template('Qwen3_5Template', model_id=MODEL_ID,
                        enable_thinking=True, max_length=32768)
