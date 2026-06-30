@@ -43,8 +43,8 @@ logger = get_logger()
 MODEL_ID = os.environ.get('MODEL_ID', 'ms://Qwen/Qwen3.5-4B')
 
 # GPU layout: 4 rollout + 4 train = 8
-SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS', 2))
-MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 6))
+SAMPLER_GPUS = int(os.environ.get('SAMPLER_GPUS', 4))
+MODEL_GPUS = int(os.environ.get('MODEL_GPUS', 4))
 NUM_GPUS = SAMPLER_GPUS + MODEL_GPUS
 
 # Training hyperparams
@@ -445,7 +445,7 @@ def main():
                     device_type='GPU'),
     ]
 
-    model_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, fsdp_size=MODEL_GPUS, ulysses_size=MODEL_GPUS)
+    model_mesh = DeviceMesh.from_sizes(world_size=MODEL_GPUS, fsdp_size=MODEL_GPUS, ulysses_size=4)
     sampler_mesh = DeviceMesh.from_sizes(world_size=SAMPLER_GPUS, tp_size=SAMPLER_GPUS)
 
     twinkle.initialize(mode='ray', nproc_per_node=NUM_GPUS,
@@ -643,14 +643,19 @@ def main():
             filtered_old_logps.extend(all_old_logps[g_start:g_end])
             filtered_advantages.extend(grp_adv)
 
-        # Mini-batch training
+        # Mini-batch training with gradient accumulation
+        # Process MICRO_BATCH_SIZE samples per forward, accumulate grad_accum_steps
+        # times before one optimizer step. clip_grad_norm normalizes by accumulated
+        # num_tokens, ensuring mathematical equivalence with larger batch forward.
         total_completions = len(filtered_inputs)
         if total_completions == 0:
             logger.info(f'[Step {optim_step}] all groups filtered (uniform rewards), skip training')
             continue
 
-        for mb_start in range(0, total_completions, MINI_BATCH_SIZE):
-            mb_end = min(mb_start + MINI_BATCH_SIZE, total_completions)
+        grad_accum_steps = MINI_BATCH_SIZE // MICRO_BATCH_SIZE
+        accum_count = 0
+        for mb_start in range(0, total_completions, MICRO_BATCH_SIZE):
+            mb_end = min(mb_start + MICRO_BATCH_SIZE, total_completions)
             mb_inputs = filtered_inputs[mb_start:mb_end]
             mb_old_logps = filtered_old_logps[mb_start:mb_end]
             mb_advantages = filtered_advantages[mb_start:mb_end]
@@ -660,15 +665,22 @@ def main():
                 old_logps=mb_old_logps,
                 ref_logps=mb_old_logps,
                 advantages=mb_advantages,
-                micro_batch_size=MICRO_BATCH_SIZE,
             )
+            accum_count += 1
+
+            if accum_count % grad_accum_steps == 0:
+                model.clip_grad_and_step()
+                optim_step += 1
+
+                if optim_step >= MAX_STEPS:
+                    break
+                if optim_step % SAVE_STEPS == 0:
+                    model.save(f'grpo-checkpoint-{optim_step}')
+
+        # Flush remaining accumulated gradients (incomplete window at tail)
+        if accum_count % grad_accum_steps != 0:
             model.clip_grad_and_step()
             optim_step += 1
-
-            if optim_step >= MAX_STEPS:
-                break
-            if optim_step % SAVE_STEPS == 0:
-                model.save(f'grpo-checkpoint-{optim_step}')
 
         log_dict = metrics.calculate()
         log_dict.update(model.calculate_metric(is_training=True))
