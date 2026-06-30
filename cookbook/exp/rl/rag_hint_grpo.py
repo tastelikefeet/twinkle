@@ -1072,13 +1072,18 @@ def main():
 
             rag_log_f.flush()
 
-            # ---- Filter out all-same reward problem groups (no gradient signal) ----
+            # ---- Filter out low-signal problem groups (DAPO-style dynamic sampling) ----
+            # Skip groups where accuracy is too low (<0.1) or too high (>0.9)
+            # to avoid gradient dominated by gibberish/format noise or no learning signal.
             filtered_inputs, filtered_old_logps, filtered_advantages = [], [], []
             for g in range(BATCH_SIZE):
                 g_start = g * NUM_GENERATIONS
                 g_end = g_start + NUM_GENERATIONS
                 grp_adv = advantages[g_start:g_end]
                 if all(abs(a) < 1e-8 for a in grp_adv):
+                    continue
+                grp_acc_rate = sum(accuracy_rewards[g_start:g_end]) / NUM_GENERATIONS
+                if grp_acc_rate < 0.1 or grp_acc_rate > 0.9:
                     continue
                 filtered_inputs.extend(all_input_data[g_start:g_end])
                 filtered_old_logps.extend(all_old_logps[g_start:g_end])
