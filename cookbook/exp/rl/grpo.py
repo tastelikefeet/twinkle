@@ -507,7 +507,7 @@ def main():
         model_id=MODEL_ID, device_mesh=model_mesh, remote_group='model')
     model.set_optimizer('AdamW', lr=LEARNING_RATE)
     model.set_lr_scheduler('CosineAnnealingLR', T_max=MAX_STEPS, eta_min=0)
-    model.set_loss('GSPOLoss', epsilon=0.2, epsilon_high=0.28, beta=0.0)
+    model.set_loss('GSPOLoss', epsilon=0.2, epsilon_high=0.28, beta=0.04)
     model.set_processor(InputProcessor)
     model.set_template('Qwen3_5Template', model_id=MODEL_ID,
                        enable_thinking=True, max_length=32768)

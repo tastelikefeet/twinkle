@@ -219,8 +219,11 @@ def _wrap_anchor(text: str) -> List[Dict[str, str]]:
 
 
 _DECONTAM_JUDGE_PROMPT = (
-    'Are these two math problems essentially the SAME problem '
-    '(same mathematical question, possibly different notation/language)?\n'
+    'We are building a RAG-augmented math training system. Problem A is the test '
+    'question; Problem B was retrieved from a knowledge base. If B is essentially '
+    'the same problem as A (same core math, just different wording/notation/format/'
+    'negation/numeric values), showing B\'s solution would leak the answer to A.\n'
+    'Would using B\'s solution constitute answer leakage for A?\n'
     'Problem A: {prob_a}\n'
     'Problem B: {prob_b}\n'
     'Answer only YES or NO.'
@@ -808,7 +811,7 @@ def main():
         model_id=MODEL_ID, device_mesh=model_mesh, remote_group='model')
     model.set_optimizer('AdamW', lr=LEARNING_RATE)
     model.set_lr_scheduler('CosineAnnealingLR', T_max=MAX_STEPS, eta_min=0)
-    model.set_loss('GSPOLoss', epsilon=0.2, epsilon_high=0.28, beta=0.0)
+    model.set_loss('GSPOLoss', epsilon=0.2, epsilon_high=0.28, beta=0.04)
     model.set_processor(InputProcessor)
     model.set_template('Qwen3_5Template', model_id=MODEL_ID,
                        enable_thinking=True, max_length=32768)
@@ -923,6 +926,7 @@ def main():
         # Embed & retrieve
         query_vecs = get_embeddings(emb_model, emb_template, problems, EMB_GPUS)
         retrieved = retrieve_topk(tbl, query_vecs, problems, SIM_THRESHOLD)
+        raw_retrieved_counts = [len(r) for r in retrieved]
 
         # LLM-based decontamination: judge ALL retrievals via API
         if api_client:
@@ -1033,6 +1037,7 @@ def main():
                 'problem': prob[:200],
                 'ground_truth': ground_truths[i],
                 'best_sim': round(best_sim, 4),
+                'num_raw_retrieved': raw_retrieved_counts[i],
                 'num_retrieved': len(rets),
                 'num_condensed': len(examples),
                 'use_rag': use_rag,
