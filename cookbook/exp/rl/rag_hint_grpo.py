@@ -220,10 +220,13 @@ def _wrap_anchor(text: str) -> List[Dict[str, str]]:
 
 _DECONTAM_JUDGE_PROMPT = (
     'We are building a RAG-augmented math training system. Problem A is the test '
-    'question; Problem B was retrieved from a knowledge base. If B is essentially '
-    'the same problem as A (same core math, just different wording/notation/format/'
-    'negation/numeric values), showing B\'s solution would leak the answer to A.\n'
-    'Would using B\'s solution constitute answer leakage for A?\n'
+    'question; Problem B was retrieved from a knowledge base.\n'
+    'Answer YES only if A and B are essentially the SAME specific problem — '
+    'i.e. solving B directly gives you A\'s answer (just different wording/notation/'
+    'format/negation).\n'
+    'Answer NO if they merely share the same method/topic but have different '
+    'specific values, equations, or geometric configurations — learning B\'s '
+    'approach still requires independent work to solve A.\n'
     'Problem A: {prob_a}\n'
     'Problem B: {prob_b}\n'
     'Answer only YES or NO.'
